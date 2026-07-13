@@ -11,11 +11,14 @@ from typing import Callable, List, Optional
 
 
 def _find_cli() -> Path:
-    """查找 media_cli.exe"""
+    """查找 media_cli.exe（优先 x64，其次 Win32）"""
     root = Path(__file__).resolve().parent.parent.parent.parent
     candidates = [
+        root / "build_x64" / "bin" / "Release" / "media_cli.exe",
+        root / "build_x64" / "bin" / "Debug" / "media_cli.exe",
         root / "build" / "bin" / "Release" / "media_cli.exe",
         root / "build" / "bin" / "Debug" / "media_cli.exe",
+        Path.cwd() / "build_x64" / "bin" / "Release" / "media_cli.exe",
         Path.cwd() / "build" / "bin" / "Release" / "media_cli.exe",
         Path.cwd() / "media_cli.exe",
         Path(__file__).resolve().parent.parent / "media_cli.exe",
@@ -24,7 +27,7 @@ def _find_cli() -> Path:
         if p.exists():
             return p
     raise FileNotFoundError(
-        "未找到 media_cli.exe，请先运行 .\\build.bat 编译 C++ 核心库"
+        "未找到 media_cli.exe，请先运行 .\\build_x64.bat 或 .\\build.bat 编译 C++ 核心库"
     )
 
 

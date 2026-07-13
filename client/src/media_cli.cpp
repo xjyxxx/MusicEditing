@@ -151,7 +151,28 @@ static int cmdAnalyzeSpeech(int argc, char* argv[]) {
 }
 #endif
 
-int main(int argc, char* argv[]) {
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <vector>
+
+static std::string wideToUtf8(const wchar_t* wstr) {
+    if (!wstr || !*wstr) return {};
+    const int len = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return {};
+    std::string out(static_cast<size_t>(len - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wstr, -1, out.data(), len, nullptr, nullptr);
+    return out;
+}
+
+static int runCli(int argc, char* argv[]);
+#else
+static int runCli(int argc, char* argv[]);
+#endif
+
+static int runCli(int argc, char* argv[]) {
     if (argc < 2) {
         printUsage();
         return 1;
@@ -188,3 +209,23 @@ int main(int argc, char* argv[]) {
     printUsage();
     return 1;
 }
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t* argv[]) {
+    std::vector<std::string> utf8Args;
+    utf8Args.reserve(static_cast<size_t>(argc));
+    for (int i = 0; i < argc; ++i) {
+        utf8Args.push_back(wideToUtf8(argv[i]));
+    }
+    std::vector<char*> ptrs;
+    ptrs.reserve(utf8Args.size());
+    for (auto& s : utf8Args) {
+        ptrs.push_back(s.data());
+    }
+    return runCli(static_cast<int>(ptrs.size()), ptrs.data());
+}
+#else
+int main(int argc, char* argv[]) {
+    return runCli(argc, argv);
+}
+#endif
