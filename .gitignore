@@ -23,8 +23,8 @@ venv/
 *.suo
 *.sln.docstates
 
-# Cursor 本地会话缓存（保留 .cursor/skills 等规则文件）
-.cursor/projects/
+# Cursor IDE 本地配置（skills、会话缓存等，不上传 GitHub）
+.cursor/
 
 # 日志与临时文件
 docs/log_*.txt
