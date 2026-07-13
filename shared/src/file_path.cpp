@@ -9,6 +9,15 @@
 
 namespace media::common {
 
+std::wstring utf8PathToWide(const std::string& utf8Path) {
+    if (utf8Path.empty()) return {};
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8Path.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) return {};
+    std::wstring wpath(static_cast<size_t>(wlen - 1), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8Path.c_str(), -1, wpath.data(), wlen);
+    return wpath;
+}
+
 std::string pathUtf8ToNative(const std::string& utf8Path) {
 #ifdef _WIN32
     if (utf8Path.empty()) return utf8Path;

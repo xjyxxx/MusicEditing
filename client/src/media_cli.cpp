@@ -5,9 +5,12 @@
 #include "core/highlight_analyzer.h"
 #endif
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
+#include <vector>
 
 static void printUsage() {
     printf("用法:\n");
@@ -17,6 +20,10 @@ static void printUsage() {
 #ifdef MUSIC_HAS_LLAMA
     printf("  media_cli extract-audio <视频路径> <输出wav>\n");
     printf("  media_cli analyze-speech <transcript.json> <model.gguf> <场景> <最短秒> <最长秒> <敏感度0-1>\n");
+#endif
+#if defined(MUSIC_HAS_ONNXRUNTIME) && defined(MUSIC_HAS_OPENCV)
+    printf("  media_cli watermark-inpaint <model.onnx> <输入图> <输出图> <x> <y> <w> <h> [x2 y2 w2 h2 ...]\n");
+    printf("  media_cli watermark-inpaint-frames <model.onnx> <输入帧目录> <输出帧目录> <x> <y> <w> <h> [x2 y2 w2 h2 ...]\n");
 #endif
 }
 
@@ -151,6 +158,139 @@ static int cmdAnalyzeSpeech(int argc, char* argv[]) {
 }
 #endif
 
+#if defined(MUSIC_HAS_ONNXRUNTIME) && defined(MUSIC_HAS_OPENCV)
+static void printWatermarkError(int code) {
+    const char* detail = media_engine_last_error();
+    if (detail && *detail) {
+        fprintf(stderr, "WATERMARK_ERROR:%d:%s\n", code, detail);
+    } else {
+        fprintf(stderr, "WATERMARK_ERROR:%d\n", code);
+    }
+    fflush(stderr);
+}
+
+static int cmdWatermarkInpaint(int argc, char* argv[]) {
+    if (argc < 9 || ((argc - 5) % 4) != 0) {
+        printUsage();
+        return 1;
+    }
+
+    media_engine_init();
+
+    int ret = media_watermark_load_model(argv[2]);
+    if (ret != 0) {
+        printWatermarkError(ret);
+        media_engine_shutdown();
+        return ret;
+    }
+    fprintf(stderr, "WATERMARK_BACKEND:%s\n",
+        media_watermark_uses_opencv_fallback() ? "opencv" : "lama");
+
+    const int numRegions = (argc - 5) / 4;
+    std::vector<int> regions(static_cast<size_t>(numRegions * 4));
+    for (int i = 0; i < numRegions; ++i) {
+        regions[static_cast<size_t>(i * 4 + 0)] = atoi(argv[5 + i * 4]);
+        regions[static_cast<size_t>(i * 4 + 1)] = atoi(argv[5 + i * 4 + 1]);
+        regions[static_cast<size_t>(i * 4 + 2)] = atoi(argv[5 + i * 4 + 2]);
+        regions[static_cast<size_t>(i * 4 + 3)] = atoi(argv[5 + i * 4 + 3]);
+    }
+    ret = media_watermark_inpaint_image(argv[3], argv[4], regions.data(), numRegions);
+    if (ret != 0) {
+        printWatermarkError(ret);
+        media_engine_shutdown();
+        return ret;
+    }
+
+    printf("WATERMARK_OK\n");
+    printf("output=%s\n", argv[4]);
+    media_engine_shutdown();
+    return 0;
+}
+
+static std::vector<std::string> collectPngFrames(const char* dirPath) {
+    namespace fs = std::filesystem;
+    std::vector<std::string> files;
+    std::error_code ec;
+    if (!fs::is_directory(dirPath, ec)) {
+        return files;
+    }
+    for (const auto& entry : fs::directory_iterator(dirPath, ec)) {
+        if (ec || !entry.is_regular_file()) continue;
+        const auto ext = entry.path().extension().string();
+        if (ext == ".png" || ext == ".PNG") {
+            files.push_back(entry.path().string());
+        }
+    }
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+static int cmdWatermarkInpaintFrames(int argc, char* argv[]) {
+    if (argc < 9 || ((argc - 5) % 4) != 0) {
+        printUsage();
+        return 1;
+    }
+
+    const char* modelPath = argv[2];
+    const char* inDir = argv[3];
+    const char* outDir = argv[4];
+
+    std::error_code ec;
+    std::filesystem::create_directories(outDir, ec);
+
+    auto frameFiles = collectPngFrames(inDir);
+    if (frameFiles.empty()) {
+        fprintf(stderr, "WATERMARK_ERROR:no_frames\n");
+        return -3;
+    }
+
+    media_engine_init();
+
+    int ret = media_watermark_load_model(modelPath);
+    if (ret != 0) {
+        printWatermarkError(ret);
+        media_engine_shutdown();
+        return ret;
+    }
+    fprintf(stderr, "WATERMARK_BACKEND:%s\n",
+        media_watermark_uses_opencv_fallback() ? "opencv" : "lama");
+
+    const int numRegions = (argc - 5) / 4;
+    std::vector<int> regions(static_cast<size_t>(numRegions * 4));
+    for (int i = 0; i < numRegions; ++i) {
+        regions[static_cast<size_t>(i * 4 + 0)] = atoi(argv[5 + i * 4]);
+        regions[static_cast<size_t>(i * 4 + 1)] = atoi(argv[5 + i * 4 + 1]);
+        regions[static_cast<size_t>(i * 4 + 2)] = atoi(argv[5 + i * 4 + 2]);
+        regions[static_cast<size_t>(i * 4 + 3)] = atoi(argv[5 + i * 4 + 3]);
+    }
+
+    const int total = static_cast<int>(frameFiles.size());
+    for (int i = 0; i < total; ++i) {
+        const std::string& inPath = frameFiles[static_cast<size_t>(i)];
+        const std::string outPath =
+            (std::filesystem::path(outDir) / std::filesystem::path(inPath).filename()).string();
+
+        ret = media_watermark_inpaint_image(
+            inPath.c_str(), outPath.c_str(), regions.data(), numRegions);
+        if (ret != 0) {
+            printWatermarkError(ret);
+            fprintf(stderr, "frame=%s\n", inPath.c_str());
+            fflush(stderr);
+            media_engine_shutdown();
+            return ret;
+        }
+
+        printf("PROGRESS:%d:%d\n", i + 1, total);
+        fflush(stdout);
+    }
+
+    printf("WATERMARK_FRAMES_OK\n");
+    printf("count=%d\n", total);
+    media_engine_shutdown();
+    return 0;
+}
+#endif
+
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -203,6 +343,16 @@ static int runCli(int argc, char* argv[]) {
 
     if (strcmp(cmd, "analyze-speech") == 0) {
         return cmdAnalyzeSpeech(argc, argv);
+    }
+#endif
+
+#if defined(MUSIC_HAS_ONNXRUNTIME) && defined(MUSIC_HAS_OPENCV)
+    if (strcmp(cmd, "watermark-inpaint") == 0) {
+        return cmdWatermarkInpaint(argc, argv);
+    }
+
+    if (strcmp(cmd, "watermark-inpaint-frames") == 0) {
+        return cmdWatermarkInpaintFrames(argc, argv);
     }
 #endif
 

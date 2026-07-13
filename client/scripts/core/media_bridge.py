@@ -5,9 +5,13 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
+import glob
+import shutil
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 
 def _find_cli() -> Path:
@@ -29,6 +33,75 @@ def _find_cli() -> Path:
     raise FileNotFoundError(
         "未找到 media_cli.exe，请先运行 .\\build_x64.bat 或 .\\build.bat 编译 C++ 核心库"
     )
+
+
+def _find_ffmpeg() -> Path:
+    root = Path(__file__).resolve().parent.parent.parent.parent
+    candidates = [
+        root / "third_party" / "ffmpeg" / "x64" / "bin" / "ffmpeg.exe",
+        root / "third_party" / "ffmpeg" / "x86" / "bin" / "ffmpeg.exe",
+        root / "build_x64" / "bin" / "Release" / "ffmpeg.exe",
+        root / "build" / "bin" / "Release" / "ffmpeg.exe",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    found = shutil.which("ffmpeg")
+    if found:
+        return Path(found)
+    raise FileNotFoundError("未找到 ffmpeg.exe")
+
+
+def _video_encoder_args() -> list[str]:
+    """捆绑 FFmpeg 无 libx264 时，Windows 使用 Media Foundation H.264。"""
+    if sys.platform == "win32":
+        return ["-c:v", "h264_mf", "-pix_fmt", "yuv420p"]
+    return ["-c:v", "libx264", "-pix_fmt", "yuv420p"]
+
+
+def _format_exit_code(code: int) -> str:
+    unsigned = code & 0xFFFFFFFF
+    if unsigned >= 0x80000000:
+        known = {
+            0xC0000005: "访问冲突（推理阶段崩溃）",
+            0xC0000409: "堆损坏",
+            0xC000001D: "非法指令",
+        }
+        label = known.get(unsigned, "进程异常退出")
+        return f"0x{unsigned:08X} ({label})"
+    return str(code)
+
+
+def _extract_cli_errors(stderr: str) -> list[str]:
+    errors: list[str] = []
+    for line in stderr.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        if text.startswith((
+            "PROBE_ERROR", "ITERATE_ERROR", "EXTRACT_AUDIO_ERROR",
+            "ANALYZE_SPEECH_ERROR", "WATERMARK_ERROR",
+        )):
+            errors.append(text)
+        elif "] ERROR " in text:
+            errors.append(text.split("] ERROR ", 1)[-1].strip())
+    return errors
+
+
+def _format_cli_failure(stdout: str, stderr: str, returncode: int) -> str:
+    if "WATERMARK_OK" in stdout or "WATERMARK_FRAMES_OK" in stdout:
+        return ""
+    errors = _extract_cli_errors(stderr)
+    if errors:
+        return errors[-1]
+    backend = "lama" if "WATERMARK_BACKEND:lama" in stderr else ""
+    if backend and "WATERMARK_BACKEND:lama" in stderr:
+        return (
+            f"LaMa 推理失败（退出码 {_format_exit_code(returncode)}）。"
+            "请缩小水印区域或缩短视频时间段后重试；若仍失败请重启 UI。"
+        )
+    tail = stderr.strip() or stdout.strip() or f"exit code {returncode}"
+    return f"media_cli 失败 ({_format_exit_code(returncode)}): {tail}"
 
 
 @dataclass
@@ -87,12 +160,16 @@ class MediaBridge:
         if result.stderr:
             for line in result.stderr.splitlines():
                 if line.startswith(("PROBE_ERROR", "ITERATE_ERROR",
-                                    "EXTRACT_AUDIO_ERROR", "ANALYZE_SPEECH_ERROR")):
-                    raise RuntimeError(line)
+                                    "EXTRACT_AUDIO_ERROR", "ANALYZE_SPEECH_ERROR",
+                                    "WATERMARK_ERROR")):
+                    raise RuntimeError(line.strip())
 
         if result.returncode != 0:
-            err = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
-            raise RuntimeError(f"media_cli 失败: {err}")
+            if "WATERMARK_OK" in result.stdout or "WATERMARK_FRAMES_OK" in result.stdout:
+                return result.stdout
+            raise RuntimeError(_format_cli_failure(
+                result.stdout, result.stderr, result.returncode,
+            ))
 
         return result.stdout
 
@@ -200,6 +277,232 @@ class MediaBridge:
                         llm_used=llm_used,
                     ))
         return results
+
+    @property
+    def watermark_available(self) -> bool:
+        return (self._cli.parent / "onnxruntime.dll").exists()
+
+    def watermark_inpaint_image(
+        self,
+        model_path: str,
+        input_path: str,
+        output_path: str,
+        regions: List[Tuple[int, int, int, int]],
+        timeout: Optional[int] = 600,
+    ) -> str:
+        if not regions:
+            raise ValueError("请至少框选一个水印区域")
+        args = ["watermark-inpaint", model_path, input_path, output_path]
+        for x, y, w, h in regions:
+            args.extend([str(x), str(y), str(w), str(h)])
+        out = self._run(args, timeout=timeout)
+        if "WATERMARK_OK" not in out:
+            raise RuntimeError(f"去水印失败: {out}")
+        for line in out.splitlines():
+            if line.startswith("output="):
+                return line.split("=", 1)[1].strip()
+        return output_path
+
+    def watermark_inpaint_frames(
+        self,
+        model_path: str,
+        frames_in_dir: str,
+        frames_out_dir: str,
+        regions: List[Tuple[int, int, int, int]],
+        on_progress: Optional[Callable[[int, int], None]] = None,
+        timeout: Optional[int] = 600,
+    ) -> int:
+        """一次加载模型，批量处理目录内 PNG 帧。返回处理帧数。"""
+        if not regions:
+            raise ValueError("请至少框选一个水印区域")
+        args = ["watermark-inpaint-frames", model_path, frames_in_dir, frames_out_dir]
+        for x, y, w, h in regions:
+            args.extend([str(x), str(y), str(w), str(h)])
+
+        cmd = [str(self._cli)] + args
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=self._env,
+            cwd=str(self._cli.parent),
+        )
+
+        assert proc.stdout is not None
+        count = 0
+        stderr_lines: list[str] = []
+
+        def drain_stderr():
+            assert proc.stderr is not None
+            for line in proc.stderr:
+                stderr_lines.append(line.rstrip("\n"))
+
+        t = threading.Thread(target=drain_stderr, daemon=True)
+        t.start()
+
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if line.startswith("PROGRESS:"):
+                    parts = line.split(":")
+                    if len(parts) >= 3:
+                        cur = int(parts[1])
+                        total = int(parts[2])
+                        if on_progress:
+                            on_progress(cur, total)
+                elif line.startswith("count="):
+                    count = int(line.split("=", 1)[1])
+        finally:
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                raise RuntimeError(f"批量去水印超时: {' '.join(cmd)}") from None
+            t.join(timeout=5)
+
+        if proc.returncode != 0:
+            detail = "\n".join(stderr_lines).strip()
+            fail = _format_cli_failure("", detail, proc.returncode or -1)
+            for ln in stderr_lines:
+                if ln.startswith("WATERMARK_ERROR"):
+                    raise RuntimeError(ln if not fail else fail)
+            raise RuntimeError(fail or detail or f"批量去水印失败 exit {proc.returncode}")
+
+        if count <= 0:
+            raise RuntimeError("批量去水印未返回帧数")
+        return count
+
+    def extract_video_frame(
+        self,
+        video_path: str,
+        timestamp_sec: float,
+        output_png: str,
+    ) -> None:
+        ffmpeg = _find_ffmpeg()
+        cmd = [
+            str(ffmpeg), "-y",
+            "-ss", f"{max(0.0, timestamp_sec):.3f}",
+            "-i", video_path,
+            "-vframes", "1",
+            output_png,
+        ]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", env=self._env,
+        )
+        if result.returncode != 0 or not os.path.isfile(output_png):
+            err = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(f"提取预览帧失败: {err}")
+
+    def watermark_inpaint_video(
+        self,
+        model_path: str,
+        input_path: str,
+        output_path: str,
+        regions: List[Tuple[int, int, int, int]],
+        fps: float,
+        start_sec: float = 0.0,
+        end_sec: float = 0.0,
+        max_frames: int = 0,
+        on_progress: Optional[Callable[[float, str], None]] = None,
+    ) -> str:
+        if not regions:
+            raise ValueError("请至少框选一个水印区域")
+        if fps <= 0:
+            fps = 25.0
+
+        ffmpeg = _find_ffmpeg()
+        tmp = tempfile.mkdtemp(prefix="music_wm_")
+        frames_in = os.path.join(tmp, "in")
+        frames_out = os.path.join(tmp, "out")
+        os.makedirs(frames_in)
+        os.makedirs(frames_out)
+
+        def report(p: float, msg: str):
+            if on_progress:
+                on_progress(p, msg)
+
+        try:
+            report(2.0, "正在提取视频帧…")
+            extract_cmd = [str(ffmpeg), "-y"]
+            if start_sec > 0:
+                extract_cmd.extend(["-ss", f"{start_sec:.3f}"])
+            extract_cmd.extend(["-i", input_path])
+            if end_sec > start_sec > 0:
+                extract_cmd.extend(["-to", f"{end_sec:.3f}"])
+            elif end_sec > 0:
+                extract_cmd.extend(["-to", f"{end_sec:.3f}"])
+            if max_frames > 0:
+                extract_cmd.extend(["-vframes", str(max_frames)])
+            extract_cmd.extend([
+                "-vsync", "0",
+                os.path.join(frames_in, "frame_%06d.png"),
+            ])
+            result = subprocess.run(
+                extract_cmd, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", env=self._env,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or "帧提取失败")
+
+            frame_files = sorted(glob.glob(os.path.join(frames_in, "*.png")))
+            if not frame_files:
+                raise RuntimeError("未提取到任何视频帧")
+
+            total = len(frame_files)
+            report(8.0, f"共 {total} 帧，LaMa 修复中…")
+
+            def on_frame(cur: int, frame_total: int):
+                pct = 8.0 + cur / frame_total * 82.0
+                report(pct, f"处理帧 {cur}/{frame_total}")
+
+            self.watermark_inpaint_frames(
+                model_path, frames_in, frames_out, regions,
+                on_progress=on_frame,
+                timeout=max(600, total * 120),
+            )
+
+            silent_mp4 = os.path.join(tmp, "silent.mp4")
+            report(92.0, "正在编码视频…")
+            encode_cmd = [
+                str(ffmpeg), "-y",
+                "-framerate", f"{fps:.3f}",
+                "-i", os.path.join(frames_out, "frame_%06d.png"),
+                *_video_encoder_args(),
+                silent_mp4,
+            ]
+            result = subprocess.run(
+                encode_cmd, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", env=self._env,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or "视频编码失败")
+
+            report(96.0, "正在合并音频…")
+            mux_cmd = [
+                str(ffmpeg), "-y",
+                "-i", silent_mp4,
+                "-i", input_path,
+                "-map", "0:v:0",
+                "-map", "1:a:0?",
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-shortest",
+                output_path,
+            ]
+            result = subprocess.run(
+                mux_cmd, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", env=self._env,
+            )
+            if result.returncode != 0 or not os.path.isfile(output_path):
+                shutil.copy2(silent_mp4, output_path)
+            report(100.0, "完成")
+            return output_path
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def shutdown(self):
         pass

@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui.video_player import VideoPlayerWidget
+from ui.watermark_page import WatermarkPage
 from viewmodels.main_vm import MainViewModel
 
 
@@ -308,8 +309,8 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(SlicePage(self._vm), "智能切片")
         self._tabs.addTab(PlaceholderPage("画质增强 / 4K 超分",
             "支持 1080P→4K 超分、基础修复、老旧视频修复。付费功能待授权解锁。"), "画质增强")
-        self._tabs.addTab(PlaceholderPage("一键去水印",
-            "支持矩形/多区域框选水印，时间段水印去除。AI 修复预览待实现。"), "去水印")
+        self._watermark_page = WatermarkPage(self._vm)
+        self._tabs.addTab(self._watermark_page, "去水印")
         self._tabs.addTab(PlaceholderPage("个人中心",
             "卡密兑换、版本更新、关于软件。"), "个人中心")
         main_layout.addWidget(self._tabs)

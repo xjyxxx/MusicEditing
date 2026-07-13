@@ -3,6 +3,10 @@
 
 #include "common/logger.h"
 
+#if defined(MUSIC_HAS_ONNXRUNTIME) && defined(MUSIC_HAS_OPENCV)
+#include "core/watermark_inpainter.h"
+#endif
+
 #define __STDC_CONSTANT_MACROS
 #ifdef _WIN32
 extern "C" {
@@ -23,6 +27,10 @@ namespace {
         g_lastError = msg;
         LOG_ERROR(msg);
     }
+
+#if defined(MUSIC_HAS_ONNXRUNTIME) && defined(MUSIC_HAS_OPENCV)
+    media::core::WatermarkInpainter g_watermarkInpainter;
+#endif
 }
 
 extern "C" {
@@ -38,7 +46,14 @@ int media_engine_init() {
 
 void media_engine_shutdown() {
     std::lock_guard<std::mutex> lock(g_engineMutex);
+#if defined(MUSIC_HAS_ONNXRUNTIME) && defined(MUSIC_HAS_OPENCV)
+    g_watermarkInpainter.unload();
+#endif
     g_initialized = false;
+}
+
+const char* media_engine_last_error() {
+    return g_lastError.c_str();
 }
 
 const char* media_engine_ffmpeg_version() {
@@ -133,5 +148,57 @@ int media_extract_thumbnail(
 
     return 0;
 }
+
+#if defined(MUSIC_HAS_ONNXRUNTIME) && defined(MUSIC_HAS_OPENCV)
+
+int media_watermark_load_model(const char* modelPath) {
+    if (!modelPath || !*modelPath) {
+        setError("模型路径为空");
+        return -1;
+    }
+    if (!g_watermarkInpainter.loadModel(modelPath)) {
+        setError(g_watermarkInpainter.lastError());
+        return -2;
+    }
+    return 0;
+}
+
+int media_watermark_inpaint_image(
+    const char* inputPath,
+    const char* outputPath,
+    const int* regions,
+    int numRegions)
+{
+    if (!inputPath || !outputPath || !regions || numRegions <= 0) {
+        setError("参数无效");
+        return -1;
+    }
+    if (!g_watermarkInpainter.isReady()) {
+        setError("请先 media_watermark_load_model");
+        return -2;
+    }
+
+    std::vector<media::core::WatermarkRegion> rs;
+    rs.reserve(static_cast<size_t>(numRegions));
+    for (int i = 0; i < numRegions; ++i) {
+        media::core::WatermarkRegion r;
+        r.x = regions[i * 4 + 0];
+        r.y = regions[i * 4 + 1];
+        r.w = regions[i * 4 + 2];
+        r.h = regions[i * 4 + 3];
+        rs.push_back(r);
+    }
+
+    if (!g_watermarkInpainter.inpaintImageFile(inputPath, outputPath, rs)) {
+        setError(g_watermarkInpainter.lastError());
+        return -3;
+    }
+    return 0;
+}
+
+int media_watermark_uses_opencv_fallback() {
+    return g_watermarkInpainter.usesOpenCvFallback() ? 1 : 0;
+}
+#endif
 
 } // extern "C"

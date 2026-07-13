@@ -64,9 +64,25 @@ class SliceParams:
 
 
 @dataclass
+class WatermarkRegion:
+    x: int = 0
+    y: int = 0
+    w: int = 0
+    h: int = 0
+
+
+@dataclass
+class WatermarkParams:
+    start_sec: float = 0.0
+    end_sec: float = 0.0
+
+
+@dataclass
 class AppState:
     current_video: Optional[VideoModel] = None
+    current_image_path: str = ""
     tasks: List[TaskModel] = field(default_factory=list)
     slice_params: SliceParams = field(default_factory=SliceParams)
+    watermark_params: WatermarkParams = field(default_factory=WatermarkParams)
     highlight_segments: List[HighlightSegment] = field(default_factory=list)
     output_dir: str = ""

@@ -30,6 +30,26 @@ if(MUSIC_HAS_OPENCV)
         COMMENT "复制 OpenCV DLL (media_engine)"
     )
 endif()
+if(MUSIC_HAS_ONNXRUNTIME AND MUSIC_HAS_OPENCV)
+    target_sources(media_engine PRIVATE src/core/watermark_inpainter.cpp)
+    target_link_libraries(media_engine PRIVATE music_onnxruntime)
+    target_compile_definitions(media_engine PRIVATE MUSIC_HAS_ONNXRUNTIME=1)
+    add_custom_command(TARGET media_engine POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${MUSIC_ONNXRUNTIME_DLL_DIR}/onnxruntime.dll"
+            $<TARGET_FILE_DIR:media_engine>
+        COMMENT "复制 ONNX Runtime DLL"
+    )
+    file(GLOB _ORT_PROVIDER_DLLS "${MUSIC_ONNXRUNTIME_DLL_DIR}/onnxruntime_providers_*.dll")
+    foreach(_ort_dll ${_ORT_PROVIDER_DLLS})
+        add_custom_command(TARGET media_engine POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_ort_dll}"
+                $<TARGET_FILE_DIR:media_engine>
+        )
+    endforeach()
+    message(STATUS "media_engine: LaMa watermark inpaint enabled")
+endif()
 
 # 测试可执行文件
 add_executable(media_engine_test src/main.cpp)
@@ -87,6 +107,10 @@ if(MUSIC_HAS_LLAMA)
     target_compile_definitions(media_cli PRIVATE MUSIC_HAS_LLAMA)
     target_link_libraries(media_cli PRIVATE music_llama)
     message(STATUS "media_cli: speech analysis + llama enabled")
+endif()
+
+if(MUSIC_HAS_ONNXRUNTIME AND MUSIC_HAS_OPENCV)
+    target_compile_definitions(media_cli PRIVATE MUSIC_HAS_ONNXRUNTIME=1 MUSIC_HAS_OPENCV=1)
 endif()
 
 # FFmpeg DLL 复制（按当前架构使用 FFMPEG_BIN_DIR）

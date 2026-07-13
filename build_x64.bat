@@ -6,6 +6,7 @@ if "%PROJECT_DIR:~-1%"=="\" set "PROJECT_DIR=%PROJECT_DIR:~0,-1%"
 set "BUILD_DIR=%PROJECT_DIR%\build_x64"
 set "FFMPEG_X64=%PROJECT_DIR%\third_party\ffmpeg\x64\lib\avcodec.lib"
 set "OPENCV_X64=%PROJECT_DIR%\third_party\opencv\x64\lib\opencv_world4120.lib"
+set "ORT_X64=%PROJECT_DIR%\third_party\onnxruntime\x64\lib\onnxruntime.lib"
 
 echo ========================================
 echo  MusicEditing x64 构建
@@ -22,6 +23,14 @@ if not exist "%OPENCV_X64%" (
     call "%PROJECT_DIR%\scripts\import_opencv.bat" x64
     if errorlevel 1 (
         echo [警告] OpenCV 导入失败，将尝试外部 OPENCV_DIR 或禁用滤镜
+    )
+)
+
+if not exist "%ORT_X64%" (
+    echo [提示] 未找到本地 ONNX Runtime x64，正在从 FFmpegxuexi 导入 ...
+    call "%PROJECT_DIR%\scripts\import_onnxruntime.bat" x64
+    if errorlevel 1 (
+        echo [警告] ONNX Runtime 导入失败，去水印模块将禁用
     )
 )
 
@@ -47,6 +56,11 @@ if errorlevel 1 (
 
 if exist "%PROJECT_DIR%\third_party\opencv\x64\bin\opencv_world4120.dll" (
     copy /Y "%PROJECT_DIR%\third_party\opencv\x64\bin\opencv_world4120.dll" "%BUILD_DIR%\bin\Release\" >nul
+)
+if exist "%PROJECT_DIR%\third_party\onnxruntime\x64\bin\onnxruntime.dll" (
+    for %%F in ("%PROJECT_DIR%\third_party\onnxruntime\x64\bin\onnxruntime*.dll") do (
+        copy /Y "%%~fF" "%BUILD_DIR%\bin\Release\" >nul
+    )
 )
 
 echo.

@@ -52,6 +52,10 @@ class MainViewModel(QObject):
 
     highlightsReady = Signal(list)
 
+    watermarkProgress = Signal(int, float, str)
+
+    watermarkFinished = Signal(int, str)
+
     errorOccurred = Signal(str)
 
     statusMessageChanged = Signal(str)
@@ -97,6 +101,14 @@ class MainViewModel(QObject):
         self.gpuNameChanged.emit(self.gpu_name)
 
         self.authTypeChanged.emit(self.auth_type)
+
+
+
+    @property
+
+    def bridge(self) -> Optional[MediaBridge]:
+
+        return self._bridge
 
 
 
@@ -197,6 +209,164 @@ class MainViewModel(QObject):
         except Exception as e:
 
             self.errorOccurred.emit(f"导入失败: {e}")
+
+
+
+    @Slot(str)
+
+    def import_image(self, file_path: str):
+
+        if not os.path.isfile(file_path):
+
+            self.errorOccurred.emit(f"文件不存在: {file_path}")
+
+            return
+
+        self._state.current_image_path = file_path
+
+        self._status_message = f"已导入图片: {os.path.basename(file_path)}"
+
+        self.statusMessageChanged.emit(self._status_message)
+
+
+
+    @Slot(float, float)
+
+    def update_watermark_range(self, start_sec: float, end_sec: float):
+
+        self._state.watermark_params.start_sec = start_sec
+
+        self._state.watermark_params.end_sec = end_sec
+
+
+
+    @Slot(str, str, list)
+
+    def start_watermark_image(self, input_path: str, output_path: str, regions: list):
+
+        self._run_watermark_task(
+
+            TaskType.WATERMARK, input_path,
+
+            lambda bridge, report: bridge.watermark_inpaint_image(
+
+                self._lama_model_path(), input_path, output_path, regions,
+
+            ),
+
+            output_path,
+
+        )
+
+
+
+    @Slot(str, list, float, float)
+
+    def start_watermark_video(
+
+        self, output_path: str, regions: list, start_sec: float, end_sec: float,
+
+    ):
+
+        video = self._state.current_video
+
+        if not video or not self._bridge:
+
+            self.errorOccurred.emit("请先导入视频")
+
+            return
+
+        input_path = video.file_path
+
+        fps = video.fps or 25.0
+
+
+
+        def work(bridge, report):
+
+            return bridge.watermark_inpaint_video(
+
+                self._lama_model_path(), input_path, output_path, regions,
+
+                fps, start_sec, end_sec, on_progress=report,
+
+            )
+
+        self._run_watermark_task(TaskType.WATERMARK, input_path, work, output_path)
+
+
+
+    def _lama_model_path(self) -> str:
+
+        path = self._app.lama_model_path
+
+        if not path or not os.path.isfile(path):
+
+            raise RuntimeError(
+
+                "未找到 LaMa 模型 models/lama.onnx，请运行 scripts/download_lama_model.bat"
+
+            )
+
+        return path
+
+
+
+    def _run_watermark_task(self, task_type, file_path, worker_fn, output_path: str):
+
+        if not self._bridge:
+
+            self.errorOccurred.emit("媒体引擎未加载")
+
+            return
+
+        if not self._bridge.watermark_available:
+
+            self.errorOccurred.emit("ONNX Runtime 未就绪，请先 build_x64.bat 编译")
+
+            return
+
+        task = TaskModel(
+
+            task_id=self._next_task_id,
+
+            task_type=task_type,
+
+            file_path=file_path,
+
+            state=TaskState.PROCESSING,
+
+        )
+
+        self._next_task_id += 1
+
+        self._state.tasks.append(task)
+
+        task_id = task.task_id
+        bridge = self._bridge
+
+        def run():
+            try:
+                def report(p: float, msg: str):
+                    task.progress = p
+                    self.watermarkProgress.emit(task_id, p, msg)
+
+                report(1.0, "LaMa 去水印处理中…")
+                result = worker_fn(bridge, report)
+                out = result or output_path
+                task.state = TaskState.COMPLETED
+                task.progress = 100.0
+                self.taskStateChanged.emit(task_id, TaskState.COMPLETED)
+                self.watermarkFinished.emit(task_id, out)
+                self._status_message = f"去水印完成: {os.path.basename(out)}"
+                self.statusMessageChanged.emit(self._status_message)
+            except Exception as e:
+                task.state = TaskState.FAILED
+                self.taskStateChanged.emit(task_id, TaskState.FAILED)
+                self.errorOccurred.emit(str(e))
+
+        import threading
+        threading.Thread(target=run, daemon=True).start()
 
 
 

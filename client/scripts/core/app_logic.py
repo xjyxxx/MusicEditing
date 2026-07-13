@@ -100,6 +100,11 @@ class AppLogic:
             default_vosk = _project_root() / "models" / "vosk-model-small-cn-0.22"
             if default_vosk.is_dir():
                 self.vosk_model_dir = str(default_vosk)
+        self.lama_model_path = cfg.get("lama_model_path", "")
+        if not self.lama_model_path:
+            default_lama = _project_root() / "models" / "lama.onnx"
+            if default_lama.is_file():
+                self.lama_model_path = str(default_lama)
 
     def toggle_gpu(self, enabled: bool):
         if enabled and not self.gpu_info["cuda_available"]:
