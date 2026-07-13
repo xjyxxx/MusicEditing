@@ -1,0 +1,107 @@
+1. 创作者经济：AI 驱动的本地音视频处理工具
+目前自媒体和短视频极其火爆，但很多创作者痛点在于云端工具太贵且有隐私泄露风险。
+
+产品点子：
+智能视频切片/高光提取器：自动识别长视频中的精彩瞬间（如游戏击杀、演讲金句）并剪辑。
+本地视频画质增强/去水印/超分工具：利用 AI 模型将 1080P 提升到 4K，或者一键消除复杂水印。
+技术分工：
+C++：封装 FFmpeg 处理视频流解码、多线程图像帧的极速遍历、调用底层 GPU 硬件加速（CUDA/TensorRT）。
+Python：用 PySide6/PyQt5 写现代化且漂亮的本地客户端 UI；用 Python 跑推理模型（如 OpenCV、PyTorch）；处理支付授权和用户登录。
+商用模式：软件买断制（比如 99 元/终身），或者按年订阅。这类工具在海外做独立开发（Indie Hacker）非常容易变现。
+
+开发语言：C++ python,C++搜索引擎写后端，python（C++也行）写前端（ 客户端pc）
+开发框架是：mvvm -》 Model  + VM  + UI  + 测试用例，双向绑定的开发模式 UI 和model 底层数据区分开，
+
+编辑是 CMakeList.txt 启动  可以yongVS2026打开
+
+可以先生成文件夹 预留后面使用，
+代码的存放框架：
+project/   文件名-> PDFSearchEngine
+├── CMakeLists.txt              # 顶层 CMake，总控所有子模块、编译选项
+├── CMakePresets.json           # CMake 构建预设（跨平台编译配置，推荐必加）
+├── .gitignore                  # Git 忽略文件（build/、.vs/、*.exe等）  (暂时不添加)
+├── build.bat                   # Windows 一键构建脚本		
+├── build.sh                    # Linux/macOS 一键构建脚本   (暂时不添加)
+├── clean.bat                   # Windows 一键清理构建产物
+├── clean.sh                    # Linux/macOS 一键清理构建产物    (暂时不添加)
+├── README.md                   # 项目说明（编译、运行、部署指南）
+├── LICENSE                     # 开源协议（可选）
+├── build/                      # CMake 构建输出目录（自动生成，不提交Git）
+│   ├── bin/                    # 可执行文件输出目录（server/client）
+│   ├── lib/                    # 静态库/动态库输出目录
+│   └── third_party/             # 第三方库编译产物
+├── shared/                     # 公共静态库（所有模块共用核心代码）
+│   ├── CMakeLists.txt
+│   ├── include/                 # 对外暴露头文件
+│   │   ├── common/             
+│   │   │   ├── protocol.h      # 通信协议定义（序列化/反序列化）
+│   │   │   ├── logger.h        # 日志宏、日志接口
+│   │   │   ├── utils.h         # 通用工具函数（字符串、时间、加密等）
+│   │   │   └── config.h        # 配置解析基类
+│   │   └── shared_export.h     # 库导出宏（跨平台编译用）
+│   └── src/                     # 源文件
+│       ├── protocol.cpp
+│       ├── logger.cpp
+│       ├── utils.cpp
+│       └── config.cpp
+├── server/                     # 服务端可执行程序
+│   ├── CMakeLists.txt
+│   ├── config/                  # 服务端配置文件
+│   │   ├── config.json          # 主配置（端口、IP、日志、连接数）
+│   │   └── server.yaml          # 备选配置格式（可选）
+│   ├── include/                 # 服务端私有头文件
+│   │   ├── core/                # 核心逻辑
+│   │   ├── net/                 # 网络模块
+│   │   └── db/                  # 数据库模块
+│   └── src/                     # 服务端源码
+│       ├── main.cpp
+│       ├── core/
+│       ├── net/
+│       └── db/
+├── client/                     # 客户端可执行程序（C++ 主程序 + Python 逻辑）
+│   ├── CMakeLists.txt
+│   ├── resources/               # 客户端静态资源（自动拷贝到运行目录）
+│   │   ├── config/              # 客户端配置文件
+│   │   ├── ui/                  # UI 布局文件、样式表
+│   │   ├── icons/               # 图标资源
+│   │   └── assets/              # 图片、音频、视频等资源
+│   ├── scripts/                 # Python 脚本模块
+│   │   ├── __init__.py
+│   │   ├── core/                # Python 业务逻辑
+│   │   │   ├── app_logic.py
+│   │   │   └── network.py
+│   │   └── ui/                  # Python UI 层
+│   │       └── main_window.py
+│   ├── include/                 # C++ 客户端私有头文件
+│   └── src/                     # C++ 客户端源码
+│       ├── main.cpp
+│       ├── core/
+│       └── python_bind/         # C++ 调用 Python 桥接代码
+├── third_party/                # 第三方依赖库（统一管理，不修改源码）
+│   ├── CMakeLists.txt          # 总入口：导入所有第三方库
+│   ├── ffmpeg/                 # FFmpeg 音视频库
+│   │   ├── CMakeLists.txt
+│   │   ├── include/             # 头文件
+│   │   └── lib/                 # 库文件（.lib .dll .so .dylib）
+│   ├── spdlog/                 # 日志库（示例）
+│   ├── jsoncpp/                # JSON 解析库
+│   ├── yaml-cpp/               # YAML 解析库
+│   └── other_libs/              # 其他第三方库
+├── tests/                      # 单元测试 + 集成测试（推荐必加）
+│   ├── CMakeLists.txt
+│   ├── shared_test/             # 公共库测试
+│   ├── server_test/             # 服务端测试
+│   └── client_test/             # 客户端测试
+├── deploy/                     # 部署打包目录
+│   ├── windows/                 # Windows 部署脚本、安装包配置
+│   ├── linux/                   # Linux 部署脚本、服务配置
+│   └── resources/               # 部署用公共资源
+└── docs/                       # 项目文档
+    ├── api_docs/                # API 自动生成文档
+    ├── design/                  # 架构设计、模块设计文档
+    ├── manual/                  # 用户使用手册
+    └── develop.md               # 开发者指南（环境搭建、规范）
+
+
+
+ 

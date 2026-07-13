@@ -1,0 +1,4 @@
+/* 全局样式表 */
+QMainWindow {
+    background-color: #1e1e2e;
+}

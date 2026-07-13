@@ -1,0 +1,53 @@
+# 构建目录（产物不提交）
+build/
+build_x64/
+*.exe
+*.pdb
+*.obj
+
+# 构建目录内的链接库（third_party 预编译包除外，见下方）
+build/**/*.dll
+build/**/*.lib
+build_x64/**/*.dll
+build_x64/**/*.lib
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE / 工具
+.vs/
+.vscode/
+*.user
+*.suo
+*.sln.docstates
+
+# Cursor 本地会话缓存（保留 .cursor/skills 等规则文件）
+.cursor/projects/
+
+# 日志与临时文件
+docs/log_*.txt
+*.log
+*.part
+frame.rgb
+
+# llama.cpp 源码（可选；预编译包见 llama_prebuilt/）
+third_party/llama.cpp/build/
+
+# 第三方下载/解压缓存
+third_party/ffmpeg/x64_download.zip
+third_party/ffmpeg/_x64_extract/
+
+# 大文件（按需调整）
+tests/*.mp4
+models/**/*.bin
+models/**/*.gguf
+
+# OpenCV Debug 变体（>100MB，GitHub 禁止；Release 构建只需 opencv_world4120.*）
+third_party/opencv/**/*d.dll
+third_party/opencv/**/*d.lib
+
+# 系统
+Thumbs.db
+Desktop.ini

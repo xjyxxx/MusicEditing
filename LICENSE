@@ -1,0 +1,29 @@
+Copyright (c) 2026 xjyxxx. All Rights Reserved.
+
+本软件及相关文档（以下简称「本软件」）的版权归 xjyxxx 所有。
+
+未经版权所有者事先书面许可，任何个人或组织不得：
+
+1. 复制、修改、合并、发布、分发、再授权或销售本软件的任何部分；
+2. 将本软件用于商业目的；
+3. 基于本软件创建衍生作品；
+4. 反向工程、反编译或反汇编本软件（法律明文允许的除外）。
+
+允许的行为（在遵守上述限制及 third_party 各组件自身许可证的前提下）：
+
+- 版权所有者本人及其书面授权的对象，可按 README 说明在本地构建与运行；
+- 为个人学习目的，在本地查看已公开仓库中的源代码（不构成上述任何授权）。
+
+第三方组件（FFmpeg、OpenCV、llama.cpp 等）位于 third_party/ 目录，
+其使用、修改与分发须遵守各自原始许可证，见 THIRD_PARTY_NOTICES.md。
+
+本软件按「原样」提供，不提供任何明示或暗示的保证。
+在适用法律允许的最大范围内，版权所有者不对因使用本软件产生的任何损害承担责任。
+
+如需获得使用、修改或商业授权，请联系仓库所有者。
+
+---
+English summary: Proprietary / All Rights Reserved. No use, copy, modification,
+distribution, or derivative works without prior written permission from the
+copyright holder. Third-party components in third_party/ remain under their
+respective licenses.
