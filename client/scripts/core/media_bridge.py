@@ -137,9 +137,41 @@ class MediaBridge:
         if cli_dir not in env.get("PATH", ""):
             env["PATH"] = cli_dir + os.pathsep + env.get("PATH", "")
         self._env = env
+        self._prefer_cuda = False
+        self._prefer_hw_decode = True
+        self._watermark_backend = "lama"
+        self.set_prefer_cuda(False)
+        self.set_prefer_hw_decode(True)
+        self.set_watermark_backend("lama")
 
         ver = self._run(["version"]).strip()
         self._ffmpeg_version = ver or "unknown"
+
+    def set_prefer_cuda(self, enabled: bool) -> None:
+        """LaMa ONNX CUDA EP 开关（默认关闭，项目不再捆绑 cuda_runtime）。"""
+        self._prefer_cuda = bool(enabled)
+        self._env["MUSIC_ORT_CUDA"] = "1" if self._prefer_cuda else "0"
+
+    def set_prefer_hw_decode(self, enabled: bool) -> None:
+        """批处理 iterate / 缩略图是否请求 D3D11VA（CLI --hw）。"""
+        self._prefer_hw_decode = bool(enabled)
+
+    @property
+    def prefer_hw_decode(self) -> bool:
+        return self._prefer_hw_decode
+
+    def set_watermark_backend(self, backend: str) -> None:
+        """去水印后端：lama（精修）| opencv（快速，适合视频）。"""
+        b = (backend or "lama").strip().lower()
+        if b in ("opencv", "cv", "fast"):
+            self._watermark_backend = "opencv"
+        else:
+            self._watermark_backend = "lama"
+        self._env["MUSIC_WATERMARK_BACKEND"] = self._watermark_backend
+
+    @property
+    def watermark_backend(self) -> str:
+        return self._watermark_backend
 
     def _run(self, args: list[str], timeout: Optional[int] = None) -> str:
         cmd = [str(self._cli)] + args
@@ -207,8 +239,15 @@ class MediaBridge:
         self,
         file_path: str,
         on_progress: Callable[[int, int, float], bool],
+        prefer_hw: Optional[bool] = None,
+        max_frames: int = 0,
     ) -> None:
         cmd = [str(self._cli), "iterate", file_path]
+        if max_frames > 0:
+            cmd.append(str(max_frames))
+        use_hw = self._prefer_hw_decode if prefer_hw is None else bool(prefer_hw)
+        if use_hw:
+            cmd.append("--hw")
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -289,19 +328,25 @@ class MediaBridge:
         output_path: str,
         regions: List[Tuple[int, int, int, int]],
         timeout: Optional[int] = 600,
+        backend: str = "lama",
     ) -> str:
         if not regions:
             raise ValueError("请至少框选一个水印区域")
-        args = ["watermark-inpaint", model_path, input_path, output_path]
-        for x, y, w, h in regions:
-            args.extend([str(x), str(y), str(w), str(h)])
-        out = self._run(args, timeout=timeout)
-        if "WATERMARK_OK" not in out:
-            raise RuntimeError(f"去水印失败: {out}")
-        for line in out.splitlines():
-            if line.startswith("output="):
-                return line.split("=", 1)[1].strip()
-        return output_path
+        prev = self._watermark_backend
+        self.set_watermark_backend(backend)
+        try:
+            args = ["watermark-inpaint", model_path or "-", input_path, output_path]
+            for x, y, w, h in regions:
+                args.extend([str(x), str(y), str(w), str(h)])
+            out = self._run(args, timeout=timeout)
+            if "WATERMARK_OK" not in out:
+                raise RuntimeError(f"去水印失败: {out}")
+            for line in out.splitlines():
+                if line.startswith("output="):
+                    return line.split("=", 1)[1].strip()
+            return output_path
+        finally:
+            self.set_watermark_backend(prev)
 
     def watermark_inpaint_frames(
         self,
@@ -311,69 +356,81 @@ class MediaBridge:
         regions: List[Tuple[int, int, int, int]],
         on_progress: Optional[Callable[[int, int], None]] = None,
         timeout: Optional[int] = 600,
+        backend: Optional[str] = None,
     ) -> int:
-        """一次加载模型，批量处理目录内 PNG 帧。返回处理帧数。"""
+        """一次加载后端，批量处理目录内 PNG 帧（进程内复用）。返回处理帧数。"""
         if not regions:
             raise ValueError("请至少框选一个水印区域")
-        args = ["watermark-inpaint-frames", model_path, frames_in_dir, frames_out_dir]
-        for x, y, w, h in regions:
-            args.extend([str(x), str(y), str(w), str(h)])
-
-        cmd = [str(self._cli)] + args
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=self._env,
-            cwd=str(self._cli.parent),
-        )
-
-        assert proc.stdout is not None
-        count = 0
-        stderr_lines: list[str] = []
-
-        def drain_stderr():
-            assert proc.stderr is not None
-            for line in proc.stderr:
-                stderr_lines.append(line.rstrip("\n"))
-
-        t = threading.Thread(target=drain_stderr, daemon=True)
-        t.start()
-
+        prev = self._watermark_backend
+        if backend:
+            self.set_watermark_backend(backend)
         try:
-            for line in proc.stdout:
-                line = line.strip()
-                if line.startswith("PROGRESS:"):
-                    parts = line.split(":")
-                    if len(parts) >= 3:
-                        cur = int(parts[1])
-                        total = int(parts[2])
-                        if on_progress:
-                            on_progress(cur, total)
-                elif line.startswith("count="):
-                    count = int(line.split("=", 1)[1])
-        finally:
+            args = [
+                "watermark-inpaint-frames",
+                model_path or "-",
+                frames_in_dir,
+                frames_out_dir,
+            ]
+            for x, y, w, h in regions:
+                args.extend([str(x), str(y), str(w), str(h)])
+
+            cmd = [str(self._cli)] + args
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=self._env,
+                cwd=str(self._cli.parent),
+            )
+
+            assert proc.stdout is not None
+            count = 0
+            stderr_lines: list[str] = []
+
+            def drain_stderr():
+                assert proc.stderr is not None
+                for line in proc.stderr:
+                    stderr_lines.append(line.rstrip("\n"))
+
+            t = threading.Thread(target=drain_stderr, daemon=True)
+            t.start()
+
             try:
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                raise RuntimeError(f"批量去水印超时: {' '.join(cmd)}") from None
-            t.join(timeout=5)
+                for line in proc.stdout:
+                    line = line.strip()
+                    if line.startswith("PROGRESS:"):
+                        parts = line.split(":")
+                        if len(parts) >= 3:
+                            cur = int(parts[1])
+                            total = int(parts[2])
+                            if on_progress:
+                                on_progress(cur, total)
+                    elif line.startswith("count="):
+                        count = int(line.split("=", 1)[1])
+            finally:
+                try:
+                    proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    raise RuntimeError(f"批量去水印超时: {' '.join(cmd)}") from None
+                t.join(timeout=5)
 
-        if proc.returncode != 0:
-            detail = "\n".join(stderr_lines).strip()
-            fail = _format_cli_failure("", detail, proc.returncode or -1)
-            for ln in stderr_lines:
-                if ln.startswith("WATERMARK_ERROR"):
-                    raise RuntimeError(ln if not fail else fail)
-            raise RuntimeError(fail or detail or f"批量去水印失败 exit {proc.returncode}")
+            if proc.returncode != 0:
+                detail = "\n".join(stderr_lines).strip()
+                fail = _format_cli_failure("", detail, proc.returncode or -1)
+                for ln in stderr_lines:
+                    if ln.startswith("WATERMARK_ERROR"):
+                        raise RuntimeError(ln if not fail else fail)
+                raise RuntimeError(fail or detail or f"批量去水印失败 exit {proc.returncode}")
 
-        if count <= 0:
-            raise RuntimeError("批量去水印未返回帧数")
-        return count
+            if count <= 0:
+                raise RuntimeError("批量去水印未返回帧数")
+            return count
+        finally:
+            self.set_watermark_backend(prev)
 
     def extract_video_frame(
         self,
@@ -408,12 +465,15 @@ class MediaBridge:
         end_sec: float = 0.0,
         max_frames: int = 0,
         on_progress: Optional[Callable[[float, str], None]] = None,
+        backend: str = "opencv",
     ) -> str:
+        """视频去水印。默认 backend=opencv（秒级）；精修可传 lama。进程内一次加载、多帧复用。"""
         if not regions:
             raise ValueError("请至少框选一个水印区域")
         if fps <= 0:
             fps = 25.0
 
+        use_lama = (backend or "opencv").strip().lower() not in ("opencv", "cv", "fast")
         ffmpeg = _find_ffmpeg()
         tmp = tempfile.mkdtemp(prefix="music_wm_")
         frames_in = os.path.join(tmp, "in")
@@ -431,10 +491,10 @@ class MediaBridge:
             if start_sec > 0:
                 extract_cmd.extend(["-ss", f"{start_sec:.3f}"])
             extract_cmd.extend(["-i", input_path])
-            if end_sec > start_sec > 0:
-                extract_cmd.extend(["-to", f"{end_sec:.3f}"])
-            elif end_sec > 0:
-                extract_cmd.extend(["-to", f"{end_sec:.3f}"])
+            # end_sec > start_sec 即可；此前 start_sec==0 时误跳过 -to
+            if end_sec > start_sec:
+                duration = end_sec - start_sec
+                extract_cmd.extend(["-t", f"{duration:.3f}"])
             if max_frames > 0:
                 extract_cmd.extend(["-vframes", str(max_frames)])
             extract_cmd.extend([
@@ -453,16 +513,23 @@ class MediaBridge:
                 raise RuntimeError("未提取到任何视频帧")
 
             total = len(frame_files)
-            report(8.0, f"共 {total} 帧，LaMa 修复中…")
+            mode_label = "LaMa 精修" if use_lama else "OpenCV 快速修复"
+            report(8.0, f"共 {total} 帧，{mode_label}中…")
 
             def on_frame(cur: int, frame_total: int):
                 pct = 8.0 + cur / frame_total * 82.0
                 report(pct, f"处理帧 {cur}/{frame_total}")
 
+            # OpenCV：约 2s/帧足够；LaMa：120s/帧
+            timeout = max(120, total * 120) if use_lama else max(60, total * 3)
             self.watermark_inpaint_frames(
-                model_path, frames_in, frames_out, regions,
+                model_path if use_lama else (model_path or "-"),
+                frames_in,
+                frames_out,
+                regions,
                 on_progress=on_frame,
-                timeout=max(600, total * 120),
+                timeout=timeout,
+                backend="lama" if use_lama else "opencv",
             )
 
             silent_mp4 = os.path.join(tmp, "silent.mp4")

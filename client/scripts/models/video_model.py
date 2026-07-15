@@ -75,6 +75,8 @@ class WatermarkRegion:
 class WatermarkParams:
     start_sec: float = 0.0
     end_sec: float = 0.0
+    # opencv=视频快速；lama=图片/精修
+    backend: str = "opencv"
 
 
 @dataclass

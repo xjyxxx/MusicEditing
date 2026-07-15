@@ -35,20 +35,29 @@ MEDIA_API int media_probe_video(
 );
 
 /// 遍历视频帧，progressCallback(frameIndex, totalFrames, timestampSec) 返回 0 继续，非 0 停止
+/// preferHwaccel：非 0 时请求 D3D11VA（失败回退 CPU）
 typedef int (*MediaFrameProgressFn)(int64_t frameIndex, int64_t totalFrames, double timestampSec, void* userData);
 
 MEDIA_API int media_iterate_frames(
     const char* filePath,
     MediaFrameProgressFn callback,
-    void* userData
+    void* userData,
+    int preferHwaccel
 );
 
-/// 提取缩略图到 RGB24 缓冲区
+/// 最近一次 iterate/缩略图是否实际启用了硬解（1=是，0=否）
+MEDIA_API int media_decoder_hwaccel_active();
+
+/// 硬解显示名：d3d11va / cpu
+MEDIA_API const char* media_decoder_hwaccel_name();
+
+/// 提取缩略图到 RGB24 缓冲区；preferHwaccel 非 0 时尝试硬解
 MEDIA_API int media_extract_thumbnail(
     const char* filePath,
     double timestampSec,
     unsigned char* rgbBuffer,
-    int bufferSize
+    int bufferSize,
+    int preferHwaccel
 );
 
 #if defined(MUSIC_HAS_ONNXRUNTIME) && defined(MUSIC_HAS_OPENCV)
@@ -64,6 +73,12 @@ MEDIA_API int media_watermark_inpaint_image(
 
 /// 当前是否因 LaMa ONNX 不可用而回退 OpenCV inpaint
 MEDIA_API int media_watermark_uses_opencv_fallback();
+
+/// 当前是否使用 CUDA EP（LaMa）
+MEDIA_API int media_watermark_uses_cuda();
+
+/// 执行后端字符串：cuda / cpu / opencv
+MEDIA_API const char* media_watermark_execution_provider();
 #endif
 
 #ifdef __cplusplus

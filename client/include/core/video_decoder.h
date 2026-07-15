@@ -18,10 +18,12 @@ public:
     VideoDecoder(const VideoDecoder&) = delete;
     VideoDecoder& operator=(const VideoDecoder&) = delete;
 
-    bool open(const std::string& filePath);
+    /// preferHwaccel：与播放器相同，请求 D3D11VA；失败自动回退 CPU
+    bool open(const std::string& filePath, bool preferHwaccel = false);
     void close();
 
     bool isOpen() const;
+    bool isHwAccelActive() const;
     const common::VideoInfo& info() const;
 
     /// 遍历视频帧，回调返回 false 时提前停止

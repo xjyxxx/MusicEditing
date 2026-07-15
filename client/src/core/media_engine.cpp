@@ -22,10 +22,17 @@ namespace {
     std::mutex g_engineMutex;
     bool g_initialized = false;
     std::string g_lastError;
+    bool g_lastHwActive = false;
+    std::string g_lastHwName = "cpu";
 
     void setError(const std::string& msg) {
         g_lastError = msg;
         LOG_ERROR(msg);
+    }
+
+    void rememberDecoderHw(const media::core::VideoDecoder& decoder) {
+        g_lastHwActive = decoder.isHwAccelActive();
+        g_lastHwName = g_lastHwActive ? "d3d11va" : "cpu";
     }
 
 #if defined(MUSIC_HAS_ONNXRUNTIME) && defined(MUSIC_HAS_OPENCV)
@@ -102,17 +109,23 @@ int media_probe_video(
     return 0;
 }
 
-int media_iterate_frames(const char* filePath, MediaFrameProgressFn callback, void* userData) {
+int media_iterate_frames(
+    const char* filePath,
+    MediaFrameProgressFn callback,
+    void* userData,
+    int preferHwaccel)
+{
     if (!filePath || !callback) {
         setError("参数无效");
         return -1;
     }
 
     media::core::VideoDecoder decoder;
-    if (!decoder.open(filePath)) {
+    if (!decoder.open(filePath, preferHwaccel != 0)) {
         setError("打开视频失败");
         return -2;
     }
+    rememberDecoderHw(decoder);
 
     const int64_t total = decoder.info().totalFrames > 0
         ? decoder.info().totalFrames : 0;
@@ -124,11 +137,20 @@ int media_iterate_frames(const char* filePath, MediaFrameProgressFn callback, vo
     return ok ? 0 : -3;
 }
 
+int media_decoder_hwaccel_active() {
+    return g_lastHwActive ? 1 : 0;
+}
+
+const char* media_decoder_hwaccel_name() {
+    return g_lastHwName.c_str();
+}
+
 int media_extract_thumbnail(
     const char* filePath,
     double timestampSec,
     unsigned char* rgbBuffer,
-    int bufferSize)
+    int bufferSize,
+    int preferHwaccel)
 {
     if (!filePath || !rgbBuffer) {
         setError("参数无效");
@@ -136,10 +158,11 @@ int media_extract_thumbnail(
     }
 
     media::core::VideoDecoder decoder;
-    if (!decoder.open(filePath)) {
+    if (!decoder.open(filePath, preferHwaccel != 0)) {
         setError("打开视频失败");
         return -2;
     }
+    rememberDecoderHw(decoder);
 
     if (!decoder.extractThumbnail(timestampSec, rgbBuffer, bufferSize)) {
         setError("提取缩略图失败");
@@ -198,6 +221,14 @@ int media_watermark_inpaint_image(
 
 int media_watermark_uses_opencv_fallback() {
     return g_watermarkInpainter.usesOpenCvFallback() ? 1 : 0;
+}
+
+int media_watermark_uses_cuda() {
+    return g_watermarkInpainter.usesCuda() ? 1 : 0;
+}
+
+const char* media_watermark_execution_provider() {
+    return g_watermarkInpainter.executionProvider();
 }
 #endif
 

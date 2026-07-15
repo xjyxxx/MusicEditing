@@ -90,6 +90,9 @@ class MainViewModel(QObject):
 
             self._bridge = MediaBridge()
 
+
+            self._bridge.set_prefer_hw_decode(self._app.prefer_hw_decode)
+
             self._status_message = f"引擎就绪 (FFmpeg {self._bridge.ffmpeg_version})"
 
         except FileNotFoundError as e:
@@ -242,19 +245,41 @@ class MainViewModel(QObject):
 
     @Slot(str, str, list)
 
-    def start_watermark_image(self, input_path: str, output_path: str, regions: list):
+    def start_watermark_image(
+
+        self, input_path: str, output_path: str, regions: list, backend: str = "lama",
+
+    ):
+
+        be = (backend or "lama").strip().lower()
+
+        if be in ("opencv", "cv", "fast"):
+
+            be = "opencv"
+
+        else:
+
+            be = "lama"
+
+        self._state.watermark_params.backend = be
+
+
+
+        def work(bridge, report):
+
+            model = self._watermark_model_path(be)
+
+            return bridge.watermark_inpaint_image(
+
+                model, input_path, output_path, regions, backend=be,
+
+            )
+
+
 
         self._run_watermark_task(
 
-            TaskType.WATERMARK, input_path,
-
-            lambda bridge, report: bridge.watermark_inpaint_image(
-
-                self._lama_model_path(), input_path, output_path, regions,
-
-            ),
-
-            output_path,
+            TaskType.WATERMARK, input_path, work, output_path, backend=be,
 
         )
 
@@ -264,7 +289,17 @@ class MainViewModel(QObject):
 
     def start_watermark_video(
 
-        self, output_path: str, regions: list, start_sec: float, end_sec: float,
+        self,
+
+        output_path: str,
+
+        regions: list,
+
+        start_sec: float,
+
+        end_sec: float,
+
+        backend: str = "opencv",
 
     ):
 
@@ -280,23 +315,47 @@ class MainViewModel(QObject):
 
         fps = video.fps or 25.0
 
+        be = (backend or "opencv").strip().lower()
+
+        if be in ("opencv", "cv", "fast"):
+
+            be = "opencv"
+
+        else:
+
+            be = "lama"
+
+        self._state.watermark_params.backend = be
+
 
 
         def work(bridge, report):
 
+            model = self._watermark_model_path(be)
+
             return bridge.watermark_inpaint_video(
 
-                self._lama_model_path(), input_path, output_path, regions,
+                model, input_path, output_path, regions,
 
-                fps, start_sec, end_sec, on_progress=report,
+                fps, start_sec, end_sec, on_progress=report, backend=be,
 
             )
 
-        self._run_watermark_task(TaskType.WATERMARK, input_path, work, output_path)
+
+
+        self._run_watermark_task(
+
+            TaskType.WATERMARK, input_path, work, output_path, backend=be,
+
+        )
 
 
 
-    def _lama_model_path(self) -> str:
+    def _watermark_model_path(self, backend: str) -> str:
+
+        if backend == "opencv":
+
+            return "-"
 
         path = self._app.lama_model_path
 
@@ -312,7 +371,17 @@ class MainViewModel(QObject):
 
 
 
-    def _run_watermark_task(self, task_type, file_path, worker_fn, output_path: str):
+    def _lama_model_path(self) -> str:
+
+        return self._watermark_model_path("lama")
+
+
+
+    def _run_watermark_task(
+
+        self, task_type, file_path, worker_fn, output_path: str, backend: str = "lama",
+
+    ):
 
         if not self._bridge:
 
@@ -343,29 +412,55 @@ class MainViewModel(QObject):
         self._state.tasks.append(task)
 
         task_id = task.task_id
+
         bridge = self._bridge
 
+        label = "OpenCV 快速去水印" if backend == "opencv" else "LaMa 精修去水印"
+
+
+
         def run():
+
             try:
+
                 def report(p: float, msg: str):
+
                     task.progress = p
+
                     self.watermarkProgress.emit(task_id, p, msg)
 
-                report(1.0, "LaMa 去水印处理中…")
+
+
+                report(1.0, f"{label}处理中…")
+
                 result = worker_fn(bridge, report)
+
                 out = result or output_path
+
                 task.state = TaskState.COMPLETED
+
                 task.progress = 100.0
+
                 self.taskStateChanged.emit(task_id, TaskState.COMPLETED)
+
                 self.watermarkFinished.emit(task_id, out)
+
                 self._status_message = f"去水印完成: {os.path.basename(out)}"
+
                 self.statusMessageChanged.emit(self._status_message)
+
             except Exception as e:
+
                 task.state = TaskState.FAILED
+
                 self.taskStateChanged.emit(task_id, TaskState.FAILED)
+
                 self.errorOccurred.emit(str(e))
 
+
+
         import threading
+
         threading.Thread(target=run, daemon=True).start()
 
 
@@ -637,6 +732,11 @@ class MainViewModel(QObject):
             self.errorOccurred.emit("未检测到可用 GPU，已保持 CPU 模式")
 
             return
+
+        if self._bridge:
+
+
+            self._bridge.set_prefer_hw_decode(self._app.prefer_hw_decode)
 
         self.gpuNameChanged.emit(self.gpu_name)
 

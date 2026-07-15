@@ -49,7 +49,7 @@ int main(int argc, char* argv[]) {
         return (*count < 500) ? 0 : 1;
     };
 
-    ret = media_iterate_frames(testFile, progressCb, &frameCount);
+    ret = media_iterate_frames(testFile, progressCb, &frameCount, 1);
     std::cout << "遍历完成, 共处理 " << frameCount << " 帧, code=" << ret << std::endl;
 
     media_engine_shutdown();

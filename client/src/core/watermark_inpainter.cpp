@@ -5,7 +5,9 @@
 #include "common/utils.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -139,17 +141,43 @@ bool inpaintWithOpenCv(cv::Mat& bgr, const std::vector<WatermarkRegion>& regions
     return true;
 }
 
+bool preferCudaFromEnv() {
+    // 默认 CPU：项目不再捆绑 third_party/cuda_runtime
+    const char* v = std::getenv("MUSIC_ORT_CUDA");
+    if (!v || !*v) {
+        return false;
+    }
+    std::string s(v);
+    for (char& c : s) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return s == "1" || s == "true" || s == "on" || s == "yes" || s == "cuda";
+}
+
+/// MUSIC_WATERMARK_BACKEND=opencv|lama|auto（默认 auto）
+bool preferOpenCvBackend() {
+    const char* v = std::getenv("MUSIC_WATERMARK_BACKEND");
+    if (!v || !*v) {
+        return false;
+    }
+    std::string s(v);
+    for (char& c : s) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return s == "opencv" || s == "cv" || s == "fast";
+}
+
 } // namespace
 
 struct WatermarkInpainter::Impl {
     Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "MusicEditing"};
-    Ort::SessionOptions sessionOptions;
     std::unique_ptr<Ort::Session> session;
     std::string inputImageName = "image";
     std::string inputMaskName = "mask";
     std::string outputName = "inpainted";
     bool ready = false;
     bool useOpenCvFallback = false;
+    bool useCuda = false;
 };
 
 WatermarkInpainter::~WatermarkInpainter() {
@@ -159,54 +187,107 @@ WatermarkInpainter::~WatermarkInpainter() {
 
 bool WatermarkInpainter::loadModel(const std::string& modelPath) {
     lastError_.clear();
+
+    if (!impl_) impl_ = new Impl();
+    impl_->useOpenCvFallback = false;
+    impl_->useCuda = false;
+    impl_->session.reset();
+
+    // 快速模式：跳过 LaMa，直接 OpenCV inpaint（视频默认）
+    if (preferOpenCvBackend()) {
+        impl_->useOpenCvFallback = true;
+        impl_->useCuda = false;
+        impl_->ready = true;
+        LOG_INFO("去水印后端: OpenCV inpaint（快速模式，跳过 LaMa）");
+        return true;
+    }
+
     if (!media::common::fileExists(modelPath)) {
         lastError_ = "模型文件不存在: " + modelPath;
         return false;
     }
 
-    if (!impl_) impl_ = new Impl();
-    impl_->useOpenCvFallback = false;
-    impl_->session.reset();
-
     const std::wstring wpath = media::common::utf8PathToWide(modelPath);
-    const GraphOptimizationLevel levels[] = {
+
+    const bool wantCuda = preferCudaFromEnv();
+    bool cudaAttempted = false;
+    std::string onnxError;
+
+    auto tryCreate = [&](bool useCuda, GraphOptimizationLevel level) -> bool {
+        Ort::SessionOptions opts;
+        opts.SetIntraOpNumThreads(useCuda ? 1 : 4);
+        opts.SetGraphOptimizationLevel(level);
+        if (useCuda) {
+            OrtCUDAProviderOptions cudaOpts{};
+            cudaOpts.device_id = 0;
+            opts.AppendExecutionProvider_CUDA(cudaOpts);
+            cudaAttempted = true;
+        }
+#ifdef _WIN32
+        impl_->session = std::make_unique<Ort::Session>(
+            impl_->env, wpath.c_str(), opts);
+#else
+        impl_->session = std::make_unique<Ort::Session>(
+            impl_->env, modelPath.c_str(), opts);
+#endif
+        Ort::AllocatorWithDefaultOptions allocator;
+        if (impl_->session->GetInputCount() >= 2) {
+            impl_->inputImageName = impl_->session->GetInputNameAllocated(0, allocator).get();
+            impl_->inputMaskName = impl_->session->GetInputNameAllocated(1, allocator).get();
+        }
+        if (impl_->session->GetOutputCount() >= 1) {
+            impl_->outputName = impl_->session->GetOutputNameAllocated(0, allocator).get();
+        }
+        impl_->useCuda = useCuda;
+        impl_->useOpenCvFallback = false;
+        impl_->ready = true;
+        return true;
+    };
+
+    // LaMa ONNX 的 DFT 节点在 ORT_ENABLE_ALL 下常失败，CUDA 时优先 DISABLE_ALL
+    const GraphOptimizationLevel cudaLevels[] = {
+        GraphOptimizationLevel::ORT_DISABLE_ALL,
+        GraphOptimizationLevel::ORT_ENABLE_ALL,
+    };
+    const GraphOptimizationLevel cpuLevels[] = {
         GraphOptimizationLevel::ORT_ENABLE_ALL,
         GraphOptimizationLevel::ORT_DISABLE_ALL,
     };
 
-    std::string onnxError;
-    for (auto level : levels) {
-        try {
-            impl_->sessionOptions.SetIntraOpNumThreads(4);
-            impl_->sessionOptions.SetGraphOptimizationLevel(level);
-#ifdef _WIN32
-            impl_->session = std::make_unique<Ort::Session>(
-                impl_->env, wpath.c_str(), impl_->sessionOptions);
-#else
-            impl_->session = std::make_unique<Ort::Session>(
-                impl_->env, modelPath.c_str(), impl_->sessionOptions);
-#endif
-
-            Ort::AllocatorWithDefaultOptions allocator;
-            if (impl_->session->GetInputCount() >= 2) {
-                impl_->inputImageName = impl_->session->GetInputNameAllocated(0, allocator).get();
-                impl_->inputMaskName = impl_->session->GetInputNameAllocated(1, allocator).get();
+    const bool cudaModes[] = {true, false};
+    for (bool useCuda : cudaModes) {
+        if (useCuda && !wantCuda) {
+            continue;
+        }
+        const GraphOptimizationLevel* levels = useCuda ? cudaLevels : cpuLevels;
+        const int levelCount = 2;
+        for (int li = 0; li < levelCount; ++li) {
+            try {
+                if (!tryCreate(useCuda, levels[li])) {
+                    continue;
+                }
+                LOG_INFO(std::string("LaMa ONNX 模型已加载: ") + modelPath
+                    + (useCuda ? " [CUDA EP]" : " [CPU EP]"));
+                return true;
+            } catch (const Ort::Exception& e) {
+                onnxError = e.what();
+                impl_->session.reset();
+                impl_->useCuda = false;
+                if (useCuda) {
+                    LOG_WARN(std::string("ONNX Session 创建失败（")
+                        + (li == 0 ? "DISABLE_ALL" : "ENABLE_ALL")
+                        + "），尝试下一配置: " + e.what());
+                }
             }
-            if (impl_->session->GetOutputCount() >= 1) {
-                impl_->outputName = impl_->session->GetOutputNameAllocated(0, allocator).get();
-            }
-
-            impl_->ready = true;
-            LOG_INFO("LaMa ONNX 模型已加载: " + modelPath);
-            return true;
-        } catch (const Ort::Exception& e) {
-            onnxError = e.what();
-            impl_->session.reset();
         }
     }
 
+    if (wantCuda && !cudaAttempted) {
+        LOG_WARN("已请求 CUDA，但未能启用 CUDA EP");
+    }
     LOG_WARN("LaMa ONNX 不可用 (" + onnxError + ")，回退 OpenCV inpaint");
     impl_->useOpenCvFallback = true;
+    impl_->useCuda = false;
     impl_->ready = true;
     return true;
 }
@@ -216,6 +297,7 @@ void WatermarkInpainter::unload() {
         impl_->session.reset();
         impl_->ready = false;
         impl_->useOpenCvFallback = false;
+        impl_->useCuda = false;
     }
     lastError_.clear();
 }
@@ -226,6 +308,20 @@ bool WatermarkInpainter::isReady() const {
 
 bool WatermarkInpainter::usesOpenCvFallback() const {
     return impl_ && impl_->ready && impl_->useOpenCvFallback;
+}
+
+bool WatermarkInpainter::usesCuda() const {
+    return impl_ && impl_->ready && impl_->useCuda && !impl_->useOpenCvFallback;
+}
+
+const char* WatermarkInpainter::executionProvider() const {
+    if (!impl_ || !impl_->ready) {
+        return "none";
+    }
+    if (impl_->useOpenCvFallback) {
+        return "opencv";
+    }
+    return impl_->useCuda ? "cuda" : "cpu";
 }
 
 bool WatermarkInpainter::inpaintRgbFrame(
@@ -401,6 +497,10 @@ void WatermarkInpainter::unload() {}
 bool WatermarkInpainter::isReady() const { return false; }
 
 bool WatermarkInpainter::usesOpenCvFallback() const { return false; }
+
+bool WatermarkInpainter::usesCuda() const { return false; }
+
+const char* WatermarkInpainter::executionProvider() const { return "none"; }
 
 bool WatermarkInpainter::inpaintRgbFrame(
     uint8_t*, int, int, int, const std::vector<WatermarkRegion>&)

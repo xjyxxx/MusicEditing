@@ -25,31 +25,20 @@ set "NEED_BUILD=0"
 
 
 echo ========================================
-
 echo  MusicEditing x64 UI
-
 echo ========================================
 
+rem 去水印 LaMa 默认 CPU EP（不捆绑 cuda_runtime，体积过大）
 
 
-rem 缺 ONNX 预编译包时，从 FFmpegxuexi 自动导入（与 build_x64 相同逻辑）
 
+rem 缺 ONNX 时提示使用项目内 third_party（不再引用外部盘符）
 if not exist "%ORT_LIB%" (
-
-    echo [提示] 未找到 ONNX Runtime，正在从 FFmpegxuexi 导入 ...
-
-    call "%PROJECT_DIR%\scripts\import_onnxruntime.bat" x64
-
-    if errorlevel 1 (
-
-        echo [警告] ONNX Runtime 导入失败，去水印模块将禁用
-
-    ) else (
-
-        set "NEED_BUILD=1"
-
-    )
-
+    echo [错误] 未找到项目内 ONNX Runtime:
+    echo   %ORT_LIB%
+    echo 请执行:
+    echo   scripts\import_onnxruntime.bat x64 "解压后的 ORT 目录"
+    echo 去水印将不可用，继续启动...
 )
 
 

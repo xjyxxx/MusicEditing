@@ -16,7 +16,7 @@ static void printUsage() {
     printf("用法:\n");
     printf("  media_cli version\n");
     printf("  media_cli probe <视频路径>\n");
-    printf("  media_cli iterate <视频路径> [最大帧数]\n");
+    printf("  media_cli iterate <视频路径> [最大帧数] [--hw]\n");
 #ifdef MUSIC_HAS_LLAMA
     printf("  media_cli extract-audio <视频路径> <输出wav>\n");
     printf("  media_cli analyze-speech <transcript.json> <model.gguf> <场景> <最短秒> <最长秒> <敏感度0-1>\n");
@@ -83,11 +83,14 @@ static int iterateCallback(int64_t idx, int64_t total, double ts, void* user) {
     return 0;
 }
 
-static int cmdIterate(const char* path, int maxFrames) {
+static int cmdIterate(const char* path, int maxFrames, bool preferHw) {
     media_engine_init();
 
     IterateCtx ctx{maxFrames, 0};
-    int ret = media_iterate_frames(path, iterateCallback, &ctx);
+    int ret = media_iterate_frames(path, iterateCallback, &ctx, preferHw ? 1 : 0);
+
+    fprintf(stderr, "DECODE_HW:%s\n", media_decoder_hwaccel_name());
+    fflush(stderr);
 
     if (ret != 0) {
         fprintf(stderr, "ITERATE_ERROR:%d\n", ret);
@@ -185,6 +188,8 @@ static int cmdWatermarkInpaint(int argc, char* argv[]) {
     }
     fprintf(stderr, "WATERMARK_BACKEND:%s\n",
         media_watermark_uses_opencv_fallback() ? "opencv" : "lama");
+    fprintf(stderr, "WATERMARK_EP:%s\n", media_watermark_execution_provider());
+    fflush(stderr);
 
     const int numRegions = (argc - 5) / 4;
     std::vector<int> regions(static_cast<size_t>(numRegions * 4));
@@ -254,6 +259,8 @@ static int cmdWatermarkInpaintFrames(int argc, char* argv[]) {
     }
     fprintf(stderr, "WATERMARK_BACKEND:%s\n",
         media_watermark_uses_opencv_fallback() ? "opencv" : "lama");
+    fprintf(stderr, "WATERMARK_EP:%s\n", media_watermark_execution_provider());
+    fflush(stderr);
 
     const int numRegions = (argc - 5) / 4;
     std::vector<int> regions(static_cast<size_t>(numRegions * 4));
@@ -331,8 +338,16 @@ static int runCli(int argc, char* argv[]) {
 
     if (strcmp(cmd, "iterate") == 0) {
         if (argc < 3) { printUsage(); return 1; }
-        int maxFrames = (argc >= 4) ? atoi(argv[3]) : 0;
-        return cmdIterate(argv[2], maxFrames);
+        int maxFrames = 0;
+        bool preferHw = false;
+        for (int i = 3; i < argc; ++i) {
+            if (strcmp(argv[i], "--hw") == 0 || strcmp(argv[i], "-hw") == 0) {
+                preferHw = true;
+            } else {
+                maxFrames = atoi(argv[i]);
+            }
+        }
+        return cmdIterate(argv[2], maxFrames, preferHw);
     }
 
 #ifdef MUSIC_HAS_LLAMA

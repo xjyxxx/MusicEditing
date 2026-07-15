@@ -31,6 +31,12 @@ public:
 
     bool usesOpenCvFallback() const;
 
+    /// 当前 LaMa Session 是否使用了 CUDA Execution Provider
+    bool usesCuda() const;
+
+    /// 执行后端描述：opencv / cuda / cpu
+    const char* executionProvider() const;
+
     /// 对 RGB24 帧原地修复（可多个矩形水印区域）
     bool inpaintRgbFrame(
         uint8_t* rgb,

@@ -27,11 +27,12 @@ if not exist "%OPENCV_X64%" (
 )
 
 if not exist "%ORT_X64%" (
-    echo [提示] 未找到本地 ONNX Runtime x64，正在从 FFmpegxuexi 导入 ...
-    call "%PROJECT_DIR%\scripts\import_onnxruntime.bat" x64
-    if errorlevel 1 (
-        echo [警告] ONNX Runtime 导入失败，去水印模块将禁用
-    )
+    echo [错误] 项目内未找到 ONNX Runtime:
+    echo   %ORT_X64%
+    echo 请先将 GPU 包导入到 third_party（不要依赖外部盘符）:
+    echo   scripts\import_onnxruntime.bat x64 "解压后的 onnxruntime-win-x64-gpu_cuda12 目录"
+    echo 或下载 CPU 包: scripts\setup_onnxruntime_x64.bat
+    echo 去水印模块将禁用，继续编译...
 )
 
 echo Stopping media_player / media_cli ...

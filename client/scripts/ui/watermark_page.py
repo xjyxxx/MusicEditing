@@ -8,8 +8,8 @@ import tempfile
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QFileDialog, QGroupBox, QHBoxLayout, QLabel, QListWidget,
-    QMessageBox, QProgressBar, QPushButton, QSlider, QTabWidget,
+    QButtonGroup, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QListWidget,
+    QMessageBox, QProgressBar, QPushButton, QRadioButton, QSlider, QTabWidget,
     QVBoxLayout, QWidget,
 )
 
@@ -26,8 +26,9 @@ class WatermarkPage(QWidget):
         root = QVBoxLayout(self)
 
         hint = QLabel(
-            "在预览图上拖拽框选水印区域，可框选多个矩形。"
-            "需已编译 ONNX 引擎并下载 models/lama.onnx（scripts/download_lama_model.bat）"
+            "在预览图上拖拽框选水印区域，可框选多个。"
+            "视频默认「快速」(OpenCV，秒级)；图片/精修用 LaMa（需 models/lama.onnx）。"
+            "同一段视频只启动一次 media_cli，帧间复用后端。"
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #888; font-size: 12px;")
@@ -70,6 +71,18 @@ class WatermarkPage(QWidget):
         self._img_region_list = QListWidget()
         self._img_region_list.setMaximumWidth(220)
         side.addWidget(self._img_region_list)
+
+        mode_box = QGroupBox("质量模式")
+        mode_row = QHBoxLayout(mode_box)
+        self._img_mode_fast = QRadioButton("快速 (OpenCV)")
+        self._img_mode_lama = QRadioButton("精修 (LaMa)")
+        self._img_mode_lama.setChecked(True)
+        self._img_mode_group = QButtonGroup(self)
+        self._img_mode_group.addButton(self._img_mode_fast)
+        self._img_mode_group.addButton(self._img_mode_lama)
+        mode_row.addWidget(self._img_mode_fast)
+        mode_row.addWidget(self._img_mode_lama)
+        side.addWidget(mode_box)
 
         btn_col = QVBoxLayout()
         btn_clear = QPushButton("清除区域")
@@ -137,6 +150,18 @@ class WatermarkPage(QWidget):
         self._start_slider.valueChanged.connect(self._on_range_changed)
         self._end_slider.valueChanged.connect(self._on_range_changed)
         layout.addWidget(range_box)
+
+        mode_box = QGroupBox("质量模式")
+        mode_row = QHBoxLayout(mode_box)
+        self._vid_mode_fast = QRadioButton("快速 (OpenCV，推荐视频)")
+        self._vid_mode_lama = QRadioButton("精修 (LaMa，较慢)")
+        self._vid_mode_fast.setChecked(True)
+        self._vid_mode_group = QButtonGroup(self)
+        self._vid_mode_group.addButton(self._vid_mode_fast)
+        self._vid_mode_group.addButton(self._vid_mode_lama)
+        mode_row.addWidget(self._vid_mode_fast)
+        mode_row.addWidget(self._vid_mode_lama)
+        layout.addWidget(mode_box)
 
         btn_row = QHBoxLayout()
         btn_clear = QPushButton("清除区域")
@@ -281,7 +306,10 @@ class WatermarkPage(QWidget):
             return
         self._progress.setVisible(True)
         self._progress.setValue(0)
-        self._vm.start_watermark_image(state.current_image_path, out, regions)
+        backend = "opencv" if self._img_mode_fast.isChecked() else "lama"
+        self._vm.start_watermark_image(
+            state.current_image_path, out, regions, backend=backend,
+        )
 
     @Slot()
     def _on_run_video(self):
@@ -301,21 +329,22 @@ class WatermarkPage(QWidget):
             return
         start = self._start_slider.value() / 1000.0
         end = self._end_slider.value() / 1000.0
+        backend = "opencv" if self._vid_mode_fast.isChecked() else "lama"
         fps = video.fps or 25.0
         est_frames = max(1, int((end - start) * fps))
-        if est_frames > 150:
+        if backend == "lama" and est_frames > 150:
             mins = est_frames * 8 / 60
             ans = QMessageBox.question(
                 self, "处理量较大",
-                f"当前时间段约 {est_frames} 帧，CPU LaMa 预计需 {mins:.0f} 分钟以上。\n"
-                "建议先缩短时间段（如 1–5 秒）试效果。\n\n是否继续？",
+                f"当前时间段约 {est_frames} 帧，LaMa 精修预计需 {mins:.0f} 分钟以上。\n"
+                "建议改用「快速」或缩短时间段（如 1–5 秒）试效果。\n\n是否继续？",
                 QMessageBox.Yes | QMessageBox.No,
             )
             if ans != QMessageBox.Yes:
                 return
         self._progress.setVisible(True)
         self._progress.setValue(0)
-        self._vm.start_watermark_video(out, regions, start, end)
+        self._vm.start_watermark_video(out, regions, start, end, backend=backend)
 
     @Slot(int, float, str)
     def _on_progress(self, task_id, progress, message):

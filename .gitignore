@@ -45,10 +45,11 @@ models/**/*.bin
 models/**/*.gguf
 models/**/*.onnx
 
-# ONNX Runtime 预编译包（>100MB 的 CUDA DLL 禁止上传；运行 scripts/import_onnxruntime.bat 导入）
+# ONNX Runtime 预编译二进制（含 >100MB DLL，GitHub 禁止；本机保留在 third_party）
 third_party/onnxruntime/x64/bin/
 third_party/onnxruntime/x64/lib/
 third_party/onnxruntime/x86/
+third_party/onnxruntime/_cache/
 
 # OpenCV Debug 变体（>100MB，GitHub 禁止；Release 构建只需 opencv_world4120.*）
 third_party/opencv/**/*d.dll
