@@ -137,6 +137,7 @@ MainWindow.shutdown()
 | 智能切片 | `SlicePage` | **已实现完整交互** |
 | 画质增强 | `PlaceholderPage` | 占位，待接入 AI |
 | 去水印 | `WatermarkPage` + `RegionSelectorWidget` | **图片/视频去水印 UI 已实现**（框选多区域、时间段） |
+| 热评滚动 | `HotCommentsPage` | **独立 Tab**：输入歌曲链接/ID → 热评滚动叠加播放器 |
 | 个人中心 | `PlaceholderPage` | 占位，待接入授权 |
 
 播放器组件：`client/scripts/ui/video_player.py`（PySide6 QLabel + `PlayerBackend` → `media_player.exe`）
@@ -792,6 +793,37 @@ SlicePage 列表展示 [起止时间 + 得分]
 
 **场景：游戏高光** → `_analyze_game_fallback()`：抽音频 + 时间轴规则切分，视觉动作检测待接入。
 
+### 5.2.1 网易云热评滚动（已落地）
+
+独立 Tab「热评滚动」。参考 B 站展示思路（[BV1vC4y1t7Wi](https://www.bilibili.com/video/BV1vC4y1t7Wi/)）与
+[ObjTube/NeteaseMusic-qingtian-comment](https://github.com/ObjTube/NeteaseMusic-qingtian-comment)：
+取歌曲热评并在播放区叠加滚动；视频生成器 [wyy-videoGen](https://github.com/ObjTube/wyy-videoGen) 供展示参考（本项目不接讯飞合成）。
+
+```
+用户输入歌曲链接或 ID → 回车 /「确定」
+  │
+  ▼
+HotCommentsPage
+  → core.netease_comments.fetch_hot_comments(limit≤100)
+       优先级:
+       1) netease_hot_comments_script（可选自定义脚本）
+       2) netease_api_base（可选本地 NeteaseCloudMusicApi /comment/music）
+       3) 直连 music.163.com /api/v1/resource/comments/R_SO_4_{id}
+          （hotComments 优先，不足用 comments 补齐）
+       4) demo 回退（可选）
+  → CommentMarquee 滚动 + 本页 VideoPlayerWidget
+```
+
+**配置（`app.conf`）：**
+
+| 键 | 说明 |
+|----|------|
+| `netease_api_base` | 如 `http://127.0.0.1:3000` |
+| `netease_hot_comments_script` | 自定义脚本绝对路径 |
+| `netease_hot_comments_demo` | 网络失败时是否演示数据 |
+
+试例歌曲（晴天）：`186016` 或 `https://music.163.com/#/song?id=186016`
+
 ### 5.3 原模拟链路（已替换）
 
 ~~`_simulate_highlights()` 均匀切分~~ → 演讲类走 ASR+LLM，游戏类仍用规则兜底。
@@ -860,7 +892,8 @@ main.py
 | FFmpeg 视频打开/探测 | ✅ | VideoDecoder + probe |
 | 视频帧遍历 | ✅ | iterateFrames + CLI |
 | 缩略图提取 | ✅ | extractThumbnail（API 已有，UI 未接） |
-| PySide6 五标签 UI | ✅ | 切片页完整，其余占位 |
+| PySide6 多标签 UI | ✅ | 首页/切片/去水印/热评滚动；超分与个人中心占位 |
+| 网易云热评滚动 | ✅ | `HotCommentsPage` + 外部爬虫脚本协议；默认演示数据 |
 | 首页本地播放器 | ✅ | FFmpeg 视频帧 + Qt 音频，音频主时钟同步 |
 | OpenCV 帧处理 | ✅ | `FrameProcessor`：播放器实时滤镜 + 缩略图；配置 `opencv_filter`，UI 标题显示 `OpenCV:clahe` |
 | MVVM 双向绑定 | ✅ | Signal/Slot |

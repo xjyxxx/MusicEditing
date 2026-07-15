@@ -105,6 +105,11 @@ class AppLogic:
             default_lama = _project_root() / "models" / "lama.onnx"
             if default_lama.is_file():
                 self.lama_model_path = str(default_lama)
+        # 网易云热评：直连默认；可选 NCM API / 外部脚本
+        self.netease_api_base = cfg.get("netease_api_base", "")
+        self.netease_hot_comments_script = cfg.get("netease_hot_comments_script", "")
+        demo = cfg.get("netease_hot_comments_demo", "true").strip().lower()
+        self.netease_hot_comments_demo = demo not in ("0", "false", "off", "no")
 
     def toggle_gpu(self, enabled: bool):
         if enabled and not self.gpu_info["cuda_available"]:

@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 
 from ui.video_player import VideoPlayerWidget
 from ui.watermark_page import WatermarkPage
+from ui.hot_comments_page import HotCommentsPage
 from viewmodels.main_vm import MainViewModel
 
 
@@ -72,6 +73,7 @@ class HomePage(QWidget):
             ("智能切片", "自动识别长视频精彩瞬间，一键剪辑导出", 1),
             ("4K 超分", "1080P 升级 4K，画质修复与帧补全", 2),
             ("一键去水印", "复杂水印、边角水印智能去除", 3),
+            ("热评滚动", "网易云热评叠加播放器滚动显示", 4),
         ]
         for i, (t, d, idx) in enumerate(cards):
             grid.addWidget(FeatureCard(t, d, idx, switch_tab), i // 3, i % 3)
@@ -311,6 +313,8 @@ class MainWindow(QMainWindow):
             "支持 1080P→4K 超分、基础修复、老旧视频修复。付费功能待授权解锁。"), "画质增强")
         self._watermark_page = WatermarkPage(self._vm)
         self._tabs.addTab(self._watermark_page, "去水印")
+        self._hot_comments_page = HotCommentsPage(self._vm)
+        self._tabs.addTab(self._hot_comments_page, "热评滚动")
         self._tabs.addTab(PlaceholderPage("个人中心",
             "卡密兑换、版本更新、关于软件。"), "个人中心")
         main_layout.addWidget(self._tabs)
@@ -339,6 +343,8 @@ class MainWindow(QMainWindow):
             return
         self._shutdown_done = True
         self._home_page.shutdown_player()
+        if getattr(self, "_hot_comments_page", None):
+            self._hot_comments_page.shutdown()
 
     def closeEvent(self, event):
         self.shutdown()
