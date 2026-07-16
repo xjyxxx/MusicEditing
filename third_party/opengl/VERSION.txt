@@ -1,0 +1,2 @@
+﻿glew-2.3.1
+layout=x64|x86 include/lib/bin

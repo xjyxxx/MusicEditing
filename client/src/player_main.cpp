@@ -34,6 +34,9 @@ void logCmd(const std::string& line) {
 int main() {
     media::common::Logger::init("MediaPlayer");
     LOG_INFO("media_player 启动");
+#if defined(MUSIC_HAS_GLEW) && MUSIC_HAS_GLEW
+    LOG_INFO("GLEW 已链接（OpenGL 扩展加载器；画面由 UI QOpenGLWidget 渲染）");
+#endif
 
     std::string line;
     while (std::getline(std::cin, line)) {

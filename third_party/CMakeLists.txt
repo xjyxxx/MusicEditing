@@ -29,6 +29,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg.cmake)
 
 add_subdirectory(opencv)
 add_subdirectory(onnxruntime)
+add_subdirectory(opengl)
 
 # 向根项目暴露第三方开关（供 client/ 使用）
 if(MUSIC_HAS_OPENCV)
@@ -38,6 +39,10 @@ endif()
 if(MUSIC_HAS_ONNXRUNTIME)
     set(MUSIC_HAS_ONNXRUNTIME ON PARENT_SCOPE)
     set(MUSIC_ONNXRUNTIME_DLL_DIR "${MUSIC_ONNXRUNTIME_DLL_DIR}" PARENT_SCOPE)
+endif()
+if(MUSIC_HAS_GLEW)
+    set(MUSIC_HAS_GLEW ON PARENT_SCOPE)
+    set(MUSIC_GLEW_DLL_DIR "${MUSIC_GLEW_DLL_DIR}" PARENT_SCOPE)
 endif()
 
 # llama.cpp：优先使用预编译包 llama_prebuilt，否则从源码 add_subdirectory

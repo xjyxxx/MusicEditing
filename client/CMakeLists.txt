@@ -95,6 +95,17 @@ if(MUSIC_HAS_OPENCV)
     )
     message(STATUS "media_player: OpenCV frame filters enabled")
 endif()
+if(MUSIC_HAS_GLEW)
+    target_link_libraries(media_player PRIVATE music_glew)
+    target_compile_definitions(media_player PRIVATE MUSIC_HAS_GLEW=1)
+    add_custom_command(TARGET media_player POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${MUSIC_GLEW_DLL_DIR}/glew32.dll"
+            $<TARGET_FILE_DIR:media_player>
+        COMMENT "复制 GLEW DLL (media_player)"
+    )
+    message(STATUS "media_player: GLEW (OpenGL) enabled")
+endif()
 
 target_include_directories(media_cli PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include

@@ -63,7 +63,7 @@ VideoPlayerEngine.decodeNextFrameToFile()
 Python 读取 frame.rgb → bytes
     │
     ▼
-QImage(rgb, w, h, w*3, RGB888) → QPixmap → QLabel 显示
+RGB24 → GlVideoWidget（QOpenGL 纹理 + 着色器）显示
 ```
 
 ### 2.1 解码后的视频存在哪？

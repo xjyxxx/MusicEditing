@@ -65,6 +65,7 @@ Presets 见 `CMakePresets.json`：`windows-win32-release` / `windows-x64-release
 
 **关键点：**
 - FFmpeg **分目录**：Win32 用 `third_party/ffmpeg/x86/`，x64 用 `third_party/ffmpeg/x64/`
+- GLEW（OpenGL 扩展加载器）在 `third_party/opengl/{x64|x86}/`（`glew32.lib` + `glew32.dll`），系统另链 `opengl32`
 - 两套构建输出互不覆盖（`build/` vs `build_x64/`）
 - Python 客户端始终 64-bit；C++ 引擎架构与 FFmpeg/OpenCV 一致
 
@@ -140,7 +141,7 @@ MainWindow.shutdown()
 | 热评滚动 | `HotCommentsPage` | **独立 Tab**：输入歌曲链接/ID → 热评滚动叠加播放器 |
 | 个人中心 | `PlaceholderPage` | 占位，待接入授权 |
 
-播放器组件：`client/scripts/ui/video_player.py`（PySide6 QLabel + `PlayerBackend` → `media_player.exe`）
+播放器组件：`client/scripts/ui/video_player.py`（`GlVideoWidget` OpenGL + `PlayerBackend` → `media_player.exe`）
 
 ### 3.4 首页播放器交互（统一 FFmpeg 播放器）
 
@@ -149,9 +150,9 @@ MainWindow.shutdown()
 ```
 HomePage
   ├─ VideoPlayerWidget（Python GUI）
-  │    ├─ QLabel 显示 RGB 帧（QImage/QPixmap，不用 QMediaPlayer 视频）
+  │    ├─ GlVideoWidget（QOpenGLWidget）显示 RGB 帧：上传纹理 + 着色器绘制
   │    ├─ Qt QMediaPlayer 仅输出音频（与 FFmpeg 视频并行）
-  │    ├─ QTimer 15ms 轮询 + **以 Qt 音频 position 为主时钟** 同步画面
+  │    ├─ QTimer 轮询 + **以 Qt 音频 position 为主时钟** 同步画面
   │    │     （音频未到下一帧时刻则保持画面；落后时跳帧追赶）
   │    ├─ Seek/播放时音视频同时 jump 到同一时间点
   │    ├─ 打开视频 → fileOpened → ViewModel.import_video（全局共享）
@@ -253,6 +254,26 @@ FILTER invalid   →  ERROR invalid_filter
 CMake 成功时应看到：`OpenCV x.x.x integrated (...)`。输出目录需存在 `opencv_world4120.dll` 滤镜才生效。
 
 详见 `third_party/opencv/README.md`。
+
+### 3.5.6 GLEW / OpenGL 第三方库（已引入）
+
+项目内已复制 **GLEW 2.3.1**（非外部路径引用）：
+
+```
+third_party/opengl/
+├── x64/include/GL  lib/glew32.lib  bin/glew32.dll
+└── x86/...
+```
+
+| 项 | 说明 |
+|----|------|
+| CMake 目标 | `music_glew` → 链 `glew32.lib` + `opengl32` |
+| 宏 | `MUSIC_HAS_GLEW=1` |
+| C++ | `media_player` 链接 GLEW（预留原生 GL；当前解码仍写 RGB） |
+| **UI 显示** | ✅ `ui/gl_video_widget.py`：`QOpenGLWidget` 纹理绘制视频帧（等比 letterbox） |
+
+显示链路：`FFmpeg 解码 → RGB → GlVideoWidget.set_rgb_frame → glTex + 着色器`。  
+OpenGL **实现**来自显卡驱动；GLEW 在 C++ 侧，UI 用 Qt OpenGL。详见 `third_party/opengl/README.md`。
 
 ### 3.7 去水印（OpenCV 快速 + LaMa 精修）
 
@@ -894,8 +915,10 @@ main.py
 | 缩略图提取 | ✅ | extractThumbnail（API 已有，UI 未接） |
 | PySide6 多标签 UI | ✅ | 首页/切片/去水印/热评滚动；超分与个人中心占位 |
 | 网易云热评滚动 | ✅ | `HotCommentsPage` + 外部爬虫脚本协议；默认演示数据 |
-| 首页本地播放器 | ✅ | FFmpeg 视频帧 + Qt 音频，音频主时钟同步 |
+| 首页本地播放器 | ✅ | FFmpeg 解码 + OpenGL 显示 + Qt 音频主时钟 |
 | OpenCV 帧处理 | ✅ | `FrameProcessor`：播放器实时滤镜 + 缩略图；配置 `opencv_filter`，UI 标题显示 `OpenCV:clahe` |
+| GLEW / OpenGL 第三方 | ✅ | `third_party/opengl`；`media_player` 链 GLEW |
+| OpenGL 视频显示 | ✅ | `GlVideoWidget` 替换 QLabel；首页/热评页播放器共用 |
 | MVVM 双向绑定 | ✅ | Signal/Slot |
 | GPU 检测与状态栏 | ✅ | `nvidia-smi`；顶栏 `GPU: 型号` / `CPU 模式`（§3.6） |
 | FFmpeg GPU 硬解（D3D11VA） | ✅ | 播放器 + `VideoDecoder`/`iterate --hw`；失败回退 CPU |

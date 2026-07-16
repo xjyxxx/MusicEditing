@@ -13,7 +13,7 @@ import time
 
 
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QImage, QSurfaceFormat
 
 from PySide6.QtWidgets import (
 
@@ -27,6 +27,7 @@ from core.player_backend import PlayerBackend
 from core.qt_audio_output import QtAudioOutput
 from core.app_logic import AppLogic, load_app_config
 from core.app_logger import setup_logging
+from ui.gl_video_widget import GlVideoWidget, _default_surface_format
 
 log = setup_logging("VideoPlayer", __import__("os").environ.get("MUSIC_LOG_LEVEL", "INFO"))
 
@@ -62,7 +63,7 @@ class VideoPlayerWidget(QWidget):
 
     统一播放器组件
 
-    - 视频：media_player.exe (FFmpeg) → QLabel 显示帧
+    - 视频：media_player.exe (FFmpeg) → OpenGL 纹理显示（GlVideoWidget）
 
     - 音频：Qt QMediaPlayer（仅音频轨，Windows 下更稳定）
 
@@ -99,7 +100,6 @@ class VideoPlayerWidget(QWidget):
         self._was_playing_before_seek = False
         self._opening = False
         self._frame_rgb_buf: bytearray | None = None
-        self._display_pixmap: QPixmap | None = None
         self._last_progress_wall = 0.0
         self._frame_interval = 1.0 / 25.0
         self._sync_timer_ms = 33
@@ -113,24 +113,17 @@ class VideoPlayerWidget(QWidget):
 
 
 
-        self._title = QLabel("未加载视频 · FFmpeg 解码")
+        # OpenGL 显示区：须在创建 QOpenGLWidget 前设置默认 SurfaceFormat
+        QSurfaceFormat.setDefaultFormat(_default_surface_format())
+
+        self._title = QLabel("未加载视频 · FFmpeg 解码 · OpenGL 显示")
 
         self._title.setStyleSheet("color: #ccc; font-size: 13px;")
 
 
 
-        self._display = QLabel("请打开本地视频")
-
-        self._display.setMinimumHeight(240)
-
-        self._display.setAlignment(Qt.AlignCenter)
-        self._display.setScaledContents(True)
-
-        self._display.setStyleSheet(
-
-            "background: #0a0a12; border-radius: 6px; color: #666; font-size: 14px;"
-
-        )
+        self._display = GlVideoWidget()
+        self._display.set_placeholder("请打开本地视频")
 
 
 
@@ -323,6 +316,7 @@ class VideoPlayerWidget(QWidget):
             os.path.basename(path),
             f"{info.width}x{info.height}",
             decode_hint,
+            "OpenGL",
             audio_hint,
         ]
         if self._opencv_filter and self._opencv_filter != "off":
@@ -618,11 +612,7 @@ class VideoPlayerWidget(QWidget):
             self._frame_rgb_buf = bytearray(need)
         self._frame_rgb_buf[:] = rgb
 
-        img = QImage(
-            bytes(self._frame_rgb_buf), w, h, w * 3, QImage.Format_RGB888
-        ).copy()
-        self._display_pixmap = QPixmap.fromImage(img)
-        self._display.setPixmap(self._display_pixmap)
+        self._display.set_rgb_frame(self._frame_rgb_buf, w, h)
 
     def _pull_and_show_frame(self, apply_filter: bool = False) -> bool | None:
 
@@ -689,6 +679,9 @@ class VideoPlayerWidget(QWidget):
         self._audio.shutdown()
         if self._backend:
             self._backend.shutdown()
+        if isinstance(self._display, GlVideoWidget):
+            self._display.clear_frame()
+            self._display.cleanup_gl()
 
     def closeEvent(self, event):
         self.shutdown()
