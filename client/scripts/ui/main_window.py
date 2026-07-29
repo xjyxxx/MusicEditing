@@ -15,6 +15,7 @@ from ui.video_player import VideoPlayerWidget
 from ui.watermark_page import WatermarkPage
 from ui.enhance_page import EnhancePage
 from ui.hot_comments_page import HotCommentsPage
+from ui.download_page import DownloadPage
 from viewmodels.main_vm import MainViewModel
 
 
@@ -75,6 +76,7 @@ class HomePage(QWidget):
             ("4K 超分", "1080P 升级 4K，画质修复与帧补全", 2),
             ("一键去水印", "复杂水印、边角水印智能去除", 3),
             ("热评滚动", "网易云热评叠加播放器滚动显示", 4),
+            ("链接下载", "粘贴网页链接，下载视频或音频", 5),
         ]
         for i, (t, d, idx) in enumerate(cards):
             grid.addWidget(FeatureCard(t, d, idx, switch_tab), i // 3, i % 3)
@@ -88,6 +90,7 @@ class HomePage(QWidget):
         # 打开视频时同步导入到 ViewModel（供其他模块使用）
         self._player.fileOpened.connect(vm.import_video)
         vm.videoLoaded.connect(self._on_video_loaded)
+        vm.downloadFinished.connect(self._on_download_finished)
 
     @Slot(object)
     def _on_video_loaded(self, video):
@@ -98,6 +101,11 @@ class HomePage(QWidget):
         vid = os.path.normcase(os.path.abspath(video.file_path))
         if cur != vid:
             self._player.load_from_video_model(video, auto_play=False)
+
+    @Slot(str)
+    def _on_download_finished(self, path: str):
+        if path and os.path.isfile(path):
+            self._player.open_file(path, auto_play=False)
 
     def shutdown_player(self):
         self._player.shutdown()
@@ -357,9 +365,14 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._watermark_page, "去水印")
         self._hot_comments_page = HotCommentsPage(self._vm)
         self._tabs.addTab(self._hot_comments_page, "热评滚动")
+        self._download_page = DownloadPage(self._vm)
+        self._tabs.addTab(self._download_page, "链接下载")
         self._tabs.addTab(PlaceholderPage("个人中心",
             "卡密兑换、版本更新、关于软件。"), "个人中心")
         main_layout.addWidget(self._tabs)
+
+        self._vm.downloadFinished.connect(self._on_download_to_home)
+        self._download_page.previewPlayRequested.connect(self._on_preview_play)
 
         # 底部状态
         self._status_label = QLabel(self._vm.status_message)
@@ -378,6 +391,20 @@ class MainWindow(QMainWindow):
 
     def _switch_tab(self, index: int):
         self._tabs.setCurrentIndex(index)
+
+    @Slot(str)
+    def _on_download_to_home(self, path: str):
+        """下载/预览完成后切到首页（文件由 HomePage.downloadFinished 加载）。"""
+        if path and os.path.isfile(path):
+            self._tabs.setCurrentIndex(0)
+
+    @Slot(str)
+    def _on_preview_play(self, path: str):
+        """列表试听：打开并自动播放。"""
+        if not path or not os.path.isfile(path):
+            return
+        self._home_page._player.open_file(path, auto_play=True)
+        self._tabs.setCurrentIndex(0)
 
     def shutdown(self):
         """退出前释放播放器与子进程"""

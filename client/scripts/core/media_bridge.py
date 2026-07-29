@@ -9,7 +9,7 @@ import tempfile
 import glob
 import shutil
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
@@ -50,6 +50,60 @@ def _find_ffmpeg() -> Path:
     if found:
         return Path(found)
     raise FileNotFoundError("未找到 ffmpeg.exe")
+
+
+def _find_yt_dlp() -> Path:
+    """查找 yt-dlp（优先 third_party，便于打包）。"""
+    root = Path(__file__).resolve().parent.parent.parent.parent
+    candidates = [
+        root / "third_party" / "yt-dlp" / "yt-dlp.exe",
+        root / "build_x64" / "bin" / "Release" / "yt-dlp.exe",
+        root / "build" / "bin" / "Release" / "yt-dlp.exe",
+        Path(__file__).resolve().parent.parent / "yt-dlp.exe",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    found = shutil.which("yt-dlp") or shutil.which("yt-dlp.exe")
+    if found:
+        return Path(found)
+    raise FileNotFoundError(
+        "未找到 yt-dlp.exe。请运行 scripts\\download_yt_dlp.bat "
+        "下载到 third_party\\yt-dlp\\"
+    )
+
+
+def _find_exiftool() -> Path:
+    """查找 ExifTool（exe 旁须有 exiftool_files/）。"""
+    root = Path(__file__).resolve().parent.parent.parent.parent
+    candidates = [
+        root / "third_party" / "exiftool" / "exiftool.exe",
+        root / "build_x64" / "bin" / "Release" / "exiftool.exe",
+        root / "build" / "bin" / "Release" / "exiftool.exe",
+        Path(__file__).resolve().parent.parent / "exiftool.exe",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    found = shutil.which("exiftool") or shutil.which("exiftool.exe")
+    if found:
+        return Path(found)
+    raise FileNotFoundError(
+        "未找到 exiftool.exe。请运行 scripts\\download_exiftool.bat "
+        "下载到 third_party\\exiftool\\"
+    )
+
+
+# 图片页优先展示的标签（按常见摄影信息排序）
+_EXIF_HIGHLIGHT_TAGS = (
+    "FileName", "FileSize", "MIMEType", "ImageSize", "ImageWidth", "ImageHeight",
+    "Make", "Model", "LensModel", "LensID", "LensInfo",
+    "DateTimeOriginal", "CreateDate", "ModifyDate",
+    "FocalLength", "FNumber", "ExposureTime", "ISO", "ShutterSpeedValue",
+    "Flash", "WhiteBalance", "ExposureProgram", "MeteringMode", "Orientation",
+    "ColorSpace", "GPSPosition", "GPSLatitude", "GPSLongitude", "GPSAltitude",
+    "Software", "Artist", "Copyright", "Description", "UserComment",
+)
 
 
 def _video_encoder_args() -> list[str]:
@@ -128,6 +182,33 @@ class HighlightResult:
     end_sec: float
     score: float = 0.0
     llm_used: bool = False
+
+
+@dataclass
+class UrlListItem:
+    """探测列表行：可用格式或播放列表条目。"""
+    name: str
+    detail: str = ""
+    url: str = ""           # 直链媒体 URL，或条目页面 URL
+    kind: str = "format"    # format | entry
+    format_id: str = ""     # yt-dlp format id
+    page_url: str = ""      # 所属页面（用于按 format_id 拉取）
+    ext: str = ""
+
+
+@dataclass
+class UrlMediaInfo:
+    """yt-dlp -J 探测结果（不下载）。"""
+    url: str
+    title: str = ""
+    duration_sec: float = 0.0
+    uploader: str = ""
+    webpage_url: str = ""
+    thumbnail: str = ""
+    ext: str = ""
+    playlist_title: str = ""
+    preview_hint: str = ""
+    items: List[UrlListItem] = field(default_factory=list)
 
 
 class MediaBridge:
@@ -823,6 +904,406 @@ class MediaBridge:
             return output_path
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    @property
+    def yt_dlp_available(self) -> bool:
+        try:
+            _find_yt_dlp()
+            return True
+        except FileNotFoundError:
+            return False
+
+    @property
+    def exiftool_available(self) -> bool:
+        try:
+            _find_exiftool()
+            return True
+        except FileNotFoundError:
+            return False
+
+    def read_image_exif(self, path: str, *, full: bool = True) -> str:
+        """用 ExifTool 读取图片元数据，返回可读文本。"""
+        path = (path or "").strip()
+        if not path or not os.path.isfile(path):
+            raise FileNotFoundError("图片不存在")
+        et = _find_exiftool()
+        # -G1 分组；-s 短标签名；-a 重复标签；-u 未知
+        base = [
+            str(et),
+            "-charset", "filename=utf8",
+            "-charset", "exif=utf8",
+            "-G1",
+            "-s",
+            "-a",
+            "-u",
+            "-e",
+        ]
+        highlight_cmd = base + [f"-{t}" for t in _EXIF_HIGHLIGHT_TAGS] + [path]
+        full_cmd = base + [path]
+
+        def _run(cmd: list[str]) -> str:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+                env=self._env,
+            )
+            out = (proc.stdout or "").strip()
+            err = (proc.stderr or "").strip()
+            if proc.returncode != 0 and not out:
+                raise RuntimeError(err or f"exiftool exit {proc.returncode}")
+            return out
+
+        highlight = _run(highlight_cmd)
+        if not full:
+            return highlight or "（无常用 EXIF 字段）"
+
+        full_text = _run(full_cmd)
+        if not highlight and not full_text:
+            return "（未读到元数据）"
+        parts = []
+        if highlight:
+            parts.append("=== 常用信息 ===\n" + highlight)
+        if full_text:
+            parts.append("=== 全部标签 ===\n" + full_text)
+        return "\n\n".join(parts)
+
+    def probe_url(
+        self,
+        url: str,
+        timeout: int = 90,
+        *,
+        list_entries: bool = False,
+    ) -> UrlMediaInfo:
+        """用 yt-dlp -J 探测网页媒体元数据（不下载）。
+
+        list_entries=True 时允许播放列表，并用 --flat-playlist 拉条目名称列表。
+        """
+        url = (url or "").strip()
+        if not url:
+            raise ValueError("请输入链接")
+        yt = _find_yt_dlp()
+        cmd = [
+            str(yt),
+            "-J",
+            "--no-warnings",
+            "--socket-timeout", "30",
+        ]
+        if list_entries:
+            cmd.append("--flat-playlist")
+        else:
+            cmd.append("--no-playlist")
+        cmd.append(url)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            env=self._env, timeout=timeout,
+        )
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(err[-800:] if err else "链接探测失败")
+        import json
+        data = json.loads(result.stdout)
+        return self._parse_url_media_info(url, data)
+
+    @staticmethod
+    def _parse_url_media_info(url: str, data: dict) -> UrlMediaInfo:
+        items: List[UrlListItem] = []
+        playlist_title = ""
+        entry = data
+
+        # 播放列表：标题 + 条目名列表
+        if data.get("_type") == "playlist" or data.get("entries"):
+            playlist_title = str(data.get("title") or data.get("id") or "播放列表")
+            for i, e in enumerate(data.get("entries") or []):
+                if not e:
+                    continue
+                name = str(e.get("title") or e.get("id") or f"条目 {i + 1}")
+                dur = e.get("duration")
+                detail = f"{float(dur):.0f}s" if dur else (e.get("id") or "")
+                page = str(e.get("url") or e.get("webpage_url") or e.get("id") or "")
+                # 网易云等：纯数字 id → 拼歌曲页
+                if page.isdigit():
+                    page = f"https://music.163.com/#/song?id={page}"
+                items.append(UrlListItem(
+                    name=name, detail=str(detail), url=page,
+                    kind="entry", page_url=page, ext=str(e.get("ext") or ""),
+                ))
+            # 若扁平列表无格式，用第一条作「当前名」展示
+            first = next((e for e in (data.get("entries") or []) if e), None)
+            if first and not data.get("duration"):
+                entry = first
+
+        page_url = str(entry.get("webpage_url") or data.get("webpage_url") or url)
+
+        # 单曲/单视频：可用格式列表
+        formats = entry.get("formats") or data.get("formats") or []
+        if formats and not items:
+            for f in formats:
+                if not isinstance(f, dict):
+                    continue
+                ext = str(f.get("ext") or "?")
+                fid = str(f.get("format_id") or "")
+                note = str(f.get("format_note") or f.get("resolution") or "")
+                abr = f.get("abr") or 0
+                vbr = f.get("vbr") or 0
+                tbr = f.get("tbr") or 0
+                size = int(f.get("filesize") or f.get("filesize_approx") or 0)
+                media_url = str(f.get("url") or "")
+                parts = [ext]
+                if note:
+                    parts.append(note)
+                if abr:
+                    parts.append(f"{abr:.0f}kbps")
+                elif vbr:
+                    parts.append(f"v{vbr:.0f}k")
+                elif tbr:
+                    parts.append(f"{tbr:.0f}k")
+                if size > 0:
+                    parts.append(f"~{size // 1024}KB" if size < 5_000_000 else f"~{size / 1e6:.1f}MB")
+                if fid:
+                    parts.append(f"id={fid}")
+                items.append(UrlListItem(
+                    name=" · ".join(parts),
+                    detail=note or fid,
+                    url=media_url,
+                    kind="format",
+                    format_id=fid,
+                    page_url=page_url,
+                    ext=ext if ext != "?" else "mp3",
+                ))
+
+        title = str(
+            entry.get("title")
+            or data.get("title")
+            or entry.get("id")
+            or data.get("id")
+            or "未命名"
+        )
+        duration = float(entry.get("duration") or data.get("duration") or 0.0)
+        filesize = int(
+            entry.get("filesize")
+            or entry.get("filesize_approx")
+            or data.get("filesize")
+            or data.get("filesize_approx")
+            or 0
+        )
+        abr = 0.0
+        if formats:
+            for f in formats:
+                if f.get("abr"):
+                    abr = float(f["abr"])
+                    break
+        preview_hint = ""
+        if duration > 90 and filesize > 0 and abr > 0:
+            est = filesize * 8.0 / (abr * 1000.0)
+            if est < duration * 0.55:
+                preview_hint = (
+                    f"疑似试听片段：元数据时长 {duration:.0f}s，"
+                    f"按码率估算实际约 {est:.0f}s（站点未登录/VIP 限制）"
+                )
+        elif duration > 90 and filesize > 0 and filesize < 1_500_000:
+            preview_hint = (
+                f"疑似试听片段：元数据时长 {duration:.0f}s，"
+                f"文件仅约 {filesize // 1024}KB"
+            )
+
+        return UrlMediaInfo(
+            url=url,
+            title=title,
+            duration_sec=duration,
+            uploader=str(
+                entry.get("uploader")
+                or entry.get("channel")
+                or data.get("uploader")
+                or data.get("channel")
+                or ""
+            ),
+            webpage_url=str(entry.get("webpage_url") or data.get("webpage_url") or url),
+            thumbnail=str(entry.get("thumbnail") or data.get("thumbnail") or ""),
+            ext=str(entry.get("ext") or data.get("ext") or ""),
+            playlist_title=playlist_title,
+            preview_hint=preview_hint,
+            items=items,
+        )
+
+    def download_url(
+        self,
+        url: str,
+        output_dir: str,
+        *,
+        audio_only: bool = False,
+        on_progress: Optional[Callable[[float, str], None]] = None,
+        timeout: int = 0,
+    ) -> str:
+        """
+        从网页链接下载视频或音频。
+        audio_only=True 时提取为 mp3（需 ffmpeg）。
+        返回最终文件路径。
+        """
+        import re
+        import time as _time
+
+        url = (url or "").strip()
+        if not url:
+            raise ValueError("请输入链接")
+        yt = _find_yt_dlp()
+        ffmpeg = _find_ffmpeg()
+        os.makedirs(output_dir, exist_ok=True)
+
+        stamp = int(_time.time())
+        out_tmpl = os.path.join(output_dir, f"dl_{stamp}_%(id)s.%(ext)s")
+        cmd = [
+            str(yt),
+            "--no-playlist",
+            "--newline",
+            "--no-warnings",
+            "--ffmpeg-location", str(ffmpeg.parent),
+            "-o", out_tmpl,
+        ]
+        if audio_only:
+            cmd.extend(["-x", "--audio-format", "mp3", "--audio-quality", "0"])
+        else:
+            cmd.extend([
+                "-f", "bv*+ba/b",
+                "--merge-output-format", "mp4",
+            ])
+        cmd.append(url)
+
+        def report(p: float, msg: str):
+            if on_progress:
+                on_progress(p, msg)
+
+        report(1.0, "开始下载…")
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=self._env,
+        )
+        pct_re = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
+        assert proc.stdout is not None
+        last_msg = ""
+        try:
+            for line in proc.stdout:
+                text = line.strip()
+                if not text:
+                    continue
+                last_msg = text
+                m = pct_re.search(text)
+                if m:
+                    pct = min(99.0, float(m.group(1)))
+                    report(pct, text[:120])
+                elif "[ExtractAudio]" in text or "[Merger]" in text:
+                    report(92.0, text[:120])
+                else:
+                    report(max(2.0, min(90.0, 40.0)), text[:120])
+        finally:
+            code = proc.wait(timeout=timeout if timeout > 0 else None)
+
+        prefix = f"dl_{stamp}_"
+        files = [
+            os.path.join(output_dir, n)
+            for n in os.listdir(output_dir)
+            if n.startswith(prefix) and os.path.isfile(os.path.join(output_dir, n))
+        ]
+        if not files:
+            hint = last_msg[-400:] if last_msg else f"exit {code}"
+            raise RuntimeError(f"下载失败或未找到输出文件：{hint}")
+        files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+        final = files[0]
+        if code != 0 and not os.path.isfile(final):
+            raise RuntimeError(f"下载失败（exit {code}）")
+
+        report(100.0, f"完成: {os.path.basename(final)}")
+        return final
+
+    def fetch_for_preview(
+        self,
+        item_kind: str,
+        *,
+        page_url: str = "",
+        media_url: str = "",
+        format_id: str = "",
+        ext: str = "mp3",
+        referer: str = "",
+        on_progress: Optional[Callable[[float, str], None]] = None,
+    ) -> str:
+        """为列表「播放」拉取到临时文件（不进用户下载目录）。"""
+        import tempfile
+        import urllib.request
+
+        def report(p: float, msg: str):
+            if on_progress:
+                on_progress(p, msg)
+
+        tmp_dir = tempfile.mkdtemp(prefix="music_preview_")
+        ext = (ext or "mp3").lstrip(".")
+        if ext in ("?", "", "unknown"):
+            ext = "mp3"
+
+        # 1) 有直链：HTTP 拉取
+        if media_url.startswith("http"):
+            report(10.0, "正在拉取试听流…")
+            out = os.path.join(tmp_dir, f"preview.{ext}")
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+            }
+            if referer:
+                headers["Referer"] = referer
+            elif "163.com" in media_url or "126.net" in media_url:
+                headers["Referer"] = "https://music.163.com/"
+            req = urllib.request.Request(media_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=90) as resp, open(out, "wb") as f:
+                f.write(resp.read())
+            if not os.path.isfile(out) or os.path.getsize(out) < 1000:
+                raise RuntimeError("试听流拉取失败或文件过小")
+            report(100.0, "就绪")
+            return out
+
+        # 2) 条目 / 指定 format：走 yt-dlp
+        target = page_url or media_url
+        if not target:
+            raise RuntimeError("该列表项没有可播放地址")
+        report(5.0, "正在用 yt-dlp 拉取预览…")
+        if item_kind == "format" and format_id:
+            yt = _find_yt_dlp()
+            ffmpeg = _find_ffmpeg()
+            out_tmpl = os.path.join(tmp_dir, f"preview_%(id)s.%(ext)s")
+            cmd = [
+                str(yt), "--no-playlist", "--newline", "--no-warnings",
+                "--ffmpeg-location", str(ffmpeg.parent),
+                "-f", format_id,
+                "-o", out_tmpl,
+                target,
+            ]
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", env=self._env, timeout=180,
+            )
+            files = [
+                os.path.join(tmp_dir, n) for n in os.listdir(tmp_dir)
+                if os.path.isfile(os.path.join(tmp_dir, n))
+            ]
+            if not files:
+                raise RuntimeError(proc.stderr[-400:] if proc.stderr else "预览拉取失败")
+            files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+            report(100.0, "就绪")
+            return files[0]
+
+        # 3) 歌单条目：按音频下载到临时目录
+        return self.download_url(
+            target, tmp_dir, audio_only=True, on_progress=on_progress,
+        )
 
     def probe_duration(self, input_path: str) -> float:
         """尽量用 media_cli probe，失败则回 0。"""

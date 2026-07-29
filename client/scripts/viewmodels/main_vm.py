@@ -64,6 +64,12 @@ class MainViewModel(QObject):
 
     silenceFinished = Signal(str)
 
+    downloadProgress = Signal(int, float, str)
+
+    downloadFinished = Signal(str)
+
+    downloadProbeReady = Signal(object)
+
     errorOccurred = Signal(str)
 
     statusMessageChanged = Signal(str)
@@ -1117,6 +1123,97 @@ class MainViewModel(QObject):
                 task.state = TaskState.FAILED
                 self.taskStateChanged.emit(task.task_id, TaskState.FAILED)
                 self.errorOccurred.emit(f"静音裁剪失败: {e}")
+
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+
+    @Slot(str, bool)
+    def probe_download_url(self, url: str, list_entries: bool = False):
+        if not self._bridge:
+            self.errorOccurred.emit("媒体引擎未加载")
+            return
+
+        def run():
+            try:
+                info = self._bridge.probe_url(url, list_entries=list_entries)
+                self.downloadProbeReady.emit(info)
+            except Exception as e:
+                self.errorOccurred.emit(f"探测失败: {e}")
+
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+
+    def preview_list_item(self, item) -> None:
+        """列表项播放：拉到临时文件后 emit downloadFinished（首页打开）。"""
+        if not self._bridge:
+            self.errorOccurred.emit("媒体引擎未加载")
+            return
+
+        def run():
+            try:
+                def report(p: float, msg: str):
+                    self.downloadProgress.emit(0, p, msg)
+
+                path = self._bridge.fetch_for_preview(
+                    getattr(item, "kind", "format"),
+                    page_url=getattr(item, "page_url", "") or "",
+                    media_url=getattr(item, "url", "") or "",
+                    format_id=getattr(item, "format_id", "") or "",
+                    ext=getattr(item, "ext", "") or "mp3",
+                    referer=getattr(item, "page_url", "") or "",
+                    on_progress=report,
+                )
+                self._status_message = f"预览就绪: {os.path.basename(path)}"
+                self.statusMessageChanged.emit(self._status_message)
+                # 复用 downloadFinished → 首页播放；不弹「下载完成」由 UI 区分
+                self.downloadFinished.emit(path)
+            except Exception as e:
+                self.errorOccurred.emit(f"播放失败: {e}")
+
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+
+    @Slot(str, str, bool)
+    def start_url_download(self, url: str, output_dir: str, audio_only: bool = False):
+        if not self._bridge:
+            self.errorOccurred.emit("媒体引擎未加载")
+            return
+        if not getattr(self._bridge, "yt_dlp_available", False):
+            self.errorOccurred.emit(
+                "未找到 yt-dlp.exe，请运行 scripts\\download_yt_dlp.bat"
+            )
+            return
+
+        task = TaskModel(
+            task_id=self._next_task_id,
+            task_type=TaskType.DOWNLOAD,
+            file_path=url,
+            state=TaskState.PROCESSING,
+            total_frames=1,
+        )
+        self._next_task_id += 1
+        self._state.tasks.append(task)
+        self.taskStateChanged.emit(task.task_id, TaskState.PROCESSING)
+
+        def run():
+            try:
+                def report(p: float, msg: str):
+                    task.progress = p
+                    self.downloadProgress.emit(task.task_id, p, msg)
+
+                path = self._bridge.download_url(
+                    url, output_dir, audio_only=audio_only, on_progress=report,
+                )
+                task.state = TaskState.COMPLETED
+                task.progress = 100.0
+                self.taskStateChanged.emit(task.task_id, TaskState.COMPLETED)
+                self._status_message = f"下载完成: {os.path.basename(path)}"
+                self.statusMessageChanged.emit(self._status_message)
+                self.downloadFinished.emit(path)
+            except Exception as e:
+                task.state = TaskState.FAILED
+                self.taskStateChanged.emit(task.task_id, TaskState.FAILED)
+                self.errorOccurred.emit(f"下载失败: {e}")
 
         import threading
         threading.Thread(target=run, daemon=True).start()

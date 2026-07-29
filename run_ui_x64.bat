@@ -120,6 +120,33 @@ if not exist "%PROJECT_DIR%\models\lama.onnx" (
     )
 )
 
+if not exist "%PROJECT_DIR%\third_party\yt-dlp\yt-dlp.exe" (
+    echo [提示] 未找到 yt-dlp，正在下载到 third_party\yt-dlp\ ...
+    call "%PROJECT_DIR%\scripts\download_yt_dlp.bat"
+    if errorlevel 1 (
+        echo [警告] yt-dlp 下载失败，链接下载功能将不可用
+        echo         可稍后手动运行: scripts\download_yt_dlp.bat
+    )
+)
+if exist "%PROJECT_DIR%\third_party\yt-dlp\yt-dlp.exe" (
+    copy /Y "%PROJECT_DIR%\third_party\yt-dlp\yt-dlp.exe" "%BIN%\" >nul 2>&1
+)
+
+if not exist "%PROJECT_DIR%\third_party\exiftool\exiftool.exe" (
+    echo [提示] 未找到 ExifTool，正在下载到 third_party\exiftool\ ...
+    call "%PROJECT_DIR%\scripts\download_exiftool.bat"
+    if errorlevel 1 (
+        echo [警告] ExifTool 下载失败，图片 EXIF 面板将不可用
+        echo         可稍后手动运行: scripts\download_exiftool.bat
+    )
+)
+if exist "%PROJECT_DIR%\third_party\exiftool\exiftool.exe" (
+    copy /Y "%PROJECT_DIR%\third_party\exiftool\exiftool.exe" "%BIN%\" >nul 2>&1
+    if exist "%PROJECT_DIR%\third_party\exiftool\exiftool_files" (
+        xcopy /E /I /Y "%PROJECT_DIR%\third_party\exiftool\exiftool_files" "%BIN%\exiftool_files\" >nul 2>&1
+    )
+)
+
 pip install -r "%PROJECT_DIR%\client\scripts\requirements.txt" -q
 
 if errorlevel 1 (

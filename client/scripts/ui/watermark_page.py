@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.image_loader import load_preview
+from ui.exif_panel import ExifPanel
 from ui.region_selector import RegionSelectorWidget
 from viewmodels.main_vm import MainViewModel
 
@@ -66,6 +67,9 @@ class WatermarkPage(QWidget):
 
         self._img_selector = RegionSelectorWidget()
         layout.addWidget(self._img_selector, 1)
+
+        self._img_exif = ExifPanel(lambda: self._vm.bridge)
+        layout.addWidget(self._img_exif)
 
         side = QHBoxLayout()
         self._img_region_list = QListWidget()
@@ -214,6 +218,7 @@ class WatermarkPage(QWidget):
         self._vm.import_image(path)
         self._img_path_label.setText(os.path.basename(path))
         self._img_selector.load_pixmap(preview.pixmap, preview.native_size)
+        self._img_exif.load_path(path)
         self._status.setText(
             f"已加载图片: {path}  ·  {preview.native_width}×{preview.native_height}"
             f"  ·  解码 {preview.backend}"

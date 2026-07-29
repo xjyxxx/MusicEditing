@@ -39,6 +39,15 @@ third_party/llama.cpp/build/
 third_party/ffmpeg/x64_download.zip
 third_party/ffmpeg/_x64_extract/
 
+# yt-dlp 独立可执行文件（由 scripts/download_yt_dlp.bat 获取）
+third_party/yt-dlp/yt-dlp.exe
+
+# ExifTool Windows 包（由 scripts/download_exiftool.bat 获取）
+third_party/exiftool/exiftool.exe
+third_party/exiftool/exiftool_files/
+third_party/exiftool/_exiftool_win64.zip
+third_party/exiftool/_extract/
+
 # 大文件（按需调整）
 tests/*.mp4
 models/**/*.bin

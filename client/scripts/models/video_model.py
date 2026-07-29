@@ -21,6 +21,7 @@ class TaskType(IntEnum):
     ENHANCE = 1
     WATERMARK = 2
     EXPORT = 3
+    DOWNLOAD = 4
 
 
 @dataclass

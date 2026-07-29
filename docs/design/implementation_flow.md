@@ -138,9 +138,10 @@ MainWindow.shutdown()
 |------|-----|------|
 | 首页 | `HomePage` + `VideoPlayerWidget` | 本地预览播放器 + 功能卡片导航 |
 | 智能切片 | `SlicePage` | **已实现完整交互** |
-| 画质增强 | `EnhancePage` | **图片/视频超分**：参数预设、局部对比、完成后打开结果/文件夹 |
-| 去水印 | `WatermarkPage` + `RegionSelectorWidget` | **图片/视频去水印 UI 已实现**（框选多区域、时间段） |
+| 画质增强 | `EnhancePage` + `ExifPanel` | **图片/视频超分**；导入图片显示 ExifTool 元数据 |
+| 去水印 | `WatermarkPage` + `RegionSelectorWidget` + `ExifPanel` | **图片/视频去水印**；导入图片显示 EXIF |
 | 热评滚动 | `HotCommentsPage` | **独立 Tab**：输入歌曲链接/ID → 热评滚动叠加播放器 |
+| 链接下载 | `DownloadPage` | **粘贴 URL → yt-dlp 下视频/音频 → 首页播放** |
 | 个人中心 | `PlaceholderPage` | 占位，待接入授权 |
 
 播放器组件：`client/scripts/ui/video_player.py`（`GlVideoWidget` OpenGL + `PlayerBackend` → `media_player.exe`）
@@ -407,7 +408,7 @@ EnhancePage
 | 3 回退 | Qt `QImageReader` | 无 OpenCV 或解码失败时 |
 | 4 显示 | `QGraphicsView` 软件合成（不透明底 + 全量刷新） | 曾用 OpenGL 视口，缩小时易残影，已去掉；解码仍走 OpenCV |
 
-去水印页导入图片/预览帧同样走 `load_preview`。
+去水印页导入图片/预览帧同样走 `load_preview`。导入图片时额外调用 `MediaBridge.read_image_exif`（`third_party/exiftool`），在 `ExifPanel` 展示常用字段 + 全部标签。
 
 ### 3.6 GPU 硬件加速
 
@@ -977,6 +978,44 @@ SlicePage「静音剪掉」
 
 优先走捆绑 `ffmpeg.exe`，无需新 C++ CLI。静音阈值默认 `-35dB`、最短静音 `0.45s`。
 
+### 5.7 链接下载（yt-dlp）
+
+```
+DownloadPage（内嵌 Tab）
+  ├─ 「下载」：粘贴 URL → 可选探测 → 下视频/音频 → 首页播放器
+  └─ 「仅获取信息」：yt-dlp -J（可 --flat-playlist）
+        → 显示名称 + 格式/歌单条目列表（不落盘到下载目录）
+        → 双击/「播放选中」→ fetch_for_preview(临时文件) → 首页自动播放
+        → 「删除选中」/「清空」→ 仅改本地列表
+```
+
+| 资源 | 路径 |
+|------|------|
+| 引擎 | `third_party/yt-dlp/yt-dlp.exe`（`scripts/download_yt_dlp.bat`） |
+| 转码 | 项目已有 FFmpeg |
+
+探测会解析格式列表或歌单条目；若码率/体积与元数据时长不符，提示「疑似试听片段」。
+列表支持 **双击/播放选中**（拉临时文件 → 首页播放器）、**删除选中 / 清空**（仅改本地列表）。
+
+**注意：** 仅下载自有/授权素材；站点规则变化时更新 yt-dlp 即可。
+
+### 5.8 图片 EXIF（ExifTool）
+
+```
+EnhancePage / WatermarkPage 导入图片
+  → ExifPanel.load_path
+      → MediaBridge.read_image_exif
+          → third_party/exiftool/exiftool.exe（旁路 exiftool_files/）
+  → 面板显示「常用信息」+「全部标签」
+```
+
+| 资源 | 路径 |
+|------|------|
+| 引擎 | `third_party/exiftool/exiftool.exe` + `exiftool_files/`（`scripts/download_exiftool.bat`） |
+| UI | `client/scripts/ui/exif_panel.py` |
+
+**注意：** 复制到 `bin/Release` 时必须同时复制 `exiftool_files`。
+
 ---
 
 ## 6. 原 §5 智能切片（旧描述保留参考）
@@ -1012,6 +1051,7 @@ main.py
     ├── ui/video_player.py
     │   └── core/player_backend.py  (subprocess → media_player.exe)
     ├── ui/enhance_page.py / watermark_page.py
+    │   ├── ui/exif_panel.py       (ExifTool 元数据面板)
     │   └── core/image_loader.py   (OpenCV 解码 / 可选 CUDA 缩放 / Qt 回退)
     └── viewmodels/main_vm.py
         ├── models/video_model.py
@@ -1044,6 +1084,8 @@ main.py
 | 批量导出剪辑 | ✅ | `一键高光成片` → 分片 + `highlights_merged.mp4`（ffmpeg） |
 | 静音剪掉 | ✅ | `静音剪掉` → silencedetect + 拼接紧凑口播 |
 | OpenCV 趣味滤镜 | ✅ | film / neon / comic / pixel；播放器下拉切换 |
+| 链接下载 | ✅ | `DownloadPage` + `third_party/yt-dlp`；视频 MP4 / 音频 MP3 |
+| 图片 EXIF | ✅ | `ExifPanel` + `third_party/exiftool`；超分/去水印导入图片时展示 |
 | 4K 超分 | ✅ | `EnhancePage` + Real-ESRGAN ONNX / OpenCV 双三次；`upscale` CLI；预览 `image_loader`（OpenCV） |
 | 去水印 | ✅ | `WatermarkPage` 快速(OpenCV)/精修(LaMa)；视频默认快速 + 帧批复用 |
 | 授权/卡密 | ⏳ | network.py 预留 |
@@ -1144,4 +1186,6 @@ x64 构建后 Python 可逐步改为 **ctypes 直接加载** `media_engine.dll`�
 .\run_ui.bat                   # 启动 UI
 .\scripts\download_lama_model.bat          # 去水印精修模型
 .\scripts\download_realesrgan_model.bat    # 画质超分模型（~5MB）
+.\scripts\download_yt_dlp.bat              # 链接下载引擎 yt-dlp.exe → third_party/yt-dlp/
+.\scripts\download_exiftool.bat            # 图片 EXIF：exiftool.exe + exiftool_files → third_party/exiftool/
 ```

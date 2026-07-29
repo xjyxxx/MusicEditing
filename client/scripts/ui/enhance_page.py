@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.image_loader import load_preview, probe_size
+from ui.exif_panel import ExifPanel
 from viewmodels.main_vm import MainViewModel
 
 _STYLE = """
@@ -424,6 +425,9 @@ class EnhancePage(QWidget):
         self._img_compare = SideBySideCompare()
         layout.addWidget(self._img_compare, 1)
 
+        self._img_exif = ExifPanel(lambda: self._vm.bridge)
+        layout.addWidget(self._img_exif)
+
         layout.addWidget(self._build_mode_panel("img", default_ai=True))
 
         actions = QHBoxLayout()
@@ -586,6 +590,7 @@ class EnhancePage(QWidget):
             self._img_meta.setText(f"原图  {w}×{h}  ·  {self._file_size_mb(path)}")
         self._img_compare.set_original(path)
         self._img_compare.clear_result("超分完成后显示")
+        self._img_exif.load_path(path)
         self._btn_open_result.setEnabled(False)
         self._btn_folder_result.setEnabled(False)
         be = self._img_compare.left_view.load_backend() or "—"
