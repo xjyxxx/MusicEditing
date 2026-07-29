@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import array
 
-from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QImage, QPainter, QSurfaceFormat
+from PySide6.QtCore import Qt, QSize, QRectF, QPointF, Signal
+from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPolygonF, QSurfaceFormat, QMouseEvent
 from PySide6.QtOpenGL import (
     QOpenGLBuffer,
     QOpenGLShader,
@@ -51,19 +51,23 @@ def _default_surface_format() -> QSurfaceFormat:
 
 
 class GlVideoWidget(QOpenGLWidget):
-    """将 RGB24 帧作为 OpenGL 纹理绘制；无帧时显示占位文字。"""
+    """将 RGB24 帧作为 OpenGL 纹理绘制；无帧时显示占位文字。点击画面可切换播放。"""
+
+    clicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFormat(_default_surface_format())
         self.setMinimumHeight(240)
         self.setStyleSheet("background: #0a0a12; border-radius: 6px;")
+        self.setCursor(Qt.PointingHandCursor)
 
-        self._placeholder = "请打开本地视频"
+        self._placeholder = "请打开本地视频或音乐"
         self._has_frame = False
         self._tex_w = 0
         self._tex_h = 0
         self._pending_image: QImage | None = None
+        self._paused_overlay = False
 
         self._program: QOpenGLShaderProgram | None = None
         self._vao: QOpenGLVertexArrayObject | None = None
@@ -75,6 +79,14 @@ class GlVideoWidget(QOpenGLWidget):
         self._placeholder = text or ""
         if not self._has_frame:
             self.update()
+
+    def set_paused_overlay(self, paused: bool) -> None:
+        """暂停时在画面中央显示三角播放标志（提示点击继续）。"""
+        paused = bool(paused)
+        if self._paused_overlay == paused:
+            return
+        self._paused_overlay = paused
+        self.update()
 
     def clear_frame(self) -> None:
         self._has_frame = False
@@ -162,15 +174,52 @@ class GlVideoWidget(QOpenGLWidget):
             self._upload_texture(self._pending_image)
             self._pending_image = None
 
-        if self._gl_ready and self._has_frame and self._texture and self._program:
+        drew_frame = bool(
+            self._gl_ready and self._has_frame and self._texture and self._program
+        )
+        if drew_frame:
             self._draw_textured_quad()
-            return
 
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.TextAntialiasing)
-        painter.setPen(Qt.gray)
-        painter.drawText(self.rect(), Qt.AlignCenter, self._placeholder)
+        if not drew_frame:
+            painter.setPen(Qt.gray)
+            painter.drawText(self.rect(), Qt.AlignCenter, self._placeholder)
+        if self._paused_overlay:
+            self._draw_play_icon(painter)
         painter.end()
+
+    def _draw_play_icon(self, painter: QPainter) -> None:
+        """暂停时显示三角播放标志（提示点击继续）。"""
+        side = min(self.width(), self.height())
+        r = max(28, int(side * 0.11))
+        cx = self.width() // 2
+        cy = self.height() // 2
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor(0, 0, 0, 150)))
+        painter.drawEllipse(QRectF(cx - r, cy - r, r * 2, r * 2))
+
+        # 略偏右，视觉上更居中
+        tri_w = max(16, int(r * 0.7))
+        tri_h = max(20, int(r * 0.85))
+        ox = cx - tri_w // 3
+        top = cy - tri_h // 2
+        poly = QPolygonF([
+            QPointF(ox, top),
+            QPointF(ox, top + tri_h),
+            QPointF(ox + tri_w, cy),
+        ])
+        painter.setBrush(QBrush(QColor(255, 255, 255, 235)))
+        painter.drawPolygon(poly)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
     def _upload_texture(self, image: QImage) -> None:
         if self._texture is not None:

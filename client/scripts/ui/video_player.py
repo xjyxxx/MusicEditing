@@ -13,12 +13,10 @@ import time
 
 
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QImage, QSurfaceFormat
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QSurfaceFormat
 
 from PySide6.QtWidgets import (
-
-    QFileDialog, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget,
-
+    QComboBox, QFileDialog, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget,
 )
 
 
@@ -31,8 +29,16 @@ from ui.gl_video_widget import GlVideoWidget, _default_surface_format
 
 log = setup_logging("VideoPlayer", __import__("os").environ.get("MUSIC_LOG_LEVEL", "INFO"))
 
+_AUDIO_EXTS = {
+    ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".wma", ".opus", ".aiff", ".ape",
+}
+_VIDEO_EXTS = {
+    ".mp4", ".mov", ".avi", ".mkv", ".flv", ".wmv", ".webm", ".m4v", ".ts", ".mpeg", ".mpg",
+}
 
 
+def _is_audio_file(path: str) -> bool:
+    return os.path.splitext(path)[1].lower() in _AUDIO_EXTS
 
 
 def _format_time(sec: float) -> str:
@@ -110,24 +116,25 @@ class VideoPlayerWidget(QWidget):
         self._opencv_filter_playback = _pb not in ("0", "false", "off", "no")
         self._hw_decode_preferred = AppLogic().prefer_hw_decode
         self._hw_decode_active = False
+        self._audio_only = False
 
 
 
         # OpenGL 显示区：须在创建 QOpenGLWidget 前设置默认 SurfaceFormat
         QSurfaceFormat.setDefaultFormat(_default_surface_format())
 
-        self._title = QLabel("未加载视频 · FFmpeg 解码 · OpenGL 显示")
+        self._title = QLabel("未加载 · 支持视频 / 音乐")
 
         self._title.setStyleSheet("color: #ccc; font-size: 13px;")
 
 
 
         self._display = GlVideoWidget()
-        self._display.set_placeholder("请打开本地视频")
+        self._display.set_placeholder("请打开本地视频或音乐\n点击画面可暂停 / 继续")
 
 
 
-        self._btn_open = QPushButton("打开视频")
+        self._btn_open = QPushButton("打开文件")
 
         self._btn_play = QPushButton("播放")
 
@@ -157,7 +164,23 @@ class VideoPlayerWidget(QWidget):
 
         self._volume.setToolTip("音量")
 
-
+        self._filter_combo = QComboBox()
+        self._filter_combo.setToolTip("OpenCV 实时滤镜（播放时也会生效）")
+        for label, mode in (
+            ("滤镜:关闭", "off"),
+            ("CLAHE", "clahe"),
+            ("降噪", "denoise"),
+            ("锐化", "sharpen"),
+            ("胶片", "film"),
+            ("霓虹", "neon"),
+            ("漫画", "comic"),
+            ("像素", "pixel"),
+        ):
+            self._filter_combo.addItem(label, mode)
+        idx = self._filter_combo.findData(self._opencv_filter)
+        if idx < 0:
+            idx = 0
+        self._filter_combo.setCurrentIndex(idx)
 
         ctrl = QHBoxLayout()
 
@@ -168,6 +191,8 @@ class VideoPlayerWidget(QWidget):
         ctrl.addWidget(self._btn_pause)
 
         ctrl.addWidget(self._btn_stop)
+
+        ctrl.addWidget(self._filter_combo)
 
         ctrl.addStretch()
 
@@ -213,11 +238,17 @@ class VideoPlayerWidget(QWidget):
 
         self._btn_stop.clicked.connect(self.stop)
 
+        self._filter_combo.currentIndexChanged.connect(self._on_filter_changed)
+
+        self._display.clicked.connect(self._on_display_clicked)
+
         self._progress.sliderPressed.connect(self._on_seek_pressed)
 
         self._progress.sliderReleased.connect(self._on_seek_released)
 
         self._volume.valueChanged.connect(self._on_volume_changed)
+
+        self._audio.set_duration_callback(self._on_audio_duration)
 
 
 
@@ -246,11 +277,15 @@ class VideoPlayerWidget(QWidget):
 
         path, _ = QFileDialog.getOpenFileName(
 
-            self, "选择视频",
+            self, "选择视频或音乐",
 
             self._current_path or "",
 
-            "视频文件 (*.mp4 *.mov *.avi *.flv *.mkv *.wmv);;所有文件 (*.*)",
+            "媒体文件 (*.mp4 *.mov *.avi *.mkv *.flv *.wmv *.webm "
+            "*.mp3 *.wav *.flac *.m4a *.aac *.ogg *.wma);;"
+            "视频 (*.mp4 *.mov *.avi *.mkv *.flv *.wmv *.webm);;"
+            "音乐 (*.mp3 *.wav *.flac *.m4a *.aac *.ogg *.wma);;"
+            "所有文件 (*.*)",
 
         )
 
@@ -261,7 +296,10 @@ class VideoPlayerWidget(QWidget):
 
 
     def open_file(self, path: str, auto_play: bool = False):
-        if not self._backend or not os.path.isfile(path):
+        if not os.path.isfile(path):
+            return
+        # 纯音乐不依赖 media_player；视频才需要 backend
+        if not _is_audio_file(path) and not self._backend:
             return
         if self._opening:
             return
@@ -277,11 +315,112 @@ class VideoPlayerWidget(QWidget):
         self._playing = playing
         self._btn_play.setEnabled(not playing)
         self._btn_pause.setEnabled(playing)
+        # 已加载媒体且暂停时显示暂停标志；播放中或未加载则隐藏
+        show_pause = (not playing) and bool(self._current_path)
+        self._display.set_paused_overlay(show_pause)
 
-    def _do_open_file(self, path: str, auto_play: bool = False):
+    @Slot()
+    def _on_display_clicked(self):
+        """点击画面：暂停 / 继续；未加载时打开文件。"""
+        if not self._current_path:
+            self._on_open()
+            return
+        if self._playing:
+            self.pause()
+        else:
+            self.play()
+
+    @Slot(float)
+    def _on_audio_duration(self, duration_sec: float):
+        if duration_sec <= 0:
+            return
+        if self._audio_only or self._duration_sec <= 0:
+            self._duration_sec = duration_sec
+            self._progress.setRange(0, max(int(duration_sec * 1000), 1))
+            self._update_time_label()
+
+    def _make_music_cover(self, playing: bool) -> QImage:
+        w, h = 960, 540
+        img = QImage(w, h, QImage.Format_RGB888)
+        img.fill(QColor(14, 16, 32))
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing)
+        # 背景渐变块
+        p.fillRect(0, 0, w, h, QColor(18, 22, 48))
+        p.fillRect(80, 60, w - 160, h - 120, QColor(28, 34, 68))
+        name = os.path.basename(self._current_path) if self._current_path else "音乐"
+        p.setPen(QColor(200, 210, 255))
+        font = QFont()
+        font.setPointSize(28)
+        font.setBold(True)
+        p.setFont(font)
+        p.drawText(img.rect().adjusted(40, 0, -40, -80), Qt.AlignCenter, f"♪  {name}")
+        tip = "播放中 · 点击暂停" if playing else "已暂停 · 点击继续"
+        p.setPen(QColor(140, 160, 200))
+        font.setPointSize(16)
+        font.setBold(False)
+        p.setFont(font)
+        p.drawText(img.rect().adjusted(40, 80, -40, 0), Qt.AlignCenter, tip)
+        p.end()
+        return img
+
+    def _show_music_cover(self, playing: bool | None = None):
+        if playing is None:
+            playing = self._playing
+        self._display.set_qimage(self._make_music_cover(playing))
+
+    def _do_open_audio(self, path: str, auto_play: bool = False):
         self._timer.stop()
         self._audio.stop()
         self._reset_transport_controls(playing=False)
+        self._audio_only = True
+        self._hw_decode_active = False
+        self._has_audio = True
+        self._current_path = os.path.abspath(path)
+        self._duration_sec = 0.0
+        self._fps = 25.0
+        self._frame_interval = 0.04
+        self._sync_timer_ms = 50
+        self._timer.setInterval(self._sync_timer_ms)
+        self._position_sec = 0.0
+        self._last_shown_frame_ts = -1.0
+
+        # 停掉视频解码子进程占用（若有）
+        if self._backend:
+            try:
+                self._backend.pause()
+            except Exception:
+                pass
+
+        self._audio.open(self._current_path)
+        self._audio.set_volume(self._volume.value() / 100.0)
+        dur = self._audio.duration_sec()
+        if dur > 0:
+            self._duration_sec = dur
+
+        self._filter_combo.setEnabled(False)
+        self._progress.setRange(0, max(int(self._duration_sec * 1000), 1))
+        self._progress.setValue(0)
+        self._update_time_label()
+        self._title.setText(
+            f"{os.path.basename(path)}  ·  音乐  ·  Qt 音频  ·  点击画面暂停/继续"
+        )
+        self._show_music_cover(playing=False)
+        self._display.set_paused_overlay(True)
+        log.info("音乐已打开 %s", path)
+        if auto_play:
+            self.play()
+
+    def _do_open_file(self, path: str, auto_play: bool = False):
+        if _is_audio_file(path):
+            self._do_open_audio(path, auto_play)
+            return
+
+        self._timer.stop()
+        self._audio.stop()
+        self._reset_transport_controls(playing=False)
+        self._audio_only = False
+        self._filter_combo.setEnabled(True)
 
         if self._backend:
             self._backend.set_hwaccel(self._hw_decode_preferred)
@@ -318,6 +457,7 @@ class VideoPlayerWidget(QWidget):
             decode_hint,
             "OpenGL",
             audio_hint,
+            "点击画面暂停/继续",
         ]
         if self._opencv_filter and self._opencv_filter != "off":
             if self._opencv_filter_playback or not info.hw_decode:
@@ -334,6 +474,7 @@ class VideoPlayerWidget(QWidget):
         self._update_time_label()
 
         self._pull_and_show_frame(apply_filter=True)
+        self._display.set_paused_overlay(True)
 
         # 同步到 ViewModel（此时 current_path 已设置，不会触发重复 open）
         self.fileOpened.emit(self._current_path)
@@ -342,13 +483,49 @@ class VideoPlayerWidget(QWidget):
             self.play()
 
     def _apply_opencv_filter(self):
-        """应用 app.conf 中的 opencv_filter（未编译 OpenCV 时静默忽略）"""
+        """应用当前滤镜模式（未编译 OpenCV 时静默忽略）"""
         if not self._backend or not self._opencv_filter:
             return
         try:
             self._backend.set_filter(self._opencv_filter)
         except RuntimeError:
             pass
+
+    @Slot(int)
+    def _on_filter_changed(self, _index: int):
+        mode = self._filter_combo.currentData()
+        if not isinstance(mode, str):
+            mode = "off"
+        self._opencv_filter = mode
+        # 用户主动选滤镜：播放中也开滤镜（趣味滤镜才看得见）
+        self._opencv_filter_playback = mode not in ("off", "", None)
+        self._apply_opencv_filter()
+        if self._backend:
+            on = bool(self._opencv_filter_playback and mode != "off")
+            self._backend.set_playback_filter(on)
+            # 暂停时 seek 回当前位置再拉一帧，立刻看到效果
+            if not self._playing:
+                pos = max(0.0, self._position_sec)
+                try:
+                    self._backend.seek(pos)
+                except RuntimeError:
+                    pass
+                self._last_shown_frame_ts = pos - self._frame_interval
+                self._pull_and_show_frame(apply_filter=True)
+        self._refresh_title_filter_hint()
+        log.info("滤镜切换 mode=%s playback=%s", mode, self._opencv_filter_playback)
+
+    def _refresh_title_filter_hint(self):
+        text = self._title.text()
+        # 去掉旧 OpenCV 提示再追加
+        parts = [p.strip() for p in text.split("·")]
+        parts = [p for p in parts if not p.startswith("OpenCV:")]
+        if self._opencv_filter and self._opencv_filter != "off":
+            if self._opencv_filter_playback or not self._hw_decode_active:
+                parts.append(f"OpenCV:{self._opencv_filter}")
+            else:
+                parts.append("OpenCV:预览")
+        self._title.setText("  ·  ".join(parts))
 
 
 
@@ -370,12 +547,29 @@ class VideoPlayerWidget(QWidget):
 
     def play(self):
 
-        if not self._backend or not self._current_path:
-
+        if not self._current_path:
             return
 
-        # 硬解 + CLAHE 每帧开销大：播放时默认关闭 OpenCV 滤镜
-        use_filter = self._opencv_filter_playback
+        if self._audio_only:
+            if self._duration_sec <= 0:
+                dur = self._audio.duration_sec()
+                if dur > 0:
+                    self._duration_sec = dur
+                    self._progress.setRange(0, max(int(dur * 1000), 1))
+            self._audio.play(self._position_sec)
+            self._playing = True
+            self._reset_transport_controls(playing=True)
+            self._show_music_cover(playing=True)
+            self._schedule_tick()
+            log.info("音乐播放开始 pos=%.2f", self._position_sec)
+            return
+
+        if not self._backend:
+            return
+
+        # 硬解 + 重滤镜每帧开销大：默认 conf 可关；用户从下拉选滤镜后会打开
+        use_filter = self._opencv_filter_playback and self._opencv_filter not in ("off", "")
+        pw = ph = 0
         if self._backend:
             self._backend.set_playback_filter(use_filter)
             pw, ph = self._playback_scale_dims(
@@ -397,7 +591,7 @@ class VideoPlayerWidget(QWidget):
         log.info(
             "播放开始 filter_on=%s hw=%s timer=%dms scale=%dx%d",
             use_filter, self._hw_decode_active, self._sync_timer_ms,
-            pw if self._backend else 0, ph if self._backend else 0,
+            pw, ph,
         )
 
 
@@ -405,6 +599,12 @@ class VideoPlayerWidget(QWidget):
     def pause(self):
 
         self._timer.stop()
+
+        if self._audio_only:
+            self._audio.pause()
+            self._reset_transport_controls(playing=False)
+            self._show_music_cover(playing=False)
+            return
 
         if self._backend:
             self._backend.set_playback_scale(0, 0)
@@ -435,6 +635,10 @@ class VideoPlayerWidget(QWidget):
         if self._has_audio:
 
             self._audio.stop()
+
+        if self._audio_only:
+            self._show_music_cover(playing=False)
+            return
 
         if self._backend and self._current_path:
 
@@ -474,13 +678,23 @@ class VideoPlayerWidget(QWidget):
 
         self._seeking = False
 
-        if not self._backend or self._duration_sec <= 0:
+        if not self._current_path or self._duration_sec <= 0:
 
             return
 
         ratio = self._progress.value() / max(self._progress.maximum(), 1)
 
         self._position_sec = ratio * self._duration_sec
+
+        if self._audio_only:
+            self._audio.seek(self._position_sec)
+            self._update_time_label()
+            if self._was_playing_before_seek:
+                self.play()
+            return
+
+        if not self._backend:
+            return
 
         try:
 
@@ -529,10 +743,12 @@ class VideoPlayerWidget(QWidget):
             return
 
         t0 = time.monotonic()
-        if self._has_audio:
+        if self._audio_only:
+            result = self._tick_audio_only()
+        elif self._has_audio:
             result = self._sync_video_to_audio()
         else:
-            result = self._pull_and_show_frame()
+            result = self._pull_and_show_frame(apply_filter=None)
 
         if result is None:
 
@@ -541,6 +757,26 @@ class VideoPlayerWidget(QWidget):
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         self._schedule_tick(max(1, self._sync_timer_ms - elapsed_ms))
+
+    def _tick_audio_only(self) -> bool | None:
+        audio_sec = self._audio.position_sec()
+        if self._duration_sec <= 0:
+            dur = self._audio.duration_sec()
+            if dur > 0:
+                self._duration_sec = dur
+                self._progress.setRange(0, max(int(dur * 1000), 1))
+
+        self._position_sec = audio_sec
+        if not self._seeking:
+            self._progress.setValue(int(audio_sec * 1000))
+        self._update_time_label()
+
+        if self._duration_sec > 0 and audio_sec >= self._duration_sec - 0.05:
+            self._position_sec = self._duration_sec
+            self._progress.setValue(self._progress.maximum())
+            self._update_time_label()
+            return None
+        return True
 
     def _sync_video_to_audio(self) -> bool | None:
         """每 tick 取下一帧显示；target 对齐 want_idx，避免重复取帧丢弃"""
@@ -571,7 +807,8 @@ class VideoPlayerWidget(QWidget):
         t0 = time.monotonic()
 
         try:
-            frame = self._backend.next_frame(min_ts=target_min, apply_filter=False)
+            # None：跟随 set_playback_filter；此前写死 False 导致趣味滤镜完全看不见
+            frame = self._backend.next_frame(min_ts=target_min, apply_filter=None)
         except RuntimeError as e:
             log.error("同步解码失败: %s", e)
             self._title.setText(f"解码错误: {e}")
@@ -614,7 +851,7 @@ class VideoPlayerWidget(QWidget):
 
         self._display.set_rgb_frame(self._frame_rgb_buf, w, h)
 
-    def _pull_and_show_frame(self, apply_filter: bool = False) -> bool | None:
+    def _pull_and_show_frame(self, apply_filter: bool | None = None) -> bool | None:
 
         if not self._backend:
 
@@ -680,6 +917,7 @@ class VideoPlayerWidget(QWidget):
         if self._backend:
             self._backend.shutdown()
         if isinstance(self._display, GlVideoWidget):
+            self._display.set_paused_overlay(False)
             self._display.clear_frame()
             self._display.cleanup_gl()
 

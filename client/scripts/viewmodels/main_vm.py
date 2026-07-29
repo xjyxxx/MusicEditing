@@ -56,6 +56,14 @@ class MainViewModel(QObject):
 
     watermarkFinished = Signal(int, str)
 
+    enhanceProgress = Signal(int, float, str)
+
+    enhanceFinished = Signal(int, str)
+
+    exportFinished = Signal(str)
+
+    silenceFinished = Signal(str)
+
     errorOccurred = Signal(str)
 
     statusMessageChanged = Signal(str)
@@ -90,8 +98,9 @@ class MainViewModel(QObject):
 
             self._bridge = MediaBridge()
 
-
             self._bridge.set_prefer_hw_decode(self._app.prefer_hw_decode)
+            # 超分 / LaMa：有 NVIDIA 时尝试 ORT CUDA EP（失败会回退 CPU）
+            self._bridge.set_prefer_cuda(self._app.use_gpu)
 
             self._status_message = f"引擎就绪 (FFmpeg {self._bridge.ffmpeg_version})"
 
@@ -465,6 +474,271 @@ class MainViewModel(QObject):
 
 
 
+    @Slot(float, float)
+
+    def update_enhance_range(self, start_sec: float, end_sec: float):
+
+        self._state.enhance_params.start_sec = start_sec
+
+        self._state.enhance_params.end_sec = end_sec
+
+
+
+    def _upscale_model_path(self, backend: str) -> str:
+
+        if backend == "opencv":
+
+            return "-"
+
+        path = self._app.realesrgan_model_path
+
+        if not path or not os.path.isfile(path):
+
+            raise FileNotFoundError(
+                "未找到 Real-ESRGAN 模型 models/realesr-general-x4v3.onnx，请运行 scripts/download_realesrgan_model.bat"
+            )
+
+        return path
+
+
+
+    @Slot(str, str, int, str, int)
+
+    def start_enhance_image(
+
+        self, input_path: str, output_path: str, scale: int = 2,
+        backend: str = "realesrgan", strength: int = 65,
+
+    ):
+
+        be = (backend or "realesrgan").strip().lower()
+
+        if be in ("opencv", "cv", "fast", "bicubic"):
+
+            be = "opencv"
+
+        else:
+
+            be = "realesrgan"
+
+        sc = 2 if int(scale) == 2 else 4
+        sp = max(0, min(100, int(strength)))
+
+        self._state.enhance_params.backend = be
+
+        self._state.enhance_params.scale = sc
+        self._state.enhance_params.strength = sp
+
+
+
+        def work(bridge, report):
+
+            model = self._upscale_model_path(be)
+
+            return bridge.upscale_image(
+
+                model, input_path, output_path, scale=sc, strength=sp, backend=be,
+
+            )
+
+
+
+        self._run_enhance_task(
+
+            TaskType.ENHANCE, input_path, work, output_path, backend=be, scale=sc,
+
+        )
+
+
+
+    @Slot(str, float, float, int, str, int)
+
+    def start_enhance_video(
+
+        self,
+
+        output_path: str,
+
+        start_sec: float,
+
+        end_sec: float,
+
+        scale: int = 2,
+
+        backend: str = "opencv",
+        strength: int = 65,
+
+    ):
+
+        video = self._state.current_video
+
+        if not video or not self._bridge:
+
+            self.errorOccurred.emit("请先导入视频")
+
+            return
+
+        input_path = video.file_path
+
+        fps = video.fps or 25.0
+
+        be = (backend or "opencv").strip().lower()
+
+        if be in ("opencv", "cv", "fast", "bicubic"):
+
+            be = "opencv"
+
+        else:
+
+            be = "realesrgan"
+
+        sc = 2 if int(scale) == 2 else 4
+        sp = max(0, min(100, int(strength)))
+
+        self._state.enhance_params.backend = be
+
+        self._state.enhance_params.scale = sc
+        self._state.enhance_params.strength = sp
+
+        self._state.enhance_params.start_sec = start_sec
+
+        self._state.enhance_params.end_sec = end_sec
+
+
+
+        def work(bridge, report):
+
+            model = self._upscale_model_path(be)
+
+            return bridge.upscale_video(
+
+                model,
+
+                input_path,
+
+                output_path,
+
+                fps=fps,
+
+                scale=sc,
+                strength=sp,
+
+                start_sec=start_sec,
+
+                end_sec=end_sec,
+
+                on_progress=report,
+
+                backend=be,
+
+            )
+
+
+
+        self._run_enhance_task(
+
+            TaskType.ENHANCE, input_path, work, output_path, backend=be, scale=sc,
+
+        )
+
+
+
+    def _run_enhance_task(
+
+        self, task_type, file_path, worker_fn, output_path: str,
+
+        backend: str = "opencv", scale: int = 2,
+
+    ):
+
+        if not self._bridge:
+
+            self.errorOccurred.emit("媒体引擎未加载")
+
+            return
+
+        if not self._bridge.upscale_available:
+
+            self.errorOccurred.emit("ONNX Runtime 未就绪，请先 build_x64.bat 编译")
+
+            return
+
+        task = TaskModel(
+
+            task_id=self._next_task_id,
+
+            task_type=task_type,
+
+            file_path=file_path,
+
+            state=TaskState.PROCESSING,
+
+        )
+
+        self._next_task_id += 1
+
+        self._state.tasks.append(task)
+
+        task_id = task.task_id
+
+        bridge = self._bridge
+
+        label = (
+
+            f"OpenCV {scale}x 放大" if backend == "opencv"
+
+            else f"Real-ESRGAN {scale}x 超分"
+
+        )
+
+
+
+        def run():
+
+            try:
+
+                def report(p: float, msg: str):
+
+                    task.progress = p
+
+                    self.enhanceProgress.emit(task_id, p, msg)
+
+
+
+                report(1.0, f"{label}处理中…")
+
+                result = worker_fn(bridge, report)
+
+                out = result or output_path
+
+                task.state = TaskState.COMPLETED
+
+                task.progress = 100.0
+
+                self.taskStateChanged.emit(task_id, TaskState.COMPLETED)
+
+                self.enhanceFinished.emit(task_id, out)
+
+                self._status_message = f"画质增强完成: {os.path.basename(out)}"
+
+                self.statusMessageChanged.emit(self._status_message)
+
+            except Exception as e:
+
+                task.state = TaskState.FAILED
+
+                self.taskStateChanged.emit(task_id, TaskState.FAILED)
+
+                self.errorOccurred.emit(str(e))
+
+
+
+        import threading
+
+        threading.Thread(target=run, daemon=True).start()
+
+
+
     @Slot()
 
     def start_slice_analysis(self):
@@ -735,8 +1009,8 @@ class MainViewModel(QObject):
 
         if self._bridge:
 
-
             self._bridge.set_prefer_hw_decode(self._app.prefer_hw_decode)
+            self._bridge.set_prefer_cuda(self._app.use_gpu)
 
         self.gpuNameChanged.emit(self.gpu_name)
 
@@ -751,6 +1025,101 @@ class MainViewModel(QObject):
         self._app.output_dir = path
 
 
+
+    @Slot(str, bool)
+    def export_highlights(self, output_dir: str, concat: bool = True):
+        """批量导出高光片段，并可选拼接成 highlights_merged.mp4。"""
+        video = self._state.current_video
+        segs = [s for s in self._state.highlight_segments if s.selected and s.end_sec > s.start_sec]
+        if not video or not self._bridge:
+            self.errorOccurred.emit("请先导入视频")
+            return
+        if not segs:
+            self.errorOccurred.emit("没有可导出的高光片段")
+            return
+
+        task = TaskModel(
+            task_id=self._next_task_id,
+            task_type=TaskType.EXPORT,
+            file_path=video.file_path,
+            state=TaskState.PROCESSING,
+            total_frames=len(segs),
+        )
+        self._next_task_id += 1
+        self._state.tasks.append(task)
+        self.taskStateChanged.emit(task.task_id, TaskState.PROCESSING)
+        self.set_output_dir(output_dir)
+
+        def run():
+            try:
+                def report(p: float, msg: str):
+                    task.progress = p
+                    self.progressUpdated.emit(task.task_id, p, msg)
+
+                ranges = [(s.start_sec, s.end_sec) for s in segs]
+                clips, merged = self._bridge.export_highlights(
+                    video.file_path, ranges, output_dir,
+                    concat=concat, on_progress=report,
+                )
+                task.state = TaskState.COMPLETED
+                task.progress = 100.0
+                self.taskStateChanged.emit(task.task_id, TaskState.COMPLETED)
+                out = merged or (clips[0] if clips else output_dir)
+                self._status_message = f"已导出 {len(clips)} 个片段"
+                self.statusMessageChanged.emit(self._status_message)
+                self.exportFinished.emit(out)
+            except Exception as e:
+                task.state = TaskState.FAILED
+                self.taskStateChanged.emit(task.task_id, TaskState.FAILED)
+                self.errorOccurred.emit(f"导出失败: {e}")
+
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+
+    @Slot(str)
+    def compact_speech(self, output_path: str):
+        """静音段剪掉，生成紧凑口播版。"""
+        video = self._state.current_video
+        if not video or not self._bridge:
+            self.errorOccurred.emit("请先导入视频")
+            return
+
+        task = TaskModel(
+            task_id=self._next_task_id,
+            task_type=TaskType.EXPORT,
+            file_path=video.file_path,
+            state=TaskState.PROCESSING,
+            total_frames=1,
+        )
+        self._next_task_id += 1
+        self._state.tasks.append(task)
+        self.taskStateChanged.emit(task.task_id, TaskState.PROCESSING)
+
+        def run():
+            try:
+                def report(p: float, msg: str):
+                    task.progress = p
+                    self.progressUpdated.emit(task.task_id, p, msg)
+
+                self._bridge.remove_silence(
+                    video.file_path,
+                    output_path,
+                    duration_hint=float(video.duration_sec or 0.0),
+                    on_progress=report,
+                )
+                task.state = TaskState.COMPLETED
+                task.progress = 100.0
+                self.taskStateChanged.emit(task.task_id, TaskState.COMPLETED)
+                self._status_message = f"紧凑口播已生成: {os.path.basename(output_path)}"
+                self.statusMessageChanged.emit(self._status_message)
+                self.silenceFinished.emit(output_path)
+            except Exception as e:
+                task.state = TaskState.FAILED
+                self.taskStateChanged.emit(task.task_id, TaskState.FAILED)
+                self.errorOccurred.emit(f"静音裁剪失败: {e}")
+
+        import threading
+        threading.Thread(target=run, daemon=True).start()
 
     @Slot(str, float, float, float)
 

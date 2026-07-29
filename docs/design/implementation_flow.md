@@ -125,8 +125,10 @@ MainWindow.shutdown()
 | `import_video(path)` | SlicePage「导入视频」 |
 | `start_slice_analysis()` | SlicePage「AI 智能分析」 |
 | `start_watermark_image(...)` / `start_watermark_video(...)` | WatermarkPage「开始去水印」 |
-| `import_image(path)` | 图片去水印导入 |
+| `start_enhance_image(...)` / `start_enhance_video(...)` | EnhancePage「开始超分」 |
+| `import_image(path)` | 图片去水印 / 超分导入 |
 | `update_watermark_range(start, end)` | 视频去水印时间段 |
+| `update_enhance_range(start, end)` | 视频超分时间段 |
 | `update_slice_params(...)` | 参数滑块变更 |
 | `set_output_dir(path)` | 导出目录选择 |
 
@@ -136,7 +138,7 @@ MainWindow.shutdown()
 |------|-----|------|
 | 首页 | `HomePage` + `VideoPlayerWidget` | 本地预览播放器 + 功能卡片导航 |
 | 智能切片 | `SlicePage` | **已实现完整交互** |
-| 画质增强 | `PlaceholderPage` | 占位，待接入 AI |
+| 画质增强 | `EnhancePage` | **图片/视频超分**：参数预设、局部对比、完成后打开结果/文件夹 |
 | 去水印 | `WatermarkPage` + `RegionSelectorWidget` | **图片/视频去水印 UI 已实现**（框选多区域、时间段） |
 | 热评滚动 | `HotCommentsPage` | **独立 Tab**：输入歌曲链接/ID → 热评滚动叠加播放器 |
 | 个人中心 | `PlaceholderPage` | 占位，待接入授权 |
@@ -150,24 +152,16 @@ MainWindow.shutdown()
 ```
 HomePage
   ├─ VideoPlayerWidget（Python GUI）
-  │    ├─ GlVideoWidget（QOpenGLWidget）显示 RGB 帧：上传纹理 + 着色器绘制
-  │    ├─ Qt QMediaPlayer 仅输出音频（与 FFmpeg 视频并行）
-  │    ├─ QTimer 轮询 + **以 Qt 音频 position 为主时钟** 同步画面
-  │    │     （音频未到下一帧时刻则保持画面；落后时跳帧追赶）
-  │    ├─ Seek/播放时音视频同时 jump 到同一时间点
+  │    ├─ GlVideoWidget（QOpenGLWidget）显示 RGB 帧；点击画面 → 暂停/继续；暂停时中央显示三角播放图标
+  │    ├─ 视频：FFmpeg 解码画面 + Qt QMediaPlayer 音频主时钟
+  │    ├─ 音乐：仅 Qt QMediaPlayer（mp3/wav/flac/m4a…），封面占位图
+  │    ├─ 「打开文件」同时支持视频与音乐过滤器
   │    ├─ 打开视频 → fileOpened → ViewModel.import_video（全局共享）
-  │    └─ 关闭窗口 → shutdown() 停止音频并 kill media_player.exe
+  │    └─ 打开音乐不导入切片链路（避免当视频 probe）
   └─ videoLoaded 信号 → 智能切片页导入后，主页播放器自动同步加载
-
-PlayerBackend (Python)
-  └─ subprocess stdin/stdout ↔ media_player.exe
-
-media_player.exe (C++)
-  ├─ VideoPlayerEngine — FFmpeg Stateful 解码 → 临时 frame.rgb
-  └─ FrameProcessor — OpenCV 帧滤镜（编译启用时：CLAHE/降噪/锐化）
 ```
 
-View **不直接调用 FFmpeg**，通过 `PlayerBackend` 子进程与 C++ 播放器通信。
+View **不直接调用 FFmpeg**，通过 `PlayerBackend` 子进程与 C++ 播放器通信；纯音乐不启动视频解码。
 
 ### 3.5 OpenCV 帧滤镜（`FrameProcessor`）
 
@@ -176,8 +170,10 @@ OpenCV **仅用于解码后的 RGB24 帧处理**，不参与 FFmpeg 解码本身
 #### 3.5.1 配置项（`client/resources/config/app.conf`）
 
 ```ini
-# OpenCV 帧滤镜（需编译时启用 OpenCV）：clahe | denoise | sharpen | off
+# OpenCV 帧滤镜（需编译时启用 OpenCV）：clahe | denoise | sharpen | film | neon | comic | pixel | off
 opencv_filter=clahe
+# 播放时是否启用滤镜（false=仅暂停预览；UI 下拉选手动选滤镜后会打开播放滤镜）
+opencv_filter_playback=false
 ```
 
 | 值 | 效果 | OpenCV 实现 |
@@ -185,7 +181,13 @@ opencv_filter=clahe
 | `clahe`（默认） | 对比度增强，偏「画质预览」 | `COLOR_RGB2Lab` + `createCLAHE` |
 | `denoise` | 轻度降噪 | `bilateralFilter` |
 | `sharpen` | 锐化 | `GaussianBlur` + `addWeighted` |
+| `film` | 胶片暖色 + 暗角 | sepia 矩阵 + vignette |
+| `neon` | 霓虹描边 | `Canny` 边缘叠色 |
+| `comic` | 漫画风 | bilateral + 自适应阈值墨线 |
+| `pixel` | 像素风 | 缩小再 `INTER_NEAREST` 放大 |
 | `off` | 关闭，直通原帧 | 不调用 OpenCV |
+
+首页播放器控制栏有滤镜下拉；选「胶片/霓虹/漫画/像素」后**播放中也会套滤镜**。
 
 #### 3.5.2 界面显示
 
@@ -364,6 +366,49 @@ WatermarkPage（图片/视频 Tab + 质量模式）
 
 **后处理：** Carve LaMa ONNX 输出为 0~255 float（非 PyTorch 版 0~1），`WatermarkInpainter` 自动识别并正确转 uint8，避免修复区域发白。
 
+### 3.8 画质增强 / Real-ESRGAN 超分
+
+对应产品文档 4.3 节。与去水印共用 `MUSIC_HAS_ONNXRUNTIME` + OpenCV。
+
+```
+models/realesr-general-x4v3.onnx   # scripts/download_realesrgan_model.bat（~5MB，不进 git）
+```
+
+| 脚本 | 作用 |
+|------|------|
+| `scripts/download_realesrgan_model.bat` | 下载 Heliosoph/realesrgan-onnx → `models/`（优先 hf-mirror） |
+
+**双后端：**
+
+| 模式 | 环境变量 | 适用 | 说明 |
+|------|----------|------|------|
+| **快速** | `MUSIC_UPSCALE_BACKEND=opencv` | **视频默认** | `cv::resize` INTER_CUBIC，无需模型 |
+| **AI** | `MUSIC_UPSCALE_BACKEND=realesrgan` | **图片默认** | Real-ESRGAN x4v3 ONNX；分块 tile=192 |
+
+**倍率：** CLI/UI 支持 `scale=2|4`。模型固有 4×；选 2× 时用「半分辨率推理」快路径（先缩到 1/2 再 4×，像素量约 1/4）。Tile=384。有 NVIDIA 且 `use_gpu` 时尝试 CUDA EP。
+
+**自然度：** AI 结果与双三次放大按 `strength`（0~100，默认 65）混合，减轻 Real-ESRGAN 过锐/假细节；UI「AI 强度」滑条可调。也可设环境变量 `MUSIC_UPSCALE_STRENGTH=0.5`。
+
+```
+EnhancePage
+  → MainViewModel.start_enhance_image / start_enhance_video
+  → MediaBridge.upscale_image / upscale_video（MUSIC_UPSCALE_BACKEND）
+  → media_cli upscale / upscale-frames（一次加载，帧间复用）+ ffmpeg 抽帧/编码/混音
+```
+
+**C++：** `SuperResolution`（`super_resolution.cpp`）→ `media_upscale_*` API。
+
+**预览加载（`core/image_loader.py`）：**
+
+| 步骤 | 实现 | 说明 |
+|------|------|------|
+| 1 解码 | OpenCV `imdecode` + `np.fromfile` | 超大 PNG / 中文路径；Qt 常对上万像素 PNG 失败 |
+| 2 缩放 | CPU `cv::resize`，有 CUDA 设备时用 `cv2.cuda.resize` | 预览最长边约 2560 |
+| 3 回退 | Qt `QImageReader` | 无 OpenCV 或解码失败时 |
+| 4 显示 | `QGraphicsView` 软件合成（不透明底 + 全量刷新） | 曾用 OpenGL 视口，缩小时易残影，已去掉；解码仍走 OpenCV |
+
+去水印页导入图片/预览帧同样走 `load_preview`。
+
 ### 3.6 GPU 硬件加速
 
 GPU 在本产品中承担 **AI 推理** 与 **视频硬解码** 两类加速目标；与 OpenCV **不冲突**。首页播放器（x64）已支持 **D3D11VA 硬解**。
@@ -379,7 +424,8 @@ GPU 在本产品中承担 **AI 推理** 与 **视频硬解码** 两类加速目�
 | **Vosk ASR** | CPU 推理 | ❌ 未启用 | 智能切片转写阶段 |
 | **llama.cpp 高光分析** | CPU（`n_gpu_layers=0`） | ⏳ 接口已有 | 需 `GGML_CUDA=ON` 编译 + 传入层数 |
 | **去水印 LaMa** | ONNX Runtime + OpenCV | ✅ CPU EP（默认） | 已移除项目内 `cuda_runtime`；可选 `MUSIC_ORT_CUDA=1` |
-| **4K 超分** | 占位页 | ⏳ 未接入 | 预期 ONNX / CUDA |
+| **4K 超分** | Real-ESRGAN ONNX + OpenCV | ✅ CPU EP（默认） | 2× 半分辨率快路径 + tile=384；CUDA 需系统 CUDA 12 运行库（`cublasLt64_12.dll` 等） |
+| **图片预览解码** | OpenCV `imdecode` + 可选 CUDA resize | ✅ OpenCV；CUDA 视本机包 | `core/image_loader.py`；超大 PNG 不走 Qt 解码；对比视图不用 OpenGL 视口（防缩放残影） |
 | **Qt 音频播放** | 系统解码器 | 可能硬解 | 与业务 GPU 开关无关 |
 
 #### 3.6.2 界面与启动流程
@@ -525,7 +571,7 @@ cmake -B build_x64 -A x64 -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=native
 1. ~~**P0** — `gpu_enabled` → 播放器硬解~~ ✅ 已完成  
 2. **P1** — llama：`GGML_CUDA=ON` + `n_gpu_layers` 随 `use_gpu` 变化  
 3. ~~**P2** — `VideoDecoder` / `media_cli iterate` 硬解~~ ✅ 已完成（复用 `ffmpeg_hwaccel`）  
-4. **P3** — OpenCV CUDA 滤镜、4K 超分模型 GPU 推理  
+4. **P3** — OpenCV CUDA 滤镜；超分已支持可选 `MUSIC_ORT_CUDA=1`
 
 ---
 
@@ -780,6 +826,32 @@ media_cli iterate <path> [maxFrames] [--hw]
 
 `MediaBridge.iterate_frames`：当 `prefer_hw_decode`（默认跟随 `AppLogic`）为真时自动追加 `--hw`。
 
+**upscale 命令：**
+```
+media_cli upscale <model.onnx|-> <输入图> <输出图> [scale=2|4]
+→ stderr:
+  UPSCALE_BACKEND:realesrgan   # 或 opencv
+  UPSCALE_EP:cpu               # 或 cuda / opencv
+  UPSCALE_SCALE:2
+→ stdout:
+  UPSCALE_OK
+  output=<path>
+  scale=2
+```
+
+**upscale-frames 命令：**
+```
+media_cli upscale-frames <model.onnx|-> <输入帧目录> <输出帧目录> [scale=2|4]
+→ stdout (逐行):
+  PROGRESS:1:125
+  ...
+  UPSCALE_FRAMES_OK
+  count=125
+  scale=2
+```
+
+`model.onnx` 为 `-` 或 `MUSIC_UPSCALE_BACKEND=opencv` 时走双三次快速放大。
+
 ---
 
 ### 5.1 智能切片完整链路（演讲/解说类 — 已落地）
@@ -864,6 +936,47 @@ media_cli analyze-speech <transcript.json> <model.gguf> <场景> <最短> <最�
 → HIGHLIGHT|12.500|18.000|0.850
 ```
 
+### 5.5 画质增强 / 超分完整链路
+
+对应产品文档 4.3 节。
+
+```
+用户操作 EnhancePage
+  │
+  ▼
+View: EnhancePage._on_run_image / _on_run_video
+  → ViewModel.start_enhance_image / start_enhance_video
+      → MediaBridge.upscale_image / upscale_video
+          → media_cli upscale / upscale-frames
+              → SuperResolution::upscaleImageFile
+  → emit enhanceProgress / enhanceFinished
+  │
+  ▼
+View 更新进度与结果预览
+```
+
+**当前限制：** 视频 AI 超分较慢。对比区左原图 / 右超分结果，中间 1px 细线；滚轮缩放当前侧，Ctrl+滚轮两侧同步；拖拽平移。预览经 `image_loader`（OpenCV 解码）；显示为不透明底软件合成，避免缩小时残影。
+
+### 5.6 一键高光成片 / 静音剪掉
+
+```
+SlicePage「一键高光成片」
+  → MainViewModel.export_highlights(out_dir)
+      → MediaBridge.export_highlights
+          → ffmpeg 按段 -ss/-t 切出 highlight_XXX.mp4（优先 -c copy）
+          → concat demuxer → highlights_merged.mp4
+  → exportFinished
+
+SlicePage「静音剪掉」
+  → MainViewModel.compact_speech(out_mp4)
+      → MediaBridge.remove_silence
+          → ffmpeg silencedetect 解析静音区间
+          → 反推有声段 → export_clip × N → concat
+  → silenceFinished
+```
+
+优先走捆绑 `ffmpeg.exe`，无需新 C++ CLI。静音阈值默认 `-35dB`、最短静音 `0.45s`。
+
 ---
 
 ## 6. 原 §5 智能切片（旧描述保留参考）
@@ -898,6 +1011,8 @@ main.py
 └── ui/main_window.py
     ├── ui/video_player.py
     │   └── core/player_backend.py  (subprocess → media_player.exe)
+    ├── ui/enhance_page.py / watermark_page.py
+    │   └── core/image_loader.py   (OpenCV 解码 / 可选 CUDA 缩放 / Qt 回退)
     └── viewmodels/main_vm.py
         ├── models/video_model.py
         ├── core/app_logic.py      (GPU 检测)
@@ -913,9 +1028,9 @@ main.py
 | FFmpeg 视频打开/探测 | ✅ | VideoDecoder + probe |
 | 视频帧遍历 | ✅ | iterateFrames + CLI |
 | 缩略图提取 | ✅ | extractThumbnail（API 已有，UI 未接） |
-| PySide6 多标签 UI | ✅ | 首页/切片/去水印/热评滚动；超分与个人中心占位 |
+| PySide6 多标签 UI | ✅ | 首页/切片/画质增强/去水印/热评滚动；个人中心占位 |
 | 网易云热评滚动 | ✅ | `HotCommentsPage` + 外部爬虫脚本协议；默认演示数据 |
-| 首页本地播放器 | ✅ | FFmpeg 解码 + OpenGL 显示 + Qt 音频主时钟 |
+| 首页本地播放器 | ✅ | FFmpeg 视频 + Qt 音乐；OpenGL 显示；**点击画面暂停/继续** |
 | OpenCV 帧处理 | ✅ | `FrameProcessor`：播放器实时滤镜 + 缩略图；配置 `opencv_filter`，UI 标题显示 `OpenCV:clahe` |
 | GLEW / OpenGL 第三方 | ✅ | `third_party/opengl`；`media_player` 链 GLEW |
 | OpenGL 视频显示 | ✅ | `GlVideoWidget` 替换 QLabel；首页/热评页播放器共用 |
@@ -926,8 +1041,10 @@ main.py
 | OpenCV GPU 滤镜 | ⏳ | 当前 CPU；与硬解无冲突（§3.6.4） |
 | AI 高光识别（演讲/解说） | ✅ | Vosk ASR + llama.cpp / 规则兜底 |
 | AI 高光识别（游戏） | ⏳ | 规则兜底，视觉模型待接入 |
-| 批量导出剪辑 | ⏳ | UI 按钮已有，逻辑未写 |
-| 4K 超分 | ⏳ | 占位页 |
+| 批量导出剪辑 | ✅ | `一键高光成片` → 分片 + `highlights_merged.mp4`（ffmpeg） |
+| 静音剪掉 | ✅ | `静音剪掉` → silencedetect + 拼接紧凑口播 |
+| OpenCV 趣味滤镜 | ✅ | film / neon / comic / pixel；播放器下拉切换 |
+| 4K 超分 | ✅ | `EnhancePage` + Real-ESRGAN ONNX / OpenCV 双三次；`upscale` CLI；预览 `image_loader`（OpenCV） |
 | 去水印 | ✅ | `WatermarkPage` 快速(OpenCV)/精修(LaMa)；视频默认快速 + 帧批复用 |
 | 授权/卡密 | ⏳ | network.py 预留 |
 | llama.cpp 第三方集成 | ✅ | third_party/llama.cpp，CMake 目标 `music_llama` |
@@ -983,12 +1100,14 @@ endif()
 1. `iterate_frames` 回调里对每帧图像推理（需 C++ 侧增加帧数据导出或 Python 侧用 OpenCV 读帧）
 2. 替换 `_simulate_highlights()` 为真实打分 + 片段聚合逻辑
 
-### 9.3 接入视频导出
+### 9.3 视频导出（已落地）
 
-1. C++ 侧新增 `media_clip_export(start, end, outputPath)` API
-2. `media_cli` 增加 `clip` 子命令
-3. `MediaBridge` 增加 `export_clips()` 方法
-4. `SlicePage._on_export()` 调用 ViewModel 批量导出
+已用 Python + 捆绑 ffmpeg 实现，无需 C++ `clip` 子命令：
+
+1. `MediaBridge.export_clip` / `concat_clips` / `export_highlights`
+2. `MediaBridge.detect_speech_segments` / `remove_silence`
+3. `MainViewModel.export_highlights` / `compact_speech`
+4. `SlicePage`：「一键高光成片」「静音剪掉」
 
 ### 9.4 x64 与 Win32 并存
 
@@ -1023,4 +1142,6 @@ x64 构建后 Python 可逐步改为 **ctypes 直接加载** `media_engine.dll`�
 .\run_test.bat                 # 测试 FFmpeg（默认 Titanic.mkv）
 .\run_test.bat "D:\a.mp4"      # 指定视频测试
 .\run_ui.bat                   # 启动 UI
+.\scripts\download_lama_model.bat          # 去水印精修模型
+.\scripts\download_realesrgan_model.bat    # 画质超分模型（~5MB）
 ```

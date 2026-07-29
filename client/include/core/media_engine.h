@@ -79,6 +79,22 @@ MEDIA_API int media_watermark_uses_cuda();
 
 /// 执行后端字符串：cuda / cpu / opencv
 MEDIA_API const char* media_watermark_execution_provider();
+
+/// 加载 Real-ESRGAN ONNX；modelPath 为 "-" 时强制 OpenCV 快速放大
+MEDIA_API int media_upscale_load_model(const char* modelPath);
+
+/// 对图片文件超分；scale 为 2 或 4；strengthPercent 0~100（默认 65，越小越自然）
+MEDIA_API int media_upscale_image(
+    const char* inputPath,
+    const char* outputPath,
+    int scale,
+    int strengthPercent);
+
+MEDIA_API int media_upscale_uses_opencv_fallback();
+
+MEDIA_API int media_upscale_uses_cuda();
+
+MEDIA_API const char* media_upscale_execution_provider();
 #endif
 
 #ifdef __cplusplus

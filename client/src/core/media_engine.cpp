@@ -5,6 +5,7 @@
 
 #if defined(MUSIC_HAS_ONNXRUNTIME) && defined(MUSIC_HAS_OPENCV)
 #include "core/watermark_inpainter.h"
+#include "core/super_resolution.h"
 #endif
 
 #define __STDC_CONSTANT_MACROS
@@ -37,6 +38,7 @@ namespace {
 
 #if defined(MUSIC_HAS_ONNXRUNTIME) && defined(MUSIC_HAS_OPENCV)
     media::core::WatermarkInpainter g_watermarkInpainter;
+    media::core::SuperResolution g_superResolution;
 #endif
 }
 
@@ -55,6 +57,7 @@ void media_engine_shutdown() {
     std::lock_guard<std::mutex> lock(g_engineMutex);
 #if defined(MUSIC_HAS_ONNXRUNTIME) && defined(MUSIC_HAS_OPENCV)
     g_watermarkInpainter.unload();
+    g_superResolution.unload();
 #endif
     g_initialized = false;
 }
@@ -229,6 +232,55 @@ int media_watermark_uses_cuda() {
 
 const char* media_watermark_execution_provider() {
     return g_watermarkInpainter.executionProvider();
+}
+
+int media_upscale_load_model(const char* modelPath) {
+    if (!modelPath || !*modelPath) {
+        setError("模型路径为空");
+        return -1;
+    }
+    if (!g_superResolution.loadModel(modelPath)) {
+        setError(g_superResolution.lastError());
+        return -2;
+    }
+    return 0;
+}
+
+int media_upscale_image(
+    const char* inputPath,
+    const char* outputPath,
+    int scale,
+    int strengthPercent)
+{
+    if (!inputPath || !outputPath) {
+        setError("参数无效");
+        return -1;
+    }
+    if (!g_superResolution.isReady()) {
+        setError("请先 media_upscale_load_model");
+        return -2;
+    }
+    int sp = strengthPercent;
+    if (sp < 0) sp = 65;
+    if (sp > 100) sp = 100;
+    const float strength = static_cast<float>(sp) / 100.0f;
+    if (!g_superResolution.upscaleImageFile(inputPath, outputPath, scale, strength)) {
+        setError(g_superResolution.lastError());
+        return -3;
+    }
+    return 0;
+}
+
+int media_upscale_uses_opencv_fallback() {
+    return g_superResolution.usesOpenCvFallback() ? 1 : 0;
+}
+
+int media_upscale_uses_cuda() {
+    return g_superResolution.usesCuda() ? 1 : 0;
+}
+
+const char* media_upscale_execution_provider() {
+    return g_superResolution.executionProvider();
 }
 #endif
 

@@ -11,6 +11,10 @@ enum class FrameFilterMode {
     Clahe,      ///< 自适应对比度增强（画质预览）
     Denoise,    ///< 双边滤波降噪
     Sharpen,    ///< 锐化
+    Film,       ///< 胶片：暖色 + 轻微暗角
+    Neon,       ///< 霓虹：边缘高亮
+    Comic,      ///< 漫画：平滑 + 墨线
+    Pixel,      ///< 像素风：最近邻放大
 };
 
 class FrameProcessor {
@@ -26,7 +30,7 @@ public:
     void setMode(FrameFilterMode mode) { mode_ = mode; }
     FrameFilterMode mode() const { return mode_; }
 
-    /// clahe | denoise | sharpen | off
+    /// clahe | denoise | sharpen | film | neon | comic | pixel | off
     bool setModeFromString(const std::string& name);
 
     std::string modeName() const;

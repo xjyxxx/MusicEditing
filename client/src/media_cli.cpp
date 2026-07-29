@@ -24,6 +24,8 @@ static void printUsage() {
 #if defined(MUSIC_HAS_ONNXRUNTIME) && defined(MUSIC_HAS_OPENCV)
     printf("  media_cli watermark-inpaint <model.onnx> <输入图> <输出图> <x> <y> <w> <h> [x2 y2 w2 h2 ...]\n");
     printf("  media_cli watermark-inpaint-frames <model.onnx> <输入帧目录> <输出帧目录> <x> <y> <w> <h> [x2 y2 w2 h2 ...]\n");
+    printf("  media_cli upscale <model.onnx|-> <输入图> <输出图> [scale=2|4] [strength=0-100]\n");
+    printf("  media_cli upscale-frames <model.onnx|-> <输入帧目录> <输出帧目录> [scale=2|4] [strength=0-100]\n");
 #endif
 }
 
@@ -296,6 +298,135 @@ static int cmdWatermarkInpaintFrames(int argc, char* argv[]) {
     media_engine_shutdown();
     return 0;
 }
+
+static void printUpscaleError(int code) {
+    const char* detail = media_engine_last_error();
+    if (detail && *detail) {
+        fprintf(stderr, "UPSCALE_ERROR:%d:%s\n", code, detail);
+    } else {
+        fprintf(stderr, "UPSCALE_ERROR:%d\n", code);
+    }
+    fflush(stderr);
+}
+
+static int parseScaleArg(int argc, char* argv[], int defaultScale) {
+    int scale = defaultScale;
+    if (argc >= 6) {
+        int v = atoi(argv[5]);
+        if (v == 2 || v == 4) scale = v;
+    }
+    return scale;
+}
+
+static int parseStrengthArg(int argc, char* argv[], int defaultPercent) {
+    int sp = defaultPercent;
+    if (argc >= 7) {
+        int v = atoi(argv[6]);
+        if (v >= 0 && v <= 100) sp = v;
+    }
+    return sp;
+}
+
+static int cmdUpscale(int argc, char* argv[]) {
+    if (argc < 5) {
+        printUsage();
+        return 1;
+    }
+
+    const int scale = parseScaleArg(argc, argv, 4);
+    const int strength = parseStrengthArg(argc, argv, 65);
+    media_engine_init();
+
+    int ret = media_upscale_load_model(argv[2]);
+    if (ret != 0) {
+        printUpscaleError(ret);
+        media_engine_shutdown();
+        return ret;
+    }
+    fprintf(stderr, "UPSCALE_BACKEND:%s\n",
+        media_upscale_uses_opencv_fallback() ? "opencv" : "realesrgan");
+    fprintf(stderr, "UPSCALE_EP:%s\n", media_upscale_execution_provider());
+    fprintf(stderr, "UPSCALE_SCALE:%d\n", scale);
+    fprintf(stderr, "UPSCALE_STRENGTH:%d\n", strength);
+    fflush(stderr);
+
+    ret = media_upscale_image(argv[3], argv[4], scale, strength);
+    if (ret != 0) {
+        printUpscaleError(ret);
+        media_engine_shutdown();
+        return ret;
+    }
+
+    printf("UPSCALE_OK\n");
+    printf("output=%s\n", argv[4]);
+    printf("scale=%d\n", scale);
+    printf("strength=%d\n", strength);
+    media_engine_shutdown();
+    return 0;
+}
+
+static int cmdUpscaleFrames(int argc, char* argv[]) {
+    if (argc < 5) {
+        printUsage();
+        return 1;
+    }
+
+    const char* modelPath = argv[2];
+    const char* inDir = argv[3];
+    const char* outDir = argv[4];
+    const int scale = parseScaleArg(argc, argv, 4);
+    const int strength = parseStrengthArg(argc, argv, 65);
+
+    std::error_code ec;
+    std::filesystem::create_directories(outDir, ec);
+
+    auto frameFiles = collectPngFrames(inDir);
+    if (frameFiles.empty()) {
+        fprintf(stderr, "UPSCALE_ERROR:no_frames\n");
+        return -3;
+    }
+
+    media_engine_init();
+
+    int ret = media_upscale_load_model(modelPath);
+    if (ret != 0) {
+        printUpscaleError(ret);
+        media_engine_shutdown();
+        return ret;
+    }
+    fprintf(stderr, "UPSCALE_BACKEND:%s\n",
+        media_upscale_uses_opencv_fallback() ? "opencv" : "realesrgan");
+    fprintf(stderr, "UPSCALE_EP:%s\n", media_upscale_execution_provider());
+    fprintf(stderr, "UPSCALE_SCALE:%d\n", scale);
+    fprintf(stderr, "UPSCALE_STRENGTH:%d\n", strength);
+    fflush(stderr);
+
+    const int total = static_cast<int>(frameFiles.size());
+    for (int i = 0; i < total; ++i) {
+        const std::string& inPath = frameFiles[static_cast<size_t>(i)];
+        const std::string outPath =
+            (std::filesystem::path(outDir) / std::filesystem::path(inPath).filename()).string();
+
+        ret = media_upscale_image(inPath.c_str(), outPath.c_str(), scale, strength);
+        if (ret != 0) {
+            printUpscaleError(ret);
+            fprintf(stderr, "frame=%s\n", inPath.c_str());
+            fflush(stderr);
+            media_engine_shutdown();
+            return ret;
+        }
+
+        printf("PROGRESS:%d:%d\n", i + 1, total);
+        fflush(stdout);
+    }
+
+    printf("UPSCALE_FRAMES_OK\n");
+    printf("count=%d\n", total);
+    printf("scale=%d\n", scale);
+    printf("strength=%d\n", strength);
+    media_engine_shutdown();
+    return 0;
+}
 #endif
 
 #ifdef _WIN32
@@ -368,6 +499,14 @@ static int runCli(int argc, char* argv[]) {
 
     if (strcmp(cmd, "watermark-inpaint-frames") == 0) {
         return cmdWatermarkInpaintFrames(argc, argv);
+    }
+
+    if (strcmp(cmd, "upscale") == 0) {
+        return cmdUpscale(argc, argv);
+    }
+
+    if (strcmp(cmd, "upscale-frames") == 0) {
+        return cmdUpscaleFrames(argc, argv);
     }
 #endif
 

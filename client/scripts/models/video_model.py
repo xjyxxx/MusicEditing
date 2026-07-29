@@ -20,6 +20,7 @@ class TaskType(IntEnum):
     SLICE = 0
     ENHANCE = 1
     WATERMARK = 2
+    EXPORT = 3
 
 
 @dataclass
@@ -80,11 +81,24 @@ class WatermarkParams:
 
 
 @dataclass
+class EnhanceParams:
+    start_sec: float = 0.0
+    end_sec: float = 0.0
+    # 2=约 1080→4K；4=四倍放大
+    scale: int = 2
+    # opencv=双三次快速；realesrgan=AI 超分
+    backend: str = "opencv"
+    # AI 与双三次混合强度 0~100，越小越自然（减轻假锐）
+    strength: int = 65
+
+
+@dataclass
 class AppState:
     current_video: Optional[VideoModel] = None
     current_image_path: str = ""
     tasks: List[TaskModel] = field(default_factory=list)
     slice_params: SliceParams = field(default_factory=SliceParams)
     watermark_params: WatermarkParams = field(default_factory=WatermarkParams)
+    enhance_params: EnhanceParams = field(default_factory=EnhanceParams)
     highlight_segments: List[HighlightSegment] = field(default_factory=list)
     output_dir: str = ""

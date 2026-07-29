@@ -31,7 +31,10 @@ if(MUSIC_HAS_OPENCV)
     )
 endif()
 if(MUSIC_HAS_ONNXRUNTIME AND MUSIC_HAS_OPENCV)
-    target_sources(media_engine PRIVATE src/core/watermark_inpainter.cpp)
+    target_sources(media_engine PRIVATE
+        src/core/watermark_inpainter.cpp
+        src/core/super_resolution.cpp
+    )
     target_link_libraries(media_engine PRIVATE music_onnxruntime)
     target_compile_definitions(media_engine PRIVATE MUSIC_HAS_ONNXRUNTIME=1)
     add_custom_command(TARGET media_engine POST_BUILD
@@ -48,7 +51,7 @@ if(MUSIC_HAS_ONNXRUNTIME AND MUSIC_HAS_OPENCV)
                 $<TARGET_FILE_DIR:media_engine>
         )
     endforeach()
-    message(STATUS "media_engine: LaMa watermark inpaint enabled")
+    message(STATUS "media_engine: LaMa watermark + Real-ESRGAN upscale enabled")
 endif()
 
 # 测试可执行文件

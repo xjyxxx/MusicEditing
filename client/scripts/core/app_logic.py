@@ -105,6 +105,11 @@ class AppLogic:
             default_lama = _project_root() / "models" / "lama.onnx"
             if default_lama.is_file():
                 self.lama_model_path = str(default_lama)
+        self.realesrgan_model_path = cfg.get("realesrgan_model_path", "")
+        if not self.realesrgan_model_path:
+            default_sr = _project_root() / "models" / "realesr-general-x4v3.onnx"
+            if default_sr.is_file():
+                self.realesrgan_model_path = str(default_sr)
         # 网易云热评：直连默认；可选 NCM API / 外部脚本
         self.netease_api_base = cfg.get("netease_api_base", "")
         self.netease_hot_comments_script = cfg.get("netease_hot_comments_script", "")

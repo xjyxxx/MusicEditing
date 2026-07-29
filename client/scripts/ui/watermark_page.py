@@ -6,13 +6,13 @@ import os
 import tempfile
 
 from PySide6.QtCore import Qt, Slot
-from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QListWidget,
     QMessageBox, QProgressBar, QPushButton, QRadioButton, QSlider, QTabWidget,
     QVBoxLayout, QWidget,
 )
 
+from core.image_loader import load_preview
 from ui.region_selector import RegionSelectorWidget
 from viewmodels.main_vm import MainViewModel
 
@@ -207,14 +207,17 @@ class WatermarkPage(QWidget):
         )
         if not path:
             return
-        pix = QPixmap(path)
-        if pix.isNull():
+        preview = load_preview(path, max_side=4096)
+        if not preview.ok:
             QMessageBox.warning(self, "提示", "无法加载图片")
             return
         self._vm.import_image(path)
         self._img_path_label.setText(os.path.basename(path))
-        self._img_selector.load_pixmap(pix, (pix.width(), pix.height()))
-        self._status.setText(f"已加载图片: {path}")
+        self._img_selector.load_pixmap(preview.pixmap, preview.native_size)
+        self._status.setText(
+            f"已加载图片: {path}  ·  {preview.native_width}×{preview.native_height}"
+            f"  ·  解码 {preview.backend}"
+        )
 
     @Slot()
     def _on_import_video(self):
@@ -280,11 +283,11 @@ class WatermarkPage(QWidget):
             fd, self._preview_png = tempfile.mkstemp(suffix=".png", prefix="wm_prev_")
             os.close(fd)
             self._vm.bridge.extract_video_frame(video.file_path, t, self._preview_png)
-            pix = QPixmap(self._preview_png)
-            if pix.isNull():
+            preview = load_preview(self._preview_png, max_side=4096)
+            if not preview.ok:
                 raise RuntimeError("预览帧无效")
-            self._vid_selector.load_pixmap(pix, (video.width, video.height))
-            self._status.setText(f"预览帧 @ {t:.1f}s")
+            self._vid_selector.load_pixmap(preview.pixmap, (video.width, video.height))
+            self._status.setText(f"预览帧 @ {t:.1f}s  ·  解码 {preview.backend}")
         except Exception as e:
             self._show_error(f"预览失败: {e}")
 

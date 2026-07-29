@@ -80,7 +80,7 @@ def _extract_cli_errors(stderr: str) -> list[str]:
             continue
         if text.startswith((
             "PROBE_ERROR", "ITERATE_ERROR", "EXTRACT_AUDIO_ERROR",
-            "ANALYZE_SPEECH_ERROR", "WATERMARK_ERROR",
+            "ANALYZE_SPEECH_ERROR", "WATERMARK_ERROR", "UPSCALE_ERROR",
         )):
             errors.append(text)
         elif "] ERROR " in text:
@@ -89,7 +89,8 @@ def _extract_cli_errors(stderr: str) -> list[str]:
 
 
 def _format_cli_failure(stdout: str, stderr: str, returncode: int) -> str:
-    if "WATERMARK_OK" in stdout or "WATERMARK_FRAMES_OK" in stdout:
+    if ("WATERMARK_OK" in stdout or "WATERMARK_FRAMES_OK" in stdout
+            or "UPSCALE_OK" in stdout or "UPSCALE_FRAMES_OK" in stdout):
         return ""
     errors = _extract_cli_errors(stderr)
     if errors:
@@ -99,6 +100,11 @@ def _format_cli_failure(stdout: str, stderr: str, returncode: int) -> str:
         return (
             f"LaMa 推理失败（退出码 {_format_exit_code(returncode)}）。"
             "请缩小水印区域或缩短视频时间段后重试；若仍失败请重启 UI。"
+        )
+    if "UPSCALE_BACKEND:realesrgan" in stderr:
+        return (
+            f"超分推理失败（退出码 {_format_exit_code(returncode)}）。"
+            "可改用「快速」模式，或缩短视频时间段后重试。"
         )
     tail = stderr.strip() or stdout.strip() or f"exit code {returncode}"
     return f"media_cli 失败 ({_format_exit_code(returncode)}): {tail}"
@@ -140,9 +146,11 @@ class MediaBridge:
         self._prefer_cuda = False
         self._prefer_hw_decode = True
         self._watermark_backend = "lama"
+        self._upscale_backend = "realesrgan"
         self.set_prefer_cuda(False)
         self.set_prefer_hw_decode(True)
         self.set_watermark_backend("lama")
+        self.set_upscale_backend("realesrgan")
 
         ver = self._run(["version"]).strip()
         self._ffmpeg_version = ver or "unknown"
@@ -172,6 +180,19 @@ class MediaBridge:
     @property
     def watermark_backend(self) -> str:
         return self._watermark_backend
+
+    def set_upscale_backend(self, backend: str) -> None:
+        """超分后端：realesrgan（AI）| opencv（双三次快速）。"""
+        b = (backend or "realesrgan").strip().lower()
+        if b in ("opencv", "cv", "fast", "bicubic"):
+            self._upscale_backend = "opencv"
+        else:
+            self._upscale_backend = "realesrgan"
+        self._env["MUSIC_UPSCALE_BACKEND"] = self._upscale_backend
+
+    @property
+    def upscale_backend(self) -> str:
+        return self._upscale_backend
 
     def _run(self, args: list[str], timeout: Optional[int] = None) -> str:
         cmd = [str(self._cli)] + args
@@ -566,6 +587,502 @@ class MediaBridge:
             )
             if result.returncode != 0 or not os.path.isfile(output_path):
                 shutil.copy2(silent_mp4, output_path)
+            report(100.0, "完成")
+            return output_path
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    @property
+    def upscale_available(self) -> bool:
+        return (self._cli.parent / "onnxruntime.dll").exists()
+
+    def upscale_image(
+        self,
+        model_path: str,
+        input_path: str,
+        output_path: str,
+        scale: int = 4,
+        strength: int = 65,
+        timeout: Optional[int] = 600,
+        backend: str = "realesrgan",
+    ) -> str:
+        prev = self._upscale_backend
+        self.set_upscale_backend(backend)
+        try:
+            sp = max(0, min(100, int(strength)))
+            args = [
+                "upscale",
+                model_path or "-",
+                input_path,
+                output_path,
+                str(2 if scale == 2 else 4),
+                str(sp),
+            ]
+            out = self._run(args, timeout=timeout)
+            if "UPSCALE_OK" not in out:
+                raise RuntimeError(f"超分失败: {out}")
+            for line in out.splitlines():
+                if line.startswith("output="):
+                    return line.split("=", 1)[1].strip()
+            return output_path
+        finally:
+            self.set_upscale_backend(prev)
+
+    def upscale_frames(
+        self,
+        model_path: str,
+        frames_in_dir: str,
+        frames_out_dir: str,
+        scale: int = 4,
+        strength: int = 65,
+        on_progress: Optional[Callable[[int, int], None]] = None,
+        timeout: Optional[int] = 600,
+        backend: Optional[str] = None,
+    ) -> int:
+        """一次加载后端，批量超分目录内 PNG 帧。返回处理帧数。"""
+        prev = self._upscale_backend
+        if backend:
+            self.set_upscale_backend(backend)
+        try:
+            sp = max(0, min(100, int(strength)))
+            args = [
+                "upscale-frames",
+                model_path or "-",
+                frames_in_dir,
+                frames_out_dir,
+                str(2 if scale == 2 else 4),
+                str(sp),
+            ]
+            cmd = [str(self._cli)] + args
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=self._env,
+                cwd=str(self._cli.parent),
+            )
+
+            assert proc.stdout is not None
+            count = 0
+            stderr_lines: list[str] = []
+
+            def drain_stderr():
+                assert proc.stderr is not None
+                for line in proc.stderr:
+                    stderr_lines.append(line.rstrip("\n"))
+
+            t = threading.Thread(target=drain_stderr, daemon=True)
+            t.start()
+
+            try:
+                for line in proc.stdout:
+                    line = line.strip()
+                    if line.startswith("PROGRESS:"):
+                        parts = line.split(":")
+                        if len(parts) >= 3:
+                            cur = int(parts[1])
+                            total = int(parts[2])
+                            if on_progress:
+                                on_progress(cur, total)
+                    elif line.startswith("UPSCALE_FRAMES_OK"):
+                        pass
+                    elif line.startswith("count="):
+                        try:
+                            count = int(line.split("=", 1)[1])
+                        except ValueError:
+                            pass
+            finally:
+                proc.wait(timeout=timeout)
+                t.join(timeout=5)
+
+            stderr = "\n".join(stderr_lines)
+            if proc.returncode != 0:
+                err = _format_cli_failure("", stderr, proc.returncode)
+                raise RuntimeError(err or f"超分帧处理失败: {stderr}")
+            return count
+        finally:
+            self.set_upscale_backend(prev)
+
+    def upscale_video(
+        self,
+        model_path: str,
+        input_path: str,
+        output_path: str,
+        fps: float,
+        scale: int = 2,
+        strength: int = 65,
+        start_sec: float = 0.0,
+        end_sec: float = 0.0,
+        max_frames: int = 0,
+        on_progress: Optional[Callable[[float, str], None]] = None,
+        backend: str = "opencv",
+    ) -> str:
+        """视频超分。默认 backend=opencv；AI 传 realesrgan。进程内一次加载、多帧复用。"""
+        if fps <= 0:
+            fps = 25.0
+        scale = 2 if scale == 2 else 4
+        strength = max(0, min(100, int(strength)))
+        use_ai = (backend or "opencv").strip().lower() not in (
+            "opencv", "cv", "fast", "bicubic",
+        )
+        ffmpeg = _find_ffmpeg()
+        tmp = tempfile.mkdtemp(prefix="music_sr_")
+        frames_in = os.path.join(tmp, "in")
+        frames_out = os.path.join(tmp, "out")
+        os.makedirs(frames_in)
+        os.makedirs(frames_out)
+
+        def report(p: float, msg: str):
+            if on_progress:
+                on_progress(p, msg)
+
+        try:
+            report(2.0, "正在提取视频帧…")
+            extract_cmd = [str(ffmpeg), "-y"]
+            if start_sec > 0:
+                extract_cmd.extend(["-ss", f"{start_sec:.3f}"])
+            extract_cmd.extend(["-i", input_path])
+            if end_sec > start_sec:
+                duration = end_sec - start_sec
+                extract_cmd.extend(["-t", f"{duration:.3f}"])
+            if max_frames > 0:
+                extract_cmd.extend(["-vframes", str(max_frames)])
+            extract_cmd.extend([
+                "-vsync", "0",
+                os.path.join(frames_in, "frame_%06d.png"),
+            ])
+            result = subprocess.run(
+                extract_cmd, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", env=self._env,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or "帧提取失败")
+
+            frame_files = sorted(glob.glob(os.path.join(frames_in, "*.png")))
+            if not frame_files:
+                raise RuntimeError("未提取到任何视频帧")
+
+            total = len(frame_files)
+            mode_label = "Real-ESRGAN" if use_ai else "OpenCV 双三次"
+            report(8.0, f"共 {total} 帧，{mode_label} {scale}x 强度{strength}%…")
+
+            def on_frame(cur: int, frame_total: int):
+                pct = 8.0 + cur / frame_total * 82.0
+                report(pct, f"处理帧 {cur}/{frame_total}")
+
+            timeout = max(120, total * 90) if use_ai else max(60, total * 3)
+            self.upscale_frames(
+                model_path if use_ai else (model_path or "-"),
+                frames_in,
+                frames_out,
+                scale=scale,
+                strength=strength,
+                on_progress=on_frame,
+                timeout=timeout,
+                backend="realesrgan" if use_ai else "opencv",
+            )
+
+            silent_mp4 = os.path.join(tmp, "silent.mp4")
+            report(92.0, "正在编码视频…")
+            encode_cmd = [
+                str(ffmpeg), "-y",
+                "-framerate", f"{fps:.3f}",
+                "-i", os.path.join(frames_out, "frame_%06d.png"),
+                *_video_encoder_args(),
+                silent_mp4,
+            ]
+            result = subprocess.run(
+                encode_cmd, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", env=self._env,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or "视频编码失败")
+
+            report(96.0, "正在合并音频…")
+            mux_cmd = [
+                str(ffmpeg), "-y",
+                "-i", silent_mp4,
+                "-i", input_path,
+                "-map", "0:v:0",
+                "-map", "1:a:0?",
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-shortest",
+                output_path,
+            ]
+            result = subprocess.run(
+                mux_cmd, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", env=self._env,
+            )
+            if result.returncode != 0 or not os.path.isfile(output_path):
+                shutil.copy2(silent_mp4, output_path)
+            report(100.0, "完成")
+            return output_path
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def probe_duration(self, input_path: str) -> float:
+        """尽量用 media_cli probe，失败则回 0。"""
+        try:
+            info = self.probe_video(input_path)
+            return float(getattr(info, "duration_sec", 0.0) or 0.0)
+        except Exception:
+            return 0.0
+
+    def export_clip(
+        self,
+        input_path: str,
+        start_sec: float,
+        end_sec: float,
+        output_path: str,
+        *,
+        reencode: bool = False,
+    ) -> str:
+        """按时间切一段视频。优先 stream copy，失败再重编码。"""
+        if end_sec <= start_sec:
+            raise ValueError(f"无效时间段: {start_sec:.3f} → {end_sec:.3f}")
+        ffmpeg = _find_ffmpeg()
+        duration = end_sec - start_sec
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+
+        def _run(copy: bool) -> subprocess.CompletedProcess:
+            cmd = [
+                str(ffmpeg), "-y",
+                "-ss", f"{max(0.0, start_sec):.3f}",
+                "-i", input_path,
+                "-t", f"{duration:.3f}",
+            ]
+            if copy:
+                cmd.extend(["-c", "copy", "-avoid_negative_ts", "make_zero"])
+            else:
+                cmd.extend([*_video_encoder_args(), "-c:a", "aac", "-b:a", "192k"])
+            cmd.append(output_path)
+            return subprocess.run(
+                cmd, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", env=self._env,
+            )
+
+        if not reencode:
+            result = _run(True)
+            if result.returncode == 0 and os.path.isfile(output_path) and os.path.getsize(output_path) > 0:
+                return output_path
+        result = _run(False)
+        if result.returncode != 0 or not os.path.isfile(output_path):
+            raise RuntimeError(result.stderr.strip() or "片段导出失败")
+        return output_path
+
+    def concat_clips(self, clip_paths: List[str], output_path: str) -> str:
+        """用 concat demuxer 拼接已切片段（优先 copy）。"""
+        paths = [p for p in clip_paths if p and os.path.isfile(p)]
+        if not paths:
+            raise ValueError("没有可拼接的片段")
+        if len(paths) == 1:
+            shutil.copy2(paths[0], output_path)
+            return output_path
+
+        ffmpeg = _find_ffmpeg()
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+        list_path = output_path + ".concat.txt"
+        try:
+            with open(list_path, "w", encoding="utf-8") as f:
+                for p in paths:
+                    # concat 协议要求正斜杠路径
+                    safe = os.path.abspath(p).replace("\\", "/")
+                    f.write(f"file '{safe}'\n")
+
+            def _run(copy: bool) -> subprocess.CompletedProcess:
+                cmd = [
+                    str(ffmpeg), "-y",
+                    "-f", "concat", "-safe", "0",
+                    "-i", list_path,
+                ]
+                if copy:
+                    cmd.extend(["-c", "copy"])
+                else:
+                    cmd.extend([*_video_encoder_args(), "-c:a", "aac", "-b:a", "192k"])
+                cmd.append(output_path)
+                return subprocess.run(
+                    cmd, capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", env=self._env,
+                )
+
+            result = _run(True)
+            if result.returncode != 0 or not os.path.isfile(output_path):
+                result = _run(False)
+            if result.returncode != 0 or not os.path.isfile(output_path):
+                raise RuntimeError(result.stderr.strip() or "拼接失败")
+            return output_path
+        finally:
+            try:
+                os.remove(list_path)
+            except OSError:
+                pass
+
+    def export_highlights(
+        self,
+        input_path: str,
+        segments: List[Tuple[float, float]],
+        output_dir: str,
+        *,
+        concat: bool = True,
+        on_progress: Optional[Callable[[float, str], None]] = None,
+    ) -> Tuple[List[str], str]:
+        """
+        导出高光片段到目录，并可选拼接成 highlights_merged.mp4。
+        返回 (clip_paths, merged_path)；未拼接时 merged_path 为空串。
+        """
+        if not segments:
+            raise ValueError("没有可导出的高光片段")
+        os.makedirs(output_dir, exist_ok=True)
+
+        def report(p: float, msg: str):
+            if on_progress:
+                on_progress(p, msg)
+
+        clips: List[str] = []
+        total = len(segments)
+        for i, (start, end) in enumerate(segments):
+            if end <= start:
+                continue
+            name = f"highlight_{i + 1:03d}_{start:.1f}-{end:.1f}.mp4"
+            out = os.path.join(output_dir, name)
+            report(5.0 + i / max(total, 1) * 70.0, f"导出片段 {i + 1}/{total}")
+            self.export_clip(input_path, start, end, out)
+            clips.append(out)
+
+        if not clips:
+            raise RuntimeError("有效片段为空")
+
+        merged = ""
+        if concat:
+            merged = os.path.join(output_dir, "highlights_merged.mp4")
+            report(90.0, "正在拼接成片…")
+            self.concat_clips(clips, merged)
+        report(100.0, "导出完成")
+        return clips, merged
+
+    @staticmethod
+    def _parse_silence_intervals(ffmpeg_stderr: str) -> List[Tuple[float, float]]:
+        """解析 silencedetect 的 silence_start / silence_end。"""
+        import re
+
+        starts: List[float] = []
+        ends: List[float] = []
+        for line in ffmpeg_stderr.splitlines():
+            m = re.search(r"silence_start:\s*([0-9.]+)", line)
+            if m:
+                starts.append(float(m.group(1)))
+                continue
+            m = re.search(r"silence_end:\s*([0-9.]+)", line)
+            if m:
+                ends.append(float(m.group(1)))
+        intervals: List[Tuple[float, float]] = []
+        for i, s in enumerate(starts):
+            e = ends[i] if i < len(ends) else None
+            if e is not None and e > s:
+                intervals.append((s, e))
+        return intervals
+
+    def detect_speech_segments(
+        self,
+        input_path: str,
+        *,
+        noise_db: float = -35.0,
+        min_silence: float = 0.45,
+        min_speech: float = 0.25,
+        pad_sec: float = 0.05,
+        duration_hint: float = 0.0,
+    ) -> List[Tuple[float, float]]:
+        """
+        用 ffmpeg silencedetect 找静音，反推「有声」区间（紧凑口播用）。
+        返回 [(start, end), ...] 秒。
+        """
+        ffmpeg = _find_ffmpeg()
+        duration = duration_hint if duration_hint > 0 else self.probe_duration(input_path)
+        af = f"silencedetect=noise={noise_db}dB:d={min_silence:.3f}"
+        cmd = [
+            str(ffmpeg), "-hide_banner",
+            "-i", input_path,
+            "-af", af,
+            "-f", "null", "-",
+        ]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", env=self._env,
+        )
+        # silencedetect 写在 stderr；即使 returncode 非 0 也可能有结果
+        silences = self._parse_silence_intervals(result.stderr or "")
+        if duration <= 0:
+            # 兜底：从最后 silence_end 估计
+            if silences:
+                duration = max(e for _, e in silences)
+            else:
+                raise RuntimeError("无法探测视频时长，静音检测失败")
+
+        # 静音 → 保留有声段
+        keep: List[Tuple[float, float]] = []
+        cursor = 0.0
+        for s, e in silences:
+            if s > cursor + min_speech:
+                keep.append((max(0.0, cursor - pad_sec), min(duration, s + pad_sec)))
+            cursor = max(cursor, e)
+        if duration > cursor + min_speech:
+            keep.append((max(0.0, cursor - pad_sec), duration))
+
+        # 合并过近片段
+        merged: List[Tuple[float, float]] = []
+        for a, b in keep:
+            a = max(0.0, a)
+            b = min(duration, b)
+            if b - a < min_speech:
+                continue
+            if merged and a - merged[-1][1] < 0.12:
+                merged[-1] = (merged[-1][0], b)
+            else:
+                merged.append((a, b))
+        return merged
+
+    def remove_silence(
+        self,
+        input_path: str,
+        output_path: str,
+        *,
+        noise_db: float = -35.0,
+        min_silence: float = 0.45,
+        duration_hint: float = 0.0,
+        on_progress: Optional[Callable[[float, str], None]] = None,
+    ) -> str:
+        """检测静音并只保留有声段，拼接成紧凑口播 MP4。"""
+
+        def report(p: float, msg: str):
+            if on_progress:
+                on_progress(p, msg)
+
+        report(5.0, "正在检测静音…")
+        segs = self.detect_speech_segments(
+            input_path,
+            noise_db=noise_db,
+            min_silence=min_silence,
+            duration_hint=duration_hint,
+        )
+        if not segs:
+            raise RuntimeError("未检测到有效人声段落（可调低静音阈值再试）")
+
+        report(15.0, f"保留 {len(segs)} 段有声内容，开始裁剪…")
+        tmp = tempfile.mkdtemp(prefix="music_silence_")
+        try:
+            clips: List[str] = []
+            for i, (s, e) in enumerate(segs):
+                clip = os.path.join(tmp, f"keep_{i:04d}.mp4")
+                pct = 15.0 + (i / max(len(segs), 1)) * 70.0
+                report(pct, f"裁剪 {i + 1}/{len(segs)}")
+                self.export_clip(input_path, s, e, clip)
+                clips.append(clip)
+            report(90.0, "正在拼接紧凑版…")
+            self.concat_clips(clips, output_path)
             report(100.0, "完成")
             return output_path
         finally:

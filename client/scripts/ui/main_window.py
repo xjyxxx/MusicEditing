@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 
 from ui.video_player import VideoPlayerWidget
 from ui.watermark_page import WatermarkPage
+from ui.enhance_page import EnhancePage
 from ui.hot_comments_page import HotCommentsPage
 from viewmodels.main_vm import MainViewModel
 
@@ -53,7 +54,7 @@ class HomePage(QWidget):
         splitter = QSplitter(Qt.Vertical)
 
         # 播放器区域
-        player_box = QGroupBox("本地预览播放器")
+        player_box = QGroupBox("本地预览（视频 / 音乐）")
         player_box.setStyleSheet("QGroupBox { font-weight: bold; color: #aaf; }")
         player_layout = QVBoxLayout(player_box)
         self._player = VideoPlayerWidget()
@@ -64,7 +65,7 @@ class HomePage(QWidget):
         cards_widget = QWidget()
         cards_layout = QVBoxLayout(cards_widget)
         cards_layout.setContentsMargins(0, 8, 0, 0)
-        hint = QLabel("快捷功能（导入的视频可在上方直接预览）")
+        hint = QLabel("快捷功能 · 播放器支持视频与音乐，点击画面可暂停/继续")
         hint.setStyleSheet("color: #888; font-size: 12px;")
         cards_layout.addWidget(hint)
 
@@ -175,16 +176,23 @@ class SlicePage(QWidget):
         btn_analyze = QPushButton("AI 智能分析")
         btn_analyze.setStyleSheet("background: #5b5bd6; color: white; padding: 8px 20px;")
         btn_analyze.clicked.connect(self._on_analyze)
-        btn_export = QPushButton("批量导出")
+        btn_export = QPushButton("一键高光成片")
+        btn_export.setToolTip("导出各高光片段，并拼接成 highlights_merged.mp4")
         btn_export.clicked.connect(self._on_export)
+        btn_silence = QPushButton("静音剪掉")
+        btn_silence.setToolTip("检测静音段并裁掉，生成紧凑口播版")
+        btn_silence.clicked.connect(self._on_compact_speech)
         btn_row.addWidget(btn_analyze)
         btn_row.addWidget(btn_export)
+        btn_row.addWidget(btn_silence)
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
         vm.videoLoaded.connect(self._on_video_loaded)
         vm.progressUpdated.connect(self._on_progress)
         vm.highlightsReady.connect(self._on_highlights)
+        vm.exportFinished.connect(self._on_export_done)
+        vm.silenceFinished.connect(self._on_silence_done)
         vm.errorOccurred.connect(self._show_error)
 
     @Slot()
@@ -234,21 +242,55 @@ class SlicePage(QWidget):
 
     @Slot()
     def _on_export(self):
-        if self._highlight_list.count() == 0:
+        if not self._vm.get_app_state().highlight_segments:
             QMessageBox.warning(self, "提示", "请先完成 AI 分析")
             return
         out_dir = QFileDialog.getExistingDirectory(self, "选择导出目录")
-        if out_dir:
-            self._vm.set_output_dir(out_dir)
-            QMessageBox.information(self, "导出", f"将导出到: {out_dir}\n（导出功能待后续实现）")
+        if not out_dir:
+            return
+        self._progress.setVisible(True)
+        self._progress.setValue(0)
+        self._vm.export_highlights(out_dir, concat=True)
+
+    @Slot()
+    def _on_compact_speech(self):
+        video = self._vm.get_app_state().current_video
+        if not video:
+            QMessageBox.warning(self, "提示", "请先导入视频")
+            return
+        base = os.path.splitext(os.path.basename(video.file_path))[0]
+        default = f"{base}_compact.mp4"
+        out, _ = QFileDialog.getSaveFileName(
+            self, "保存紧凑口播", default,
+            "MP4 (*.mp4);;所有文件 (*.*)",
+        )
+        if not out:
+            return
+        self._progress.setVisible(True)
+        self._progress.setValue(0)
+        self._vm.compact_speech(out)
+
+    @Slot(str)
+    def _on_export_done(self, path: str):
+        self._progress.setValue(100)
+        QMessageBox.information(
+            self, "导出完成",
+            f"高光成片已生成：\n{path}\n\n同目录还有各片段 highlight_XXX.mp4",
+        )
+
+    @Slot(str)
+    def _on_silence_done(self, path: str):
+        self._progress.setValue(100)
+        QMessageBox.information(self, "完成", f"紧凑口播已保存：\n{path}")
 
     @Slot(str)
     def _show_error(self, msg):
+        self._progress.setVisible(False)
         QMessageBox.critical(self, "错误", msg)
 
 
 class PlaceholderPage(QWidget):
-    """画质增强 / 去水印 / 个人中心 占位页"""
+    """个人中心等占位页"""
 
     def __init__(self, title: str, desc: str, parent=None):
         super().__init__(parent)
@@ -309,8 +351,8 @@ class MainWindow(QMainWindow):
         self._home_page = HomePage(self._vm, self._switch_tab)
         self._tabs.addTab(self._home_page, "首页")
         self._tabs.addTab(SlicePage(self._vm), "智能切片")
-        self._tabs.addTab(PlaceholderPage("画质增强 / 4K 超分",
-            "支持 1080P→4K 超分、基础修复、老旧视频修复。付费功能待授权解锁。"), "画质增强")
+        self._enhance_page = EnhancePage(self._vm)
+        self._tabs.addTab(self._enhance_page, "画质增强")
         self._watermark_page = WatermarkPage(self._vm)
         self._tabs.addTab(self._watermark_page, "去水印")
         self._hot_comments_page = HotCommentsPage(self._vm)
