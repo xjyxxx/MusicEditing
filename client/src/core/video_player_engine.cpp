@@ -469,7 +469,8 @@ bool VideoPlayerEngine::setFrameFilter(const std::string& name) {
     if (!impl_) return false;
     const bool ok = impl_->frameProcessor.setModeFromString(name);
     if (ok) {
-        LOG_INFO("帧滤镜 -> " + impl_->frameProcessor.modeName());
+        LOG_INFO("帧滤镜 -> " + impl_->frameProcessor.modeName()
+            + " device=" + impl_->frameProcessor.deviceName());
     } else {
         LOG_WARN("无效帧滤镜: " + name);
     }
@@ -479,6 +480,29 @@ bool VideoPlayerEngine::setFrameFilter(const std::string& name) {
 std::string VideoPlayerEngine::frameFilterName() const {
     if (!impl_) return "off";
     return impl_->frameProcessor.modeName();
+}
+
+bool VideoPlayerEngine::setFrameFilterDevice(const std::string& name) {
+    if (!impl_) return false;
+    const bool ok = impl_->frameProcessor.setDeviceFromString(name);
+    if (ok) {
+        const bool ocl = media::core::FrameProcessor::openclAvailable();
+        LOG_INFO("帧滤镜设备 -> " + impl_->frameProcessor.deviceName()
+            + " opencl_available=" + std::string(ocl ? "1" : "0"));
+    } else {
+        LOG_WARN("无效帧滤镜设备: " + name);
+    }
+    return ok;
+}
+
+std::string VideoPlayerEngine::frameFilterDeviceName() const {
+    if (!impl_) return "auto";
+    return impl_->frameProcessor.deviceName();
+}
+
+std::string VideoPlayerEngine::frameFilterActiveDeviceName() const {
+    if (!impl_) return "cpu";
+    return impl_->frameProcessor.activeDeviceName();
 }
 
 } // namespace media::core

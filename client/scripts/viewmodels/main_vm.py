@@ -1161,6 +1161,8 @@ class MainViewModel(QObject):
                     format_id=getattr(item, "format_id", "") or "",
                     ext=getattr(item, "ext", "") or "mp3",
                     referer=getattr(item, "page_url", "") or "",
+                    has_video=bool(getattr(item, "has_video", False)),
+                    has_audio=bool(getattr(item, "has_audio", False)),
                     on_progress=report,
                 )
                 self._status_message = f"预览就绪: {os.path.basename(path)}"

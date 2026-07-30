@@ -25,6 +25,7 @@ from core.player_backend import PlayerBackend
 from core.qt_audio_output import QtAudioOutput
 from core.app_logic import AppLogic, load_app_config
 from core.app_logger import setup_logging
+from core.subtitle_track import SubtitleTrack, find_sidecar_subtitles
 from ui.gl_video_widget import GlVideoWidget, _default_surface_format
 
 log = setup_logging("VideoPlayer", __import__("os").environ.get("MUSIC_LOG_LEVEL", "INFO"))
@@ -114,9 +115,12 @@ class VideoPlayerWidget(QWidget):
         _cfg = load_app_config()
         _pb = _cfg.get("opencv_filter_playback", "off").strip().lower()
         self._opencv_filter_playback = _pb not in ("0", "false", "off", "no")
+        self._opencv_filter_device = _cfg.get("opencv_filter_device", "auto").strip().lower() or "auto"
+        self._opencv_filter_active_device = "cpu"
         self._hw_decode_preferred = AppLogic().prefer_hw_decode
         self._hw_decode_active = False
         self._audio_only = False
+        self._subtitles = SubtitleTrack()
 
 
 
@@ -141,6 +145,11 @@ class VideoPlayerWidget(QWidget):
         self._btn_pause = QPushButton("暂停")
 
         self._btn_stop = QPushButton("停止")
+
+        self._btn_sub = QPushButton("字幕…")
+        self._btn_sub.setToolTip("加载外挂字幕（SRT / VTT）；打开视频时自动匹配同名字幕")
+        self._btn_clear_sub = QPushButton("关字幕")
+        self._btn_clear_sub.setEnabled(False)
 
 
 
@@ -192,6 +201,9 @@ class VideoPlayerWidget(QWidget):
 
         ctrl.addWidget(self._btn_stop)
 
+        ctrl.addWidget(self._btn_sub)
+        ctrl.addWidget(self._btn_clear_sub)
+
         ctrl.addWidget(self._filter_combo)
 
         ctrl.addStretch()
@@ -237,6 +249,9 @@ class VideoPlayerWidget(QWidget):
         self._btn_pause.clicked.connect(self.pause)
 
         self._btn_stop.clicked.connect(self.stop)
+
+        self._btn_sub.clicked.connect(self._on_load_subtitle)
+        self._btn_clear_sub.clicked.connect(self._on_clear_subtitle)
 
         self._filter_combo.currentIndexChanged.connect(self._on_filter_changed)
 
@@ -373,6 +388,7 @@ class VideoPlayerWidget(QWidget):
         self._timer.stop()
         self._audio.stop()
         self._reset_transport_controls(playing=False)
+        self._clear_subtitles(silent=True)
         self._audio_only = True
         self._hw_decode_active = False
         self._has_audio = True
@@ -419,6 +435,7 @@ class VideoPlayerWidget(QWidget):
         self._timer.stop()
         self._audio.stop()
         self._reset_transport_controls(playing=False)
+        self._clear_subtitles(silent=True)
         self._audio_only = False
         self._filter_combo.setEnabled(True)
 
@@ -460,10 +477,9 @@ class VideoPlayerWidget(QWidget):
             "点击画面暂停/继续",
         ]
         if self._opencv_filter and self._opencv_filter != "off":
-            if self._opencv_filter_playback or not info.hw_decode:
-                title_parts.append(f"OpenCV:{self._opencv_filter}")
-            else:
-                title_parts.append("OpenCV:预览")
+            tag = self._opencv_title_tag()
+            if tag:
+                title_parts.append(tag)
         self._title.setText("  ·  ".join(title_parts))
         log.info(
             "视频已打开 %s %dx%d %s hw=%s",
@@ -474,7 +490,19 @@ class VideoPlayerWidget(QWidget):
         self._update_time_label()
 
         self._pull_and_show_frame(apply_filter=True)
+        self._refresh_filter_status()
+        # 首帧滤镜后刷新标题中的 opencl/cpu
+        if self._opencv_filter and self._opencv_filter != "off":
+            tag = self._opencv_title_tag()
+            if tag and title_parts:
+                # 重建标题末尾滤镜标签
+                base = [p for p in title_parts if not str(p).startswith("OpenCV:")]
+                base.append(tag)
+                self._title.setText("  ·  ".join(base))
         self._display.set_paused_overlay(True)
+
+        # 自动加载同目录同名字幕
+        self._try_autoload_sidecar_subtitles(path)
 
         # 同步到 ViewModel（此时 current_path 已设置，不会触发重复 open）
         self.fileOpened.emit(self._current_path)
@@ -483,13 +511,36 @@ class VideoPlayerWidget(QWidget):
             self.play()
 
     def _apply_opencv_filter(self):
-        """应用当前滤镜模式（未编译 OpenCV 时静默忽略）"""
+        """应用当前滤镜模式与设备（未编译 OpenCV 时静默忽略）"""
         if not self._backend or not self._opencv_filter:
             return
         try:
+            if self._opencv_filter_device:
+                self._backend.set_filter_device(self._opencv_filter_device)
             self._backend.set_filter(self._opencv_filter)
+            self._refresh_filter_status()
         except RuntimeError:
             pass
+
+    def _refresh_filter_status(self):
+        if not self._backend:
+            return
+        try:
+            resp = self._backend.filter_status()
+            for part in str(resp).split():
+                if part.startswith("active="):
+                    self._opencv_filter_active_device = part.split("=", 1)[1]
+        except RuntimeError:
+            pass
+
+    def _opencv_title_tag(self) -> str:
+        if not self._opencv_filter or self._opencv_filter == "off":
+            return ""
+        dev = self._opencv_filter_active_device or "cpu"
+        # 硬解 + 未开播放滤镜：只在暂停预览时套滤镜，但仍显示实际设备
+        if self._hw_decode_active and not self._opencv_filter_playback:
+            return f"OpenCV:{self._opencv_filter}/{dev}·预览"
+        return f"OpenCV:{self._opencv_filter}/{dev}"
 
     @Slot(int)
     def _on_filter_changed(self, _index: int):
@@ -512,19 +563,21 @@ class VideoPlayerWidget(QWidget):
                     pass
                 self._last_shown_frame_ts = pos - self._frame_interval
                 self._pull_and_show_frame(apply_filter=True)
+                self._refresh_filter_status()
         self._refresh_title_filter_hint()
-        log.info("滤镜切换 mode=%s playback=%s", mode, self._opencv_filter_playback)
+        log.info(
+            "滤镜切换 mode=%s playback=%s device=%s active=%s",
+            mode, self._opencv_filter_playback,
+            self._opencv_filter_device, self._opencv_filter_active_device,
+        )
 
     def _refresh_title_filter_hint(self):
         text = self._title.text()
-        # 去掉旧 OpenCV 提示再追加
         parts = [p.strip() for p in text.split("·")]
         parts = [p for p in parts if not p.startswith("OpenCV:")]
-        if self._opencv_filter and self._opencv_filter != "off":
-            if self._opencv_filter_playback or not self._hw_decode_active:
-                parts.append(f"OpenCV:{self._opencv_filter}")
-            else:
-                parts.append("OpenCV:预览")
+        tag = self._opencv_title_tag()
+        if tag:
+            parts.append(tag)
         self._title.setText("  ·  ".join(parts))
 
 
@@ -885,14 +938,71 @@ class VideoPlayerWidget(QWidget):
 
 
     def _update_time_label(self):
-
         self._time_label.setText(
-
             f"{_format_time(self._position_sec)} / {_format_time(self._duration_sec)}"
-
         )
+        self._sync_subtitle()
 
+    def _sync_subtitle(self):
+        if self._subtitles.empty:
+            return
+        text = self._subtitles.text_at(self._position_sec)
+        self._display.set_subtitle_text(text)
 
+    def _try_autoload_sidecar_subtitles(self, video_path: str):
+        side = find_sidecar_subtitles(video_path)
+        if not side:
+            return
+        try:
+            self._load_subtitle_path(side)
+            log.info("自动加载字幕 %s (%d cues)", side, len(self._subtitles.cues))
+        except Exception as e:
+            log.warning("自动加载字幕失败: %s", e)
+
+    def _load_subtitle_path(self, path: str):
+        track = SubtitleTrack.from_file(path)
+        if track.empty:
+            raise RuntimeError("未解析到字幕条目")
+        self._subtitles = track
+        self._btn_clear_sub.setEnabled(True)
+        self._sync_subtitle()
+        # 标题追加字幕提示
+        tip = f"字幕:{os.path.basename(path)}"
+        cur = self._title.text()
+        parts = [p.strip() for p in cur.split("·")]
+        parts = [p for p in parts if not p.startswith("字幕:")]
+        parts.append(tip)
+        self._title.setText("  ·  ".join(parts))
+
+    @Slot()
+    def _on_load_subtitle(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择字幕文件",
+            os.path.dirname(self._current_path) if self._current_path else "",
+            "字幕 (*.srt *.vtt *.ass);;所有文件 (*.*)",
+        )
+        if not path:
+            return
+        try:
+            self._load_subtitle_path(path)
+            log.info("已加载字幕 %s (%d cues)", path, len(self._subtitles.cues))
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "字幕", f"加载失败: {e}")
+
+    def _clear_subtitles(self, *, silent: bool = False):
+        self._subtitles.clear()
+        self._display.set_subtitle_text("")
+        self._btn_clear_sub.setEnabled(False)
+        if not silent:
+            cur = self._title.text()
+            parts = [p.strip() for p in cur.split("·") if not p.strip().startswith("字幕:")]
+            self._title.setText("  ·  ".join(parts) if parts else cur)
+
+    @Slot()
+    def _on_clear_subtitle(self):
+        self._clear_subtitles(silent=False)
+        log.info("已关闭字幕")
 
     def load_from_video_model(self, video, auto_play: bool = False):
 

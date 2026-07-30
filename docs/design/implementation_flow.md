@@ -173,6 +173,8 @@ OpenCV **仅用于解码后的 RGB24 帧处理**，不参与 FFmpeg 解码本身
 ```ini
 # OpenCV 帧滤镜（需编译时启用 OpenCV）：clahe | denoise | sharpen | film | neon | comic | pixel | off
 opencv_filter=clahe
+# 滤镜设备：auto（优先 OpenCL）| cpu | opencl
+opencv_filter_device=auto
 # 播放时是否启用滤镜（false=仅暂停预览；UI 下拉选手动选滤镜后会打开播放滤镜）
 opencv_filter_playback=false
 ```
@@ -195,42 +197,44 @@ opencv_filter_playback=false
 打开视频后，播放器标题栏（`VideoPlayerWidget._title`）会拼接滤镜状态，例如：
 
 ```
-测试视频.mp4  ·  1280x720  ·  FFmpeg  ·  有声音  ·  OpenCV:clahe
+测试视频.mp4  ·  1280x720  ·  FFmpeg  ·  有声音  ·  OpenCV:clahe/opencl
 ```
 
 逻辑见 `client/scripts/ui/video_player.py`：
 
-- 启动时从 `load_app_config()` 读取 `opencv_filter`（默认 `clahe`）
-- 若值不为 `off`，标题追加 `OpenCV:{模式名}`
-- **注意**：标题显示只表示「已下发滤镜配置」；若编译时未链接 OpenCV（输出目录无 `opencv_world4120.dll`），画面仍为直通，无视觉效果
+- 启动时从 `load_app_config()` 读取 `opencv_filter` / `opencv_filter_device`（默认 `clahe` / `auto`）
+- 若值不为 `off`，标题追加 `OpenCV:{模式}/{opencl|cpu}`；硬解且仅暂停预览时为 `OpenCV:clahe/opencl·预览`
+- **注意**：若编译时未链接 OpenCV（输出目录无 `opencv_world4120.dll`），画面仍为直通；无 OpenCL 时后缀为 `/cpu`
 
 #### 3.5.3 端到端调用链
 
 ```
 app.conf  opencv_filter=clahe
+          opencv_filter_device=auto
     │
     ▼
 VideoPlayerWidget._do_open_file()
-    ├─ PlayerBackend.open(path)          # 重启 media_player，OPEN 视频
+    ├─ PlayerBackend.open(path)
     └─ _apply_opencv_filter()
-           └─ PlayerBackend.set_filter("clahe")
-                  └─ stdin: FILTER clahe
-                         └─ media_player.exe → VideoPlayerEngine::setFrameFilter()
-                                └─ FrameProcessor::setModeFromString("clahe")
+           ├─ FILTER_DEVICE auto → setFrameFilterDevice
+           └─ FILTER clahe → setFrameFilter
     │
     ▼ 播放中每帧
-VideoPlayerEngine::decodeNextFrameToFile()
-    ├─ FFmpeg 解码 + sws_scale → RGB24 缓冲区
-    └─ FrameProcessor::processRgbFrame(rgb, w, h)   # 原地修改 RGB
-           └─ Python 读 frame.rgb → QImage → QLabel 显示
+decodeNextFrameToFile()
+    ├─ FFmpeg 解码 + sws_scale → RGB24
+    └─ FrameProcessor::processRgbFrame
+           ├─ OpenCL：UMat upload → 算子 → download（优先）
+           └─ 失败则 CPU Mat
 ```
 
 IPC 协议（`player_main.cpp`）：
 
 ```
-FILTER clahe     →  FILTER_OK mode=clahe
-FILTER off       →  FILTER_OK mode=off
-FILTER invalid   →  ERROR invalid_filter
+FILTER_DEVICE auto|cpu|opencl  →  FILTER_DEVICE_OK device=... opencl=0|1
+FILTER clahe                   →  FILTER_OK mode=clahe device=auto active=cpu|opencl
+FILTER_STATUS                  →  FILTER_STATUS_OK mode=... device=... active=... opencl=...
+FILTER off                     →  FILTER_OK mode=off ...
+FILTER invalid                 →  ERROR invalid_filter
 ```
 
 #### 3.5.4 C++ 代码位置
@@ -456,10 +460,10 @@ detect_gpu_info()
 **播放器标题栏（硬解成功时）：**
 
 ```
-测试视频.mp4  ·  1280x720  ·  D3D11VA  ·  有声音  ·  OpenCV:clahe
+测试视频.mp4  ·  1280x720  ·  D3D11VA  ·  有声音  ·  OpenCV:clahe/opencl
 ```
 
-硬解失败或未启用时显示 `CPU解码`。
+硬解失败或未启用时显示 `CPU解码`。滤镜标签后缀为实际设备：`/opencl` 或 `/cpu`。
 
 **ViewModel 预留开关：** `MainViewModel.set_gpu_enabled(bool)` 可切换 `use_gpu` / `prefer_hw_decode`，目前**尚未绑定 UI 控件**。
 
@@ -472,6 +476,7 @@ gpu_enabled=true
 | 键 | 含义 | 当前是否生效 |
 |----|------|--------------|
 | `gpu_enabled` | 是否请求 D3D11VA 硬解 | ✅ `AppLogic.prefer_hw_decode` → `PlayerBackend.set_hwaccel()` |
+| `opencv_filter_device` | 滤镜设备 auto/cpu/opencl | ✅ → `FILTER_DEVICE` → `FrameProcessor` OpenCL/CPU |
 
 `gpu_enabled=false` 时强制 CPU 软解。
 
@@ -507,14 +512,19 @@ OPEN <path>      →  OPEN_OK ... hw=1 hw_name=D3D11VA
 
 **要求：** x64 构建（`build_x64.bat` / `run_ui_x64.bat`）；Win32 旧 FFmpeg 无 hwcontext，自动 CPU 回退。
 
-#### 3.6.5 与 OpenCV 的关系（无逻辑冲突）
+#### 3.6.5 与 OpenCV 的关系（OpenCL 滤镜）
 
 ```
-磁盘 → FFmpeg D3D11VA 硬解 → GPU→CPU 拷贝 → OpenCV CPU 滤镜 → 显示
+磁盘 → FFmpeg D3D11VA 硬解 → GPU→CPU 拷贝 → OpenCV 滤镜（OpenCL UMat 优先，失败回退 CPU）→ 显示
 ```
 
 - 硬解失败时自动 **回退 CPU 软解**，不影响播放。
-- 同一 GPU 上硬解 + OpenCV CUDA + llama CUDA 会争抢资源，需分时调度。
+- 滤镜默认 `opencv_filter_device=auto`：探测 `cv::ocl::haveOpenCL()`，用 `cv::UMat` 跑 resize/blur/CLAHE 等；**film**（通道矩阵+暗角）固定 CPU。
+- 无 OpenCL 或算子失败时 **自动回退 CPU Mat**，不中断播放。
+- 强制设备：`FILTER_DEVICE cpu|opencl|auto`；查询：`FILTER_STATUS`。
+- 同一 GPU 上硬解 + OpenCL + llama CUDA 会争抢资源；实时播放滤镜仍有 upload/download 开销。
+
+**代码位置：** `FrameProcessor::processOpenCL` / `processCpu`（`frame_processor.cpp`）。
 
 #### 3.6.6 FFmpeg 硬解代码位置
 
@@ -983,19 +993,23 @@ SlicePage「静音剪掉」
 ```
 DownloadPage（内嵌 Tab）
   ├─ 「下载」：粘贴 URL → 可选探测 → 下视频/音频 → 首页播放器
-  └─ 「仅获取信息」：yt-dlp -J（可 --flat-playlist）
-        → 显示名称 + 格式/歌单条目列表（不落盘到下载目录）
-        → 双击/「播放选中」→ fetch_for_preview(临时文件) → 首页自动播放
-        → 「删除选中」/「清空」→ 仅改本地列表
+  └─ 「仅获取信息」：左右分栏
+        ├─ 左：yt-dlp -J → 名称 + 列表；播放优先读该条目本地缓存
+        └─ 右：媒体缓存列表（**唯一主键 = 页面URL哈希:列表项哈希**）
+              · 同一链接可缓存多条（每种格式/每首歌各一条）
+              · 页面级：info.json（再点获取可命中）
+              · 媒体级：media/{item_key}_{歌名或格式名}[_av].ext
 ```
 
 | 资源 | 路径 |
 |------|------|
 | 引擎 | `third_party/yt-dlp/yt-dlp.exe`（`scripts/download_yt_dlp.bat`） |
 | 转码 | 项目已有 FFmpeg |
+| 信息缓存 | `core/url_info_cache.py` → 默认 `~/MusicEditingInfoCache` |
 
 探测会解析格式列表或歌单条目；若码率/体积与元数据时长不符，提示「疑似试听片段」。
-列表支持 **双击/播放选中**（拉临时文件 → 首页播放器）、**删除选中 / 清空**（仅改本地列表）。
+列表支持 **双击/播放选中**（有该条目缓存则直接播，否则拉取并按主键落盘）、**删除选中 / 清空**（左列表仅 UI）；右侧列出**每条媒体缓存**，可独立播放/删除；「打开所属链接」载入左侧。
+B 站等 DASH：**仅画面**格式播放时会自动 `format+bestaudio` 合并，避免无声；列表会标注「仅画面 / 仅音频」。
 
 **注意：** 仅下载自有/授权素材；站点规则变化时更新 yt-dlp 即可。
 
@@ -1015,6 +1029,30 @@ EnhancePage / WatermarkPage 导入图片
 | UI | `client/scripts/ui/exif_panel.py` |
 
 **注意：** 复制到 `bin/Release` 时必须同时复制 `exiftool_files`。
+
+### 5.9 外挂字幕（播放器叠加）
+
+对应产品：本地播放时显示字幕。
+
+```
+打开视频 / 点击「字幕…」
+  │
+  ▼
+View: VideoPlayerWidget
+  → 自动 find_sidecar_subtitles(同目录同名 .srt/.vtt/.ass)
+     或 QFileDialog 手动选择
+  → SubtitleTrack.from_file / text_at(position_sec)
+  → GlVideoWidget.set_subtitle_text（底部半透明条）
+「关字幕」→ clear
+```
+
+| 资源 | 路径 |
+|------|------|
+| 解析 | `client/scripts/core/subtitle_track.py`（SRT / VTT / 简易 ASS Dialogue） |
+| 显示 | `client/scripts/ui/gl_video_widget.py` `_draw_subtitle` |
+| 控件 | `client/scripts/ui/video_player.py`「字幕…」「关字幕」 |
+
+**当前限制：** 仅外挂文件，不抽内嵌轨；ASS 只取文本时间轴，不渲染样式/特效。
 
 ---
 
@@ -1049,7 +1087,9 @@ Python 模块依赖
 main.py
 └── ui/main_window.py
     ├── ui/video_player.py
-    │   └── core/player_backend.py  (subprocess → media_player.exe)
+    │   ├── core/player_backend.py  (subprocess → media_player.exe)
+    │   ├── core/subtitle_track.py  (外挂 SRT/VTT/ASS)
+    │   └── ui/gl_video_widget.py   (OpenGL 画面 + 字幕叠加)
     ├── ui/enhance_page.py / watermark_page.py
     │   ├── ui/exif_panel.py       (ExifTool 元数据面板)
     │   └── core/image_loader.py   (OpenCV 解码 / 可选 CUDA 缩放 / Qt 回退)
@@ -1071,20 +1111,21 @@ main.py
 | PySide6 多标签 UI | ✅ | 首页/切片/画质增强/去水印/热评滚动；个人中心占位 |
 | 网易云热评滚动 | ✅ | `HotCommentsPage` + 外部爬虫脚本协议；默认演示数据 |
 | 首页本地播放器 | ✅ | FFmpeg 视频 + Qt 音乐；OpenGL 显示；**点击画面暂停/继续** |
-| OpenCV 帧处理 | ✅ | `FrameProcessor`：播放器实时滤镜 + 缩略图；配置 `opencv_filter`，UI 标题显示 `OpenCV:clahe` |
+| 外挂字幕 | ✅ | SRT/VTT/简易 ASS；同名自动加载；`GlVideoWidget` 底部叠加 |
+| OpenCV 帧处理 | ✅ | `FrameProcessor`：CPU + **OpenCL UMat**；标题 `OpenCV:clahe/opencl` |
 | GLEW / OpenGL 第三方 | ✅ | `third_party/opengl`；`media_player` 链 GLEW |
 | OpenGL 视频显示 | ✅ | `GlVideoWidget` 替换 QLabel；首页/热评页播放器共用 |
 | MVVM 双向绑定 | ✅ | Signal/Slot |
 | GPU 检测与状态栏 | ✅ | `nvidia-smi`；顶栏 `GPU: 型号` / `CPU 模式`（§3.6） |
 | FFmpeg GPU 硬解（D3D11VA） | ✅ | 播放器 + `VideoDecoder`/`iterate --hw`；失败回退 CPU |
 | llama.cpp GPU 推理 | ⏳ | `n_gpu_layers` 接口已有，默认 0；需 `GGML_CUDA=ON` |
-| OpenCV GPU 滤镜 | ⏳ | 当前 CPU；与硬解无冲突（§3.6.4） |
 | AI 高光识别（演讲/解说） | ✅ | Vosk ASR + llama.cpp / 规则兜底 |
 | AI 高光识别（游戏） | ⏳ | 规则兜底，视觉模型待接入 |
 | 批量导出剪辑 | ✅ | `一键高光成片` → 分片 + `highlights_merged.mp4`（ffmpeg） |
 | 静音剪掉 | ✅ | `静音剪掉` → silencedetect + 拼接紧凑口播 |
 | OpenCV 趣味滤镜 | ✅ | film / neon / comic / pixel；播放器下拉切换 |
-| 链接下载 | ✅ | `DownloadPage` + `third_party/yt-dlp`；视频 MP4 / 音频 MP3 |
+| OpenCV GPU 滤镜 | ✅ | OpenCL `cv::UMat`（`opencv_filter_device=auto`）；失败回退 CPU |
+| 链接下载 | ✅ | `DownloadPage` + yt-dlp；「仅获取信息」左右分栏 + `url_info_cache`（歌名/片名目录） |
 | 图片 EXIF | ✅ | `ExifPanel` + `third_party/exiftool`；超分/去水印导入图片时展示 |
 | 4K 超分 | ✅ | `EnhancePage` + Real-ESRGAN ONNX / OpenCV 双三次；`upscale` CLI；预览 `image_loader`（OpenCV） |
 | 去水印 | ✅ | `WatermarkPage` 快速(OpenCV)/精修(LaMa)；视频默认快速 + 帧批复用 |

@@ -1,19 +1,24 @@
-"""链接下载：嵌套 Tab — 下载 / 仅获取信息（列表可播放、可删除）。"""
+"""链接下载：嵌套 Tab — 下载 / 仅获取信息（左信息 + 右缓存，可播放）。"""
 
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+from typing import Optional
 
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QButtonGroup, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QPushButton,
-    QRadioButton, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    QRadioButton, QSplitter, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
+from core.url_info_cache import MediaCacheItem, UrlInfoCache, display_title
 from viewmodels.main_vm import MainViewModel
 
 _ROLE_ITEM = Qt.UserRole
+_ROLE_CACHE = Qt.UserRole + 1
 
 
 class DownloadPage(QWidget):
@@ -27,6 +32,9 @@ class DownloadPage(QWidget):
         self._probe_for_info_tab = False
         self._awaiting_preview = False
         self._page_url = ""
+        self._info_title = ""
+        self._pending_cache_item = None
+        self._cache = UrlInfoCache()
         self._out_dir = os.path.join(
             os.path.expanduser("~"), "MusicEditingDownloads"
         )
@@ -34,8 +42,8 @@ class DownloadPage(QWidget):
         root = QVBoxLayout(self)
         tip = QLabel(
             "引擎：third_party/yt-dlp + 项目 FFmpeg。"
-            "「仅获取信息」可点列表播放/删除；播放会短暂拉取到临时文件。"
-            "请仅处理自有或已获授权内容。"
+            "「仅获取信息」左侧为当前链接，右侧为本地缓存（按歌名/片名命名）；"
+            "已缓存可直接播放。请仅处理自有或已获授权内容。"
         )
         tip.setWordWrap(True)
         tip.setStyleSheet("color:#9a9ab0; padding:6px;")
@@ -59,6 +67,8 @@ class DownloadPage(QWidget):
         vm.downloadFinished.connect(self._on_finished)
         vm.downloadProbeReady.connect(self._on_probe_ready)
         vm.errorOccurred.connect(self._on_error)
+
+        self._refresh_cache_list()
 
     def _build_download_tab(self) -> QWidget:
         w = QWidget()
@@ -133,13 +143,35 @@ class DownloadPage(QWidget):
         w = QWidget()
         lay = QVBoxLayout(w)
 
+        cache_row = QHBoxLayout()
+        cache_row.addWidget(QLabel("缓存路径:"))
+        self._cache_path_label = QLabel(self._cache.root)
+        self._cache_path_label.setStyleSheet("color:#8cf;")
+        self._cache_path_label.setWordWrap(True)
+        cache_row.addWidget(self._cache_path_label, 1)
+        btn_cache_dir = QPushButton("更改…")
+        btn_cache_dir.clicked.connect(self._on_pick_cache_dir)
+        btn_open_cache = QPushButton("打开目录")
+        btn_open_cache.clicked.connect(self._on_open_cache_dir)
+        cache_row.addWidget(btn_cache_dir)
+        cache_row.addWidget(btn_open_cache)
+        lay.addLayout(cache_row)
+
         hint = QLabel(
-            "获取名称与列表（不保存到下载目录）。"
-            "双击或点「播放」可试听；「删除」只从本列表移除。"
+            "左侧：当前链接的信息与格式/条目列表。"
+            "右侧：按「唯一主键」缓存的每一条媒体（同一链接可多条）；"
+            "播放过的格式会各存一条，可直接点右侧播放。"
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#9a9ab0;")
         lay.addWidget(hint)
+
+        splitter = QSplitter(Qt.Horizontal)
+
+        # —— 左侧：当前信息 ——
+        left = QWidget()
+        left_lay = QVBoxLayout(left)
+        left_lay.setContentsMargins(0, 0, 4, 0)
 
         url_row = QHBoxLayout()
         self._info_url = QLineEdit()
@@ -154,33 +186,33 @@ class DownloadPage(QWidget):
         url_row.addWidget(self._info_url, 1)
         url_row.addWidget(btn_paste)
         url_row.addWidget(self._btn_info_fetch)
-        lay.addLayout(url_row)
+        left_lay.addLayout(url_row)
 
         self._name_label = QLabel("名称：—")
         self._name_label.setStyleSheet(
             "font-size:16px; font-weight:700; color:#e0e0ff; padding:8px 0;"
         )
         self._name_label.setWordWrap(True)
-        lay.addWidget(self._name_label)
+        left_lay.addWidget(self._name_label)
 
         self._meta_label = QLabel("")
         self._meta_label.setStyleSheet("color:#8cf;")
         self._meta_label.setWordWrap(True)
-        lay.addWidget(self._meta_label)
+        left_lay.addWidget(self._meta_label)
 
         self._hint_label = QLabel("")
         self._hint_label.setStyleSheet("color:#e8a87c;")
         self._hint_label.setWordWrap(True)
-        lay.addWidget(self._hint_label)
+        left_lay.addWidget(self._hint_label)
 
-        lay.addWidget(QLabel("列表（双击播放）："))
+        left_lay.addWidget(QLabel("列表（双击播放）："))
         self._list = QListWidget()
         self._list.setStyleSheet(
             "QListWidget { background:#2d2d3a; border:1px solid #555; }"
             "QListWidget::item:selected { background:#5b5bd6; }"
         )
         self._list.itemDoubleClicked.connect(self._on_item_play)
-        lay.addWidget(self._list, 1)
+        left_lay.addWidget(self._list, 1)
 
         act_row = QHBoxLayout()
         self._btn_play = QPushButton("播放选中")
@@ -193,18 +225,56 @@ class DownloadPage(QWidget):
         act_row.addWidget(self._btn_del)
         act_row.addWidget(self._btn_clear)
         act_row.addStretch()
-        lay.addLayout(act_row)
+        left_lay.addLayout(act_row)
 
         self._info_status = QLabel("")
         self._info_status.setStyleSheet("color:#aaa;")
-        lay.addWidget(self._info_status)
+        left_lay.addWidget(self._info_status)
 
         use_row = QHBoxLayout()
         btn_to_dl = QPushButton("用此链接去下载")
         btn_to_dl.clicked.connect(self._send_url_to_download_tab)
         use_row.addWidget(btn_to_dl)
         use_row.addStretch()
-        lay.addLayout(use_row)
+        left_lay.addLayout(use_row)
+
+        # —— 右侧：缓存列表 ——
+        right = QWidget()
+        right_lay = QVBoxLayout(right)
+        right_lay.setContentsMargins(4, 0, 0, 0)
+        right_lay.addWidget(QLabel("已缓存媒体（每条格式/曲目一条）："))
+        self._cache_list = QListWidget()
+        self._cache_list.setStyleSheet(
+            "QListWidget { background:#252536; border:1px solid #555; }"
+            "QListWidget::item:selected { background:#3d5a80; }"
+        )
+        self._cache_list.itemDoubleClicked.connect(self._on_cache_item_activate)
+        right_lay.addWidget(self._cache_list, 1)
+
+        cache_act = QHBoxLayout()
+        btn_cache_open = QPushButton("打开所属链接")
+        btn_cache_open.clicked.connect(self._on_cache_open)
+        btn_cache_play = QPushButton("播放选中")
+        btn_cache_play.clicked.connect(self._on_cache_play_media)
+        btn_cache_del = QPushButton("删除本条")
+        btn_cache_del.clicked.connect(self._on_cache_delete)
+        btn_cache_refresh = QPushButton("刷新")
+        btn_cache_refresh.clicked.connect(self._refresh_cache_list)
+        cache_act.addWidget(btn_cache_open)
+        cache_act.addWidget(btn_cache_play)
+        cache_act.addWidget(btn_cache_del)
+        cache_act.addWidget(btn_cache_refresh)
+        right_lay.addLayout(cache_act)
+
+        self._cache_status = QLabel("")
+        self._cache_status.setStyleSheet("color:#aaa;")
+        right_lay.addWidget(self._cache_status)
+
+        splitter.addWidget(left)
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        lay.addWidget(splitter, 1)
         return w
 
     @Slot()
@@ -229,6 +299,25 @@ class DownloadPage(QWidget):
             self._out_label.setText(d)
 
     @Slot()
+    def _on_pick_cache_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "选择信息缓存目录", self._cache.root)
+        if d:
+            self._cache.set_root(d)
+            self._cache_path_label.setText(self._cache.root)
+            self._refresh_cache_list()
+
+    @Slot()
+    def _on_open_cache_dir(self):
+        path = self._cache.root
+        os.makedirs(path, exist_ok=True)
+        if sys.platform == "win32":
+            os.startfile(path)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+
+    @Slot()
     def _on_probe_dl(self):
         url = self._url_edit.text().strip()
         if not url:
@@ -245,9 +334,19 @@ class DownloadPage(QWidget):
         if not url:
             QMessageBox.warning(self, "提示", "请先粘贴链接")
             return
+        # 缓存命中：直接展示
+        cached = self._cache.load_info(url)
+        if cached is not None:
+            self._probe_for_info_tab = True
+            self._fill_info_tab(cached, from_cache=True)
+            self._info_status.setText(
+                f"已命中缓存 · {self._list.count()} 条 · 路径 {self._cache.root}"
+            )
+            self._refresh_cache_list()
+            return
         self._probe_for_info_tab = True
         self._set_busy(True)
-        self._info_status.setText("正在获取（不落盘到下载目录）…")
+        self._info_status.setText("正在获取信息并写入缓存…")
         self._list.clear()
         self._vm.probe_download_url(url, True)
 
@@ -258,6 +357,7 @@ class DownloadPage(QWidget):
             QMessageBox.warning(self, "提示", "请先粘贴链接")
             return
         self._awaiting_preview = False
+        self._pending_cache_item = None
         self._set_busy(True)
         self._progress.setVisible(True)
         self._progress.setValue(0)
@@ -295,9 +395,22 @@ class DownloadPage(QWidget):
         if data is None:
             QMessageBox.warning(self, "提示", "请先选中列表中的一项")
             return
+        page = self._page_url or self._info_url.text().strip()
+        cached_media = self._cache.find_media(page, data)
+        # 旧版「仅画面」缓存可能无声：文件名无 _av 时强制重新合并
+        video_only = bool(getattr(data, "has_video", False)) and not bool(
+            getattr(data, "has_audio", False)
+        )
+        if cached_media and video_only and "_av." not in os.path.basename(cached_media):
+            cached_media = None
+        if cached_media:
+            self._info_status.setText(f"播放缓存: {os.path.basename(cached_media)}")
+            self.previewPlayRequested.emit(cached_media)
+            return
         self._awaiting_preview = True
+        self._pending_cache_item = data
         self._set_busy(True)
-        self._info_status.setText("正在准备播放…")
+        self._info_status.setText("正在拉取并写入缓存…")
         self._vm.preview_list_item(data)
 
     @Slot()
@@ -317,6 +430,81 @@ class DownloadPage(QWidget):
     def _on_clear_list(self):
         self._list.clear()
         self._info_status.setText("列表已清空")
+
+    def _refresh_cache_list(self):
+        self._cache_list.clear()
+        entries = self._cache.list_media_items()
+        for e in entries:
+            row = QListWidgetItem(e.label())
+            row.setData(_ROLE_CACHE, e)
+            row.setToolTip(
+                f"主键: {e.pk}\n页面: {e.page_url}\n文件: {e.media_path}"
+            )
+            self._cache_list.addItem(row)
+        pages = len(self._cache.list_pages())
+        self._cache_status.setText(
+            f"媒体 {len(entries)} 条 · 链接 {pages} 个 · {self._cache.root}"
+        )
+
+    def _selected_cache_media(self) -> Optional[MediaCacheItem]:
+        row = self._cache_list.currentRow()
+        if row < 0:
+            return None
+        it = self._cache_list.item(row)
+        data = it.data(_ROLE_CACHE) if it else None
+        return data if isinstance(data, MediaCacheItem) else None
+
+    @Slot(QListWidgetItem)
+    def _on_cache_item_activate(self, _item: QListWidgetItem):
+        self._on_cache_play_media()
+
+    @Slot()
+    def _on_cache_open(self):
+        media = self._selected_cache_media()
+        if media is None:
+            QMessageBox.warning(self, "提示", "请先选中右侧一条媒体缓存")
+            return
+        info = self._cache.load_info(media.page_url)
+        if not info:
+            QMessageBox.warning(self, "提示", "所属链接的信息缓存缺失，请重新获取信息")
+            return
+        if media.page_url:
+            self._info_url.setText(media.page_url)
+        self._fill_info_tab(info, from_cache=True)
+        self._info_status.setText(f"已打开链接缓存：{media.page_title}")
+
+    @Slot()
+    def _on_cache_play_media(self):
+        media = self._selected_cache_media()
+        if media is None:
+            QMessageBox.warning(self, "提示", "请先选中右侧一条媒体缓存")
+            return
+        if not os.path.isfile(media.media_path):
+            QMessageBox.warning(self, "提示", "缓存文件不存在，请刷新或重新播放左侧项")
+            self._refresh_cache_list()
+            return
+        self._info_status.setText(f"播放: {media.page_title} · {media.item_name}")
+        self.previewPlayRequested.emit(media.media_path)
+
+    @Slot()
+    def _on_cache_delete(self):
+        media = self._selected_cache_media()
+        if media is None:
+            QMessageBox.warning(self, "提示", "请先选中要删除的媒体缓存")
+            return
+        reply = QMessageBox.question(
+            self, "确认",
+            f"删除本条媒体缓存？\n{media.page_title}\n{media.item_name}\n{media.media_path}",
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self._cache.delete_media_item(media)
+        self._refresh_cache_list()
+        # 刷新左侧 [已缓存] 标记
+        if self._page_url:
+            info = self._cache.load_info(self._page_url)
+            if info:
+                self._fill_info_tab(info, from_cache=True)
 
     def _set_busy(self, busy: bool):
         self._busy = busy
@@ -341,7 +529,12 @@ class DownloadPage(QWidget):
             return
 
         if self._probe_for_info_tab:
-            self._fill_info_tab(info)
+            try:
+                self._cache.save_info(info)
+            except Exception as e:
+                self._info_status.setText(f"信息已获取，但写缓存失败: {e}")
+            self._fill_info_tab(info, from_cache=False)
+            self._refresh_cache_list()
             return
 
         lines = [
@@ -356,14 +549,16 @@ class DownloadPage(QWidget):
         self._info.setPlainText("\n".join(lines))
         self._dl_status.setText("探测完成，可开始下载")
 
-    def _fill_info_tab(self, info):
+    def _fill_info_tab(self, info, *, from_cache: bool = False):
         self._page_url = getattr(info, "webpage_url", "") or getattr(info, "url", "") or ""
+        self._info_title = display_title(info)
         pl = getattr(info, "playlist_title", "") or ""
         title = getattr(info, "title", "") or "—"
+        prefix = "名称（缓存）：" if from_cache else "名称："
         if pl and pl != title:
-            self._name_label.setText(f"名称：{pl}  /  {title}")
+            self._name_label.setText(f"{prefix}{pl}  /  {title}")
         else:
-            self._name_label.setText(f"名称：{title}")
+            self._name_label.setText(f"{prefix}{title}")
 
         meta_parts = [
             f"时长 {getattr(info, 'duration_sec', 0):.1f}s",
@@ -375,6 +570,8 @@ class DownloadPage(QWidget):
             meta_parts.append(f"条目 {len(items)} 个")
         elif "format" in kinds:
             meta_parts.append(f"格式 {len(items)} 种")
+        if from_cache:
+            meta_parts.append("来源：本地缓存")
         self._meta_label.setText(" · ".join(meta_parts))
 
         hint = getattr(info, "preview_hint", "") or ""
@@ -387,32 +584,61 @@ class DownloadPage(QWidget):
             self._list.addItem(empty)
         else:
             for it in items:
-                # 补 page_url
                 if not getattr(it, "page_url", ""):
                     it.page_url = self._page_url
                 name = getattr(it, "name", "")
                 detail = getattr(it, "detail", "")
                 kind = getattr(it, "kind", "")
+                cached = bool(self._cache.find_media(self._page_url, it))
                 prefix = "♪ " if kind == "entry" else "▸ "
-                text = f"{prefix}{name}"
+                mark = " [已缓存]" if cached else ""
+                text = f"{prefix}{name}{mark}"
                 if detail and detail not in name:
                     text += f"    ({detail})"
                 row = QListWidgetItem(text)
                 row.setData(_ROLE_ITEM, it)
                 self._list.addItem(row)
 
-        self._info_status.setText(
-            f"已获取 · {self._list.count()} 条 · 双击或点「播放选中」试听"
-        )
+        if not from_cache:
+            self._info_status.setText(
+                f"已获取并缓存 · {self._list.count()} 条 · {self._info_title}"
+            )
 
     @Slot(str)
     def _on_finished(self, path: str):
         was_preview = self._awaiting_preview
+        pending = self._pending_cache_item
         self._awaiting_preview = False
+        self._pending_cache_item = None
         self._set_busy(False)
         if was_preview:
-            self._info_status.setText(f"正在播放预览…")
-            self.previewPlayRequested.emit(path)
+            play_path = path
+            if pending is not None:
+                try:
+                    saved = self._cache.save_media(
+                        self._page_url or self._info_url.text().strip(),
+                        self._info_title,
+                        pending,
+                        path,
+                    )
+                    if saved:
+                        play_path = saved
+                        self._info_status.setText(
+                            f"已缓存并播放: {os.path.basename(saved)}"
+                        )
+                        self._refresh_cache_list()
+                        # 刷新左侧 [已缓存] 标记
+                        if self._page_url:
+                            info = self._cache.load_info(self._page_url)
+                            if info:
+                                self._fill_info_tab(info, from_cache=True)
+                    else:
+                        self._info_status.setText("正在播放预览…")
+                except Exception as e:
+                    self._info_status.setText(f"播放中（写缓存失败: {e}）")
+            else:
+                self._info_status.setText("正在播放预览…")
+            self.previewPlayRequested.emit(play_path)
             return
         self._progress.setValue(100)
         self._dl_status.setText(f"已保存: {path}")
@@ -426,6 +652,7 @@ class DownloadPage(QWidget):
         if not self._busy and not self._awaiting_preview:
             return
         self._awaiting_preview = False
+        self._pending_cache_item = None
         self._set_busy(False)
         self._progress.setVisible(False)
         self._info_status.setText("")

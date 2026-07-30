@@ -194,6 +194,8 @@ class UrlListItem:
     format_id: str = ""     # yt-dlp format id
     page_url: str = ""      # 所属页面（用于按 format_id 拉取）
     ext: str = ""
+    has_video: bool = False
+    has_audio: bool = False
 
 
 @dataclass
@@ -1053,7 +1055,18 @@ class MediaBridge:
                 tbr = f.get("tbr") or 0
                 size = int(f.get("filesize") or f.get("filesize_approx") or 0)
                 media_url = str(f.get("url") or "")
-                parts = [ext]
+                vcodec = str(f.get("vcodec") or "none").lower()
+                acodec = str(f.get("acodec") or "none").lower()
+                has_video = vcodec not in ("", "none", "null")
+                has_audio = acodec not in ("", "none", "null")
+                parts = []
+                if has_video and not has_audio:
+                    parts.append("仅画面")
+                elif has_audio and not has_video:
+                    parts.append("仅音频")
+                elif has_video and has_audio:
+                    parts.append("音画")
+                parts.append(ext)
                 if note:
                     parts.append(note)
                 if abr:
@@ -1074,6 +1087,8 @@ class MediaBridge:
                     format_id=fid,
                     page_url=page_url,
                     ext=ext if ext != "?" else "mp3",
+                    has_video=has_video,
+                    has_audio=has_audio,
                 ))
 
         title = str(
@@ -1233,9 +1248,14 @@ class MediaBridge:
         format_id: str = "",
         ext: str = "mp3",
         referer: str = "",
+        has_video: bool = False,
+        has_audio: bool = False,
         on_progress: Optional[Callable[[float, str], None]] = None,
     ) -> str:
-        """为列表「播放」拉取到临时文件（不进用户下载目录）。"""
+        """为列表「播放」拉取到临时文件（不进用户下载目录）。
+
+        B 站等 DASH：仅画面格式会自动 +bestaudio 合并，避免无声。
+        """
         import tempfile
         import urllib.request
 
@@ -1248,8 +1268,11 @@ class MediaBridge:
         if ext in ("?", "", "unknown"):
             ext = "mp3"
 
-        # 1) 有直链：HTTP 拉取
-        if media_url.startswith("http"):
+        video_only = bool(has_video and not has_audio)
+        audio_only = bool(has_audio and not has_video)
+
+        # 1) 有直链且非「仅画面」：HTTP 拉取（仅画面必须走 yt-dlp 合并音轨）
+        if media_url.startswith("http") and not video_only:
             report(10.0, "正在拉取试听流…")
             out = os.path.join(tmp_dir, f"preview.{ext}")
             headers = {
@@ -1262,6 +1285,8 @@ class MediaBridge:
                 headers["Referer"] = referer
             elif "163.com" in media_url or "126.net" in media_url:
                 headers["Referer"] = "https://music.163.com/"
+            elif "bilibili.com" in media_url or "bilivideo.com" in media_url:
+                headers["Referer"] = "https://www.bilibili.com/"
             req = urllib.request.Request(media_url, headers=headers)
             with urllib.request.urlopen(req, timeout=90) as resp, open(out, "wb") as f:
                 f.write(resp.read())
@@ -1282,13 +1307,27 @@ class MediaBridge:
             cmd = [
                 str(yt), "--no-playlist", "--newline", "--no-warnings",
                 "--ffmpeg-location", str(ffmpeg.parent),
-                "-f", format_id,
                 "-o", out_tmpl,
-                target,
             ]
+            if video_only:
+                # DASH 仅画面 → 合并最佳音轨
+                report(8.0, "合并音轨中（DASH 仅画面）…")
+                cmd.extend([
+                    "-f", f"{format_id}+bestaudio/{format_id}",
+                    "--merge-output-format", "mp4",
+                ])
+            elif audio_only:
+                cmd.extend(["-f", format_id])
+            else:
+                # 未知是否分离：优先尝试带音频的组合
+                cmd.extend([
+                    "-f", f"{format_id}+bestaudio/{format_id}/bestaudio/best",
+                    "--merge-output-format", "mp4",
+                ])
+            cmd.append(target)
             proc = subprocess.run(
                 cmd, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", env=self._env, timeout=180,
+                encoding="utf-8", errors="replace", env=self._env, timeout=300,
             )
             files = [
                 os.path.join(tmp_dir, n) for n in os.listdir(tmp_dir)
@@ -1300,10 +1339,16 @@ class MediaBridge:
             report(100.0, "就绪")
             return files[0]
 
-        # 3) 歌单条目：按音频下载到临时目录
-        return self.download_url(
-            target, tmp_dir, audio_only=True, on_progress=on_progress,
-        )
+        # 3) 歌单条目：默认下音画合并（B 站等），失败再试仅音频
+        report(8.0, "正在拉取音画合并预览…")
+        try:
+            return self.download_url(
+                target, tmp_dir, audio_only=False, on_progress=on_progress,
+            )
+        except Exception:
+            return self.download_url(
+                target, tmp_dir, audio_only=True, on_progress=on_progress,
+            )
 
     def probe_duration(self, input_path: str) -> float:
         """尽量用 media_cli probe，失败则回 0。"""

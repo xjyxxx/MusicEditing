@@ -17,6 +17,13 @@ enum class FrameFilterMode {
     Pixel,      ///< 像素风：最近邻放大
 };
 
+/// 滤镜计算设备：auto 优先 OpenCL，失败回退 CPU
+enum class FrameFilterDevice {
+    Auto = 0,
+    Cpu,
+    OpenCL,
+};
+
 class FrameProcessor {
 public:
     FrameProcessor() = default;
@@ -35,9 +42,27 @@ public:
 
     std::string modeName() const;
 
+    /// auto | cpu | opencl
+    bool setDeviceFromString(const std::string& name);
+    FrameFilterDevice device() const { return device_; }
+    /// 配置的设备名
+    std::string deviceName() const;
+    /// 最近一次实际使用的设备（opencl | cpu）
+    std::string activeDeviceName() const;
+
+    /// 探测本机 OpenCL（静态缓存）
+    static bool openclAvailable();
+
 private:
     bool enabled_ = true;
     FrameFilterMode mode_ = FrameFilterMode::Passthrough;
+    FrameFilterDevice device_ = FrameFilterDevice::Auto;
+    bool last_used_opencl_ = false;
+
+#ifdef MUSIC_HAS_OPENCV
+    bool processCpu(uint8_t* rgb, int width, int height, int step);
+    bool processOpenCL(uint8_t* rgb, int width, int height, int step);
+#endif
 };
 
 } // namespace media::core

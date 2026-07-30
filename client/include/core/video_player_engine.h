@@ -50,9 +50,14 @@ public:
     void resume() { paused_ = false; }
     bool isPaused() const { return paused_; }
 
-    /// 设置 OpenCV 帧滤镜：clahe / denoise / sharpen / off
+    /// 设置 OpenCV 帧滤镜：clahe / denoise / sharpen / film / neon / comic / pixel / off
     bool setFrameFilter(const std::string& name);
     std::string frameFilterName() const;
+
+    /// 滤镜设备：auto | cpu | opencl
+    bool setFrameFilterDevice(const std::string& name);
+    std::string frameFilterDeviceName() const;
+    std::string frameFilterActiveDeviceName() const;
 
 private:
     struct Impl;

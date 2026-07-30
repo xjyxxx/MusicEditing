@@ -203,6 +203,20 @@ class PlayerBackend:
         resp = self._send(f"FILTER {mode}")
         if resp.startswith("ERROR"):
             raise RuntimeError(resp)
+        return resp
+
+    def set_filter_device(self, device: str):
+        """auto | cpu | opencl"""
+        resp = self._send(f"FILTER_DEVICE {device}")
+        if resp.startswith("ERROR"):
+            raise RuntimeError(resp)
+        return resp
+
+    def filter_status(self) -> str:
+        resp = self._send("FILTER_STATUS")
+        if resp.startswith("ERROR"):
+            raise RuntimeError(resp)
+        return resp
 
     def set_playback_filter(self, enabled: bool):
         self._apply_filter_on_next = enabled

@@ -1,4 +1,5 @@
 #include "core/video_player_engine.h"
+#include "core/frame_processor.h"
 
 #include "common/logger.h"
 
@@ -131,8 +132,37 @@ int main() {
             if (!g_player.setFrameFilter(mode)) {
                 replyError("invalid_filter");
             } else {
-                std::cout << "FILTER_OK mode=" << g_player.frameFilterName() << std::endl;
+                std::cout << "FILTER_OK mode=" << g_player.frameFilterName()
+                          << " device=" << g_player.frameFilterDeviceName()
+                          << " active=" << g_player.frameFilterActiveDeviceName()
+                          << std::endl;
             }
+            std::cout.flush();
+            continue;
+        }
+
+        if (cmd == "FILTER_DEVICE") {
+            std::string device;
+            iss >> device;
+            if (!g_player.setFrameFilterDevice(device)) {
+                replyError("invalid_filter_device");
+            } else {
+                const bool ocl = media::core::FrameProcessor::openclAvailable();
+                std::cout << "FILTER_DEVICE_OK device=" << g_player.frameFilterDeviceName()
+                          << " opencl=" << (ocl ? 1 : 0)
+                          << std::endl;
+            }
+            std::cout.flush();
+            continue;
+        }
+
+        if (cmd == "FILTER_STATUS") {
+            const bool ocl = media::core::FrameProcessor::openclAvailable();
+            std::cout << "FILTER_STATUS_OK mode=" << g_player.frameFilterName()
+                      << " device=" << g_player.frameFilterDeviceName()
+                      << " active=" << g_player.frameFilterActiveDeviceName()
+                      << " opencl=" << (ocl ? 1 : 0)
+                      << std::endl;
             std::cout.flush();
             continue;
         }

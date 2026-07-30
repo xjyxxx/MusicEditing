@@ -92,6 +92,7 @@ class AppLogic:
         self.llm_model_path = cfg.get("llm_model_path", "")
         self.vosk_model_dir = cfg.get("vosk_model_dir", "")
         self.opencv_filter = cfg.get("opencv_filter", "clahe")
+        self.opencv_filter_device = cfg.get("opencv_filter_device", "auto")
         gpu_cfg = cfg.get("gpu_enabled", "true").strip().lower()
         want_gpu = gpu_cfg not in ("0", "false", "off", "no")
         self.prefer_hw_decode = want_gpu
