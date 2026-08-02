@@ -15,14 +15,17 @@ from PySide6.QtWidgets import (
 from core.image_loader import load_preview
 from ui.exif_panel import ExifPanel
 from ui.region_selector import RegionSelectorWidget
+from ui.workflow_link import TAB_ENHANCE, ask_video_handoff
 from viewmodels.main_vm import MainViewModel
 
 
 class WatermarkPage(QWidget):
-    def __init__(self, vm: MainViewModel, parent=None):
+    def __init__(self, vm: MainViewModel, handoff=None, parent=None):
         super().__init__(parent)
         self._vm = vm
+        self._handoff = handoff
         self._preview_png: str = ""
+        self._last_result_path: str = ""
 
         root = QVBoxLayout(self)
 
@@ -112,8 +115,12 @@ class WatermarkPage(QWidget):
         self._vid_path_label = QLabel("未选择视频")
         btn_import = QPushButton("导入视频")
         btn_import.clicked.connect(self._on_import_video)
+        btn_use = QPushButton("用当前视频")
+        btn_use.setToolTip("使用其它页已导入的共享视频（无需重新选择文件）")
+        btn_use.clicked.connect(self._on_use_current_video)
         row.addWidget(self._vid_path_label, 1)
         row.addWidget(btn_import)
+        row.addWidget(btn_use)
         layout.addLayout(row)
 
         self._vid_info = QLabel("")
@@ -173,8 +180,13 @@ class WatermarkPage(QWidget):
         btn_run = QPushButton("开始视频去水印")
         btn_run.setStyleSheet("background: #5b5bd6; color: white; padding: 8px 16px;")
         btn_run.clicked.connect(self._on_run_video)
+        self._btn_send_enhance = QPushButton("送去超分")
+        self._btn_send_enhance.setEnabled(False)
+        self._btn_send_enhance.setToolTip("将去水印结果导入「画质增强」")
+        self._btn_send_enhance.clicked.connect(self._on_send_to_enhance)
         btn_row.addWidget(btn_clear)
         btn_row.addWidget(btn_run)
+        btn_row.addWidget(self._btn_send_enhance)
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
@@ -224,6 +236,9 @@ class WatermarkPage(QWidget):
             f"  ·  解码 {preview.backend}"
         )
 
+    def focus_video_tab(self) -> None:
+        self._tabs.setCurrentIndex(1)
+
     @Slot()
     def _on_import_video(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -232,6 +247,29 @@ class WatermarkPage(QWidget):
         )
         if path:
             self._vm.import_video(path)
+
+    @Slot()
+    def _on_use_current_video(self):
+        video = self._vm.get_app_state().current_video
+        if not video or not video.file_path:
+            QMessageBox.information(self, "提示", "尚未导入视频，请先在本页或其它功能页导入。")
+            return
+        self.focus_video_tab()
+        self._on_video_loaded(video)
+        self._status.setText(f"已使用当前视频: {os.path.basename(video.file_path)}")
+
+    @Slot()
+    def _on_send_to_enhance(self):
+        if not self._handoff:
+            return
+        path = self._last_result_path
+        if not path or not os.path.isfile(path):
+            QMessageBox.warning(self, "提示", "请先完成视频去水印，再送去超分。")
+            return
+        if path.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".webp")):
+            QMessageBox.information(self, "提示", "当前结果是图片；请对视频结果使用「送去超分」。")
+            return
+        self._handoff(path, TAB_ENHANCE)
 
     @Slot(object)
     def _on_video_loaded(self, video):
@@ -363,7 +401,23 @@ class WatermarkPage(QWidget):
     def _on_finished(self, task_id, output_path):
         self._progress.setValue(100)
         self._status.setText(f"完成: {output_path}")
-        QMessageBox.information(self, "去水印完成", f"已保存到:\n{output_path}")
+        self._last_result_path = output_path or ""
+        is_video = bool(output_path) and not output_path.lower().endswith(
+            (".png", ".jpg", ".jpeg", ".bmp", ".webp")
+        )
+        if getattr(self, "_btn_send_enhance", None):
+            self._btn_send_enhance.setEnabled(is_video and os.path.isfile(output_path))
+        if is_video:
+            tab = ask_video_handoff(
+                self,
+                "去水印完成",
+                f"已保存到:\n{output_path}\n\n可继续送去画质增强（无需重新导入）。",
+                [("送去超分", TAB_ENHANCE)],
+            )
+            if tab is not None and self._handoff:
+                self._handoff(output_path, tab)
+        else:
+            QMessageBox.information(self, "去水印完成", f"已保存到:\n{output_path}")
 
     @Slot(str)
     def _show_error(self, msg):

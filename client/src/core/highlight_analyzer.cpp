@@ -187,12 +187,27 @@ std::vector<TranscriptSegment> HighlightAnalyzer::parseLlmResponse(
 std::vector<TranscriptSegment> HighlightAnalyzer::fallbackAnalyze(
     const std::vector<TranscriptSegment>& transcript,
     const HighlightAnalyzeParams& params) const {
+    // 演讲金句常见信号词（无 LLM 时的规则加权）
+    static const char* kSpeechKeys[] = {
+        "所以", "因此", "总之", "我认为", "其实", "重要", "关键", "核心",
+        "记住", "必须", "首先", "其次", "最后", "总结", "结论", "重点",
+        "也就是说", nullptr
+    };
     std::vector<TranscriptSegment> scored = transcript;
     for (auto& seg : scored) {
         const double dur = seg.end_sec - seg.start_sec;
         const double lenScore = std::min(1.0, seg.text.size() / 80.0);
         const double durScore = (dur >= params.min_duration && dur <= params.max_duration) ? 1.0 : 0.3;
-        seg.score = static_cast<float>((lenScore * 0.6 + durScore * 0.4) * (0.5 + params.sensitivity * 0.5));
+        double hit = 0.0;
+        if (params.scene.find("演讲") != std::string::npos
+            || params.scene.find("金句") != std::string::npos) {
+            for (const char** p = kSpeechKeys; *p; ++p) {
+                if (seg.text.find(*p) != std::string::npos) hit += 0.12;
+            }
+            hit = std::min(1.0, hit);
+        }
+        seg.score = static_cast<float>(
+            (lenScore * 0.5 + durScore * 0.3 + hit * 0.2) * (0.5 + params.sensitivity * 0.5));
     }
 
     std::sort(scored.begin(), scored.end(),

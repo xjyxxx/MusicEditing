@@ -22,6 +22,11 @@ from core.app_logic import AppLogic
 
 from core.asr_engine import AsrEngine
 
+from core.speech_highlights import (
+    clips_from_speech_ranges,
+    score_transcript,
+)
+
 from core.media_bridge import MediaBridge
 
 from models.video_model import (
@@ -60,6 +65,10 @@ class MainViewModel(QObject):
 
     enhanceFinished = Signal(int, str)
 
+    interpolateProgress = Signal(int, float, str)
+
+    interpolateFinished = Signal(int, str)
+
     exportFinished = Signal(str)
 
     silenceFinished = Signal(str)
@@ -97,6 +106,8 @@ class MainViewModel(QObject):
         self._status_message = "就绪"
 
         self._next_task_id = 1
+        self._slice_running = False
+        self._import_running = False
 
 
 
@@ -169,6 +180,7 @@ class MainViewModel(QObject):
     @Slot(str)
 
     def import_video(self, file_path: str):
+        """探测视频元数据；probe 在后台线程，完成后经 Signal 更新 UI。"""
 
         if not self._bridge:
 
@@ -186,47 +198,79 @@ class MainViewModel(QObject):
 
 
 
-        try:
+        if self._import_running:
 
-            info = self._bridge.probe_video(file_path)
+            self.errorOccurred.emit("正在导入视频，请稍候")
 
-            video = VideoModel(
+            return
 
-                file_path=info.file_path,
 
-                width=info.width,
 
-                height=info.height,
+        bridge = self._bridge
 
-                duration_sec=info.duration_sec,
+        path = os.path.abspath(file_path)
 
-                fps=info.fps,
+        self._import_running = True
 
-                total_frames=info.total_frames,
+        self._status_message = f"正在导入: {os.path.basename(path)}…"
 
-                codec_name=info.codec_name,
+        self.statusMessageChanged.emit(self._status_message)
 
-                format_name=info.format_name,
 
-            )
 
-            self._state.current_video = video
+        def run():
 
-            self._status_message = (
+            try:
 
-                f"已导入: {os.path.basename(file_path)} "
+                info = bridge.probe_video(path)
 
-                f"({video.width}x{video.height}, {video.duration_sec:.1f}s)"
+                video = VideoModel(
 
-            )
+                    file_path=info.file_path,
 
-            self.statusMessageChanged.emit(self._status_message)
+                    width=info.width,
 
-            self.videoLoaded.emit(video)
+                    height=info.height,
 
-        except Exception as e:
+                    duration_sec=info.duration_sec,
 
-            self.errorOccurred.emit(f"导入失败: {e}")
+                    fps=info.fps,
+
+                    total_frames=info.total_frames,
+
+                    codec_name=info.codec_name,
+
+                    format_name=info.format_name,
+
+                )
+
+                self._state.current_video = video
+
+                self._status_message = (
+
+                    f"已导入: {os.path.basename(path)} "
+
+                    f"({video.width}x{video.height}, {video.duration_sec:.1f}s)"
+
+                )
+
+                self.statusMessageChanged.emit(self._status_message)
+
+                self.videoLoaded.emit(video)
+
+            except Exception as e:
+
+                self.errorOccurred.emit(f"导入失败: {e}")
+
+            finally:
+
+                self._import_running = False
+
+
+
+        import threading
+
+        threading.Thread(target=run, daemon=True).start()
 
 
 
@@ -748,6 +792,7 @@ class MainViewModel(QObject):
     @Slot()
 
     def start_slice_analysis(self):
+        """AI 切片分析：ASR/LLM/规则在后台线程执行，不阻塞 UI。"""
 
         video = self._state.current_video
 
@@ -759,7 +804,29 @@ class MainViewModel(QObject):
 
 
 
-        params = self._state.slice_params
+        if self._slice_running:
+
+            self.errorOccurred.emit("切片分析正在进行中")
+
+            return
+
+
+
+        # 拷贝参数，避免后台跑时用户改滑条产生竞态
+
+        src = self._state.slice_params
+
+        params = SliceParams(
+
+            scene=src.scene,
+
+            min_duration=src.min_duration,
+
+            max_duration=src.max_duration,
+
+            sensitivity=src.sensitivity,
+
+        )
 
         task = TaskModel(
 
@@ -781,55 +848,73 @@ class MainViewModel(QObject):
 
         self.taskStateChanged.emit(task.task_id, TaskState.PROCESSING)
 
+        self._slice_running = True
 
+        self._status_message = "切片分析进行中…"
 
-        def report(progress: float, msg: str):
-
-            task.progress = progress
-
-            self.progressUpdated.emit(task.task_id, progress, msg)
-
-
-
-        try:
-
-            if params.scene in SPEECH_SCENES:
-
-                segments = self._analyze_speech_pipeline(video, params, report)
-
-            else:
-
-                segments = self._analyze_game_fallback(video, params, report)
+        self.statusMessageChanged.emit(self._status_message)
 
 
 
-            self._state.highlight_segments = segments
+        def run():
 
-            task.state = TaskState.COMPLETED
+            try:
 
-            task.progress = 100.0
+                def report(progress: float, msg: str):
 
-            self.taskStateChanged.emit(task.task_id, TaskState.COMPLETED)
+                    task.progress = progress
 
-            self.progressUpdated.emit(task.task_id, 100.0, "分析完成")
-
-            self.highlightsReady.emit(segments)
+                    self.progressUpdated.emit(task.task_id, progress, msg)
 
 
 
-            mode = "LLM+ASR" if params.scene in SPEECH_SCENES else "规则"
+                if params.scene in SPEECH_SCENES:
 
-            self._status_message = f"[{mode}] 识别出 {len(segments)} 个高光片段"
+                    segments = self._analyze_speech_pipeline(video, params, report)
 
-            self.statusMessageChanged.emit(self._status_message)
+                else:
 
-        except Exception as e:
+                    segments = self._analyze_game_fallback(video, params, report)
 
-            task.state = TaskState.FAILED
 
-            self.taskStateChanged.emit(task.task_id, TaskState.FAILED)
 
-            self.errorOccurred.emit(f"分析失败: {e}")
+                self._state.highlight_segments = segments
+
+                task.state = TaskState.COMPLETED
+
+                task.progress = 100.0
+
+                self.taskStateChanged.emit(task.task_id, TaskState.COMPLETED)
+
+                self.progressUpdated.emit(task.task_id, 100.0, "分析完成")
+
+                self.highlightsReady.emit(segments)
+
+
+
+                mode = "LLM+ASR" if params.scene in SPEECH_SCENES else "规则"
+
+                self._status_message = f"[{mode}] 识别出 {len(segments)} 个高光片段"
+
+                self.statusMessageChanged.emit(self._status_message)
+
+            except Exception as e:
+
+                task.state = TaskState.FAILED
+
+                self.taskStateChanged.emit(task.task_id, TaskState.FAILED)
+
+                self.errorOccurred.emit(f"分析失败: {e}")
+
+            finally:
+
+                self._slice_running = False
+
+
+
+        import threading
+
+        threading.Thread(target=run, daemon=True).start()
 
 
 
@@ -839,17 +924,12 @@ class MainViewModel(QObject):
 
     ) -> List[HighlightSegment]:
 
-        """演讲/解说类：FFmpeg 抽音频 → Vosk ASR → llama 语义高光"""
+        """演讲金句 / 日常精彩 / 自定义：
 
-        if not self._asr.is_available():
-
-            raise RuntimeError(
-
-                "语音识别未就绪：请 pip install vosk，并下载模型到 models/vosk-model-small-cn-0.22"
-
-            )
-
-
+        优先 Vosk ASR → media_cli analyze-speech（LLM 或 C++ 规则）；
+        ASR 成功但 CLI 失败时用 Python 金句词打分；
+        无 Vosk 时用 silencedetect 人声段兜底（仍可选中「演讲金句」）。
+        """
 
         with tempfile.TemporaryDirectory(prefix="music_edit_") as tmp:
 
@@ -865,67 +945,198 @@ class MainViewModel(QObject):
 
 
 
-            report(15.0, "正在进行语音识别 (Vosk)…")
+            asr_segments = []
+
+            if self._asr.is_available():
+
+                report(15.0, "正在进行语音识别 (Vosk)…")
 
 
 
-            def asr_progress(pct, msg):
+                def asr_progress(pct, msg):
 
-                report(15.0 + pct * 0.45, msg)
-
-
-
-            asr_segments = self._asr.transcribe(wav_path, on_progress=asr_progress)
-
-            if not asr_segments:
-
-                raise RuntimeError("语音识别结果为空，请确认视频含清晰人声")
+                    report(15.0 + pct * 0.45, msg)
 
 
 
-            self._asr.save_transcript_json(asr_segments, json_path)
+                asr_segments = self._asr.transcribe(wav_path, on_progress=asr_progress)
 
-            report(65.0, f"识别 {len(asr_segments)} 句，LLM 分析高光…")
+            else:
+
+                report(
+
+                    15.0,
+
+                    "未检测到 Vosk 模型，改用人声能量检测（可运行 scripts\\download_vosk_model.bat）…",
+
+                )
 
 
 
-            llm_path = self._app.llm_model_path or ""
-            if llm_path and not os.path.isfile(llm_path):
-                llm_path = ""
+            if asr_segments:
 
-            highlights = self._bridge.analyze_speech(
+                self._asr.save_transcript_json(asr_segments, json_path)
 
-                json_path, llm_path, params.scene,
+                report(65.0, f"识别 {len(asr_segments)} 句，分析「{params.scene}」…")
 
-                params.min_duration, params.max_duration, params.sensitivity,
+
+
+                llm_path = self._app.llm_model_path or ""
+
+                if llm_path and not os.path.isfile(llm_path):
+
+                    llm_path = ""
+
+
+
+                highlights = []
+
+                try:
+
+                    highlights = self._bridge.analyze_speech(
+
+                        json_path, llm_path or "none", params.scene,
+
+                        params.min_duration, params.max_duration, params.sensitivity,
+
+                    )
+
+                except Exception:
+
+                    highlights = []
+
+
+
+                if highlights:
+
+                    report(95.0, "整理 LLM/规则结果…")
+
+                    return [
+
+                        HighlightSegment(
+
+                            start_sec=h.start_sec,
+
+                            end_sec=h.end_sec,
+
+                            score=h.score,
+
+                            selected=True,
+
+                        )
+
+                        for h in highlights
+
+                    ]
+
+
+
+                report(75.0, "引擎分析无结果，改用演讲金句词规则…")
+
+                scored = score_transcript(
+
+                    asr_segments,
+
+                    params.scene,
+
+                    params.min_duration,
+
+                    params.max_duration,
+
+                    params.sensitivity,
+
+                )
+
+                if not scored:
+
+                    raise RuntimeError("未识别出高光片段，可尝试调高敏感度或改用手动切片")
+
+                report(95.0, f"金句规则选出 {len(scored)} 段…")
+
+                return [
+
+                    HighlightSegment(
+
+                        start_sec=c.start_sec,
+
+                        end_sec=c.end_sec,
+
+                        score=c.score,
+
+                        selected=True,
+
+                    )
+
+                    for c in scored
+
+                ]
+
+
+
+            # 无 ASR：人声区间兜底
+
+            report(40.0, "检测有声段落（演讲候选）…")
+
+            ranges = self._bridge.detect_speech_segments(
+
+                video.file_path,
+
+                duration_hint=float(video.duration_sec or 0.0),
+
+                min_silence=max(0.35, 0.55 - params.sensitivity * 0.2),
 
             )
 
+            if not ranges:
+
+                raise RuntimeError(
+
+                    "未检测到有效人声。请确认视频有旁白/演讲，"
+                    "或运行 scripts\\download_vosk_model.bat 后重试完整识别。"
+
+                )
 
 
-            if not highlights:
 
-                raise RuntimeError("未识别出高光片段，可尝试调高敏感度")
+            report(70.0, f"找到 {len(ranges)} 段有声区间，按「{params.scene}」切段…")
+
+            scored = clips_from_speech_ranges(
+
+                ranges,
+
+                min_duration=params.min_duration,
+
+                max_duration=params.max_duration,
+
+                sensitivity=params.sensitivity,
+
+                scene=params.scene,
+
+            )
+
+            if not scored:
+
+                raise RuntimeError("未能生成符合时长的演讲片段，请放宽最短/最长限制")
 
 
 
-            report(95.0, "整理结果…")
+            report(95.0, f"生成 {len(scored)} 段候选（无 Vosk 文本，建议下载模型获金句识别）…")
 
             return [
 
                 HighlightSegment(
 
-                    start_sec=h.start_sec,
+                    start_sec=c.start_sec,
 
-                    end_sec=h.end_sec,
+                    end_sec=c.end_sec,
 
-                    score=h.score,
+                    score=c.score,
 
                     selected=True,
 
                 )
 
-                for h in highlights
+                for c in scored
 
             ]
 
@@ -1220,6 +1431,74 @@ class MainViewModel(QObject):
         import threading
         threading.Thread(target=run, daemon=True).start()
 
+
+    @Slot(str, int, float, float, str)
+    def start_interpolate_video(
+        self,
+        output_path: str,
+        factor: int = 2,
+        start_sec: float = 0.0,
+        end_sec: float = 0.0,
+        quality: str = "fast",
+        backend: str = "ffmpeg",
+    ):
+        """视频补帧（后台线程）：FFmpeg minterpolate。quality=fast|quality。"""
+        video = self._state.current_video
+        if not video or not self._bridge:
+            self.errorOccurred.emit("请先导入视频")
+            return
+
+        factor = 2 if int(factor) <= 2 else 4
+        q = (quality or "fast").strip().lower()
+        if q not in ("fast", "quality"):
+            q = "fast"
+        input_path = video.file_path
+        fps = float(video.fps or 25.0)
+
+        task = TaskModel(
+            task_id=self._next_task_id,
+            task_type=TaskType.INTERPOLATE,
+            file_path=input_path,
+            state=TaskState.PROCESSING,
+        )
+        self._next_task_id += 1
+        self._state.tasks.append(task)
+        task_id = task.task_id
+        bridge = self._bridge
+        mode = "精细" if q == "quality" else "快速"
+
+        def run():
+            try:
+                def report(p: float, msg: str):
+                    task.progress = p
+                    self.interpolateProgress.emit(task_id, p, msg)
+
+                report(1.0, f"FFmpeg {mode}补帧 {factor}x…")
+                out = bridge.interpolate_video(
+                    input_path,
+                    output_path,
+                    fps=fps,
+                    factor=factor,
+                    start_sec=start_sec,
+                    end_sec=end_sec,
+                    quality=q,
+                    on_progress=report,
+                )
+                task.state = TaskState.COMPLETED
+                task.progress = 100.0
+                self.taskStateChanged.emit(task_id, TaskState.COMPLETED)
+                self.interpolateFinished.emit(task_id, out or output_path)
+                self._status_message = f"补帧完成: {os.path.basename(out or output_path)}"
+                self.statusMessageChanged.emit(self._status_message)
+            except Exception as e:
+                task.state = TaskState.FAILED
+                self.taskStateChanged.emit(task_id, TaskState.FAILED)
+                self.errorOccurred.emit(str(e))
+
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+
+
     @Slot(str, float, float, float)
 
     def update_slice_params(self, scene: str, min_dur: float, max_dur: float, sensitivity: float):
@@ -1233,6 +1512,51 @@ class MainViewModel(QObject):
         )
 
 
+
+    @Slot(float, float)
+    def add_manual_highlight(self, start_sec: float, end_sec: float) -> bool:
+        """手动添加高光片段（不依赖 Vosk）。成功返回 True；校验失败只改状态栏。"""
+        start = max(0.0, float(start_sec))
+        end = max(0.0, float(end_sec))
+        if end <= start + 0.05:
+            self._status_message = "手动切片：结束时间须大于开始时间"
+            self.statusMessageChanged.emit(self._status_message)
+            return False
+        video = self._state.current_video
+        if video and video.duration_sec > 0:
+            end = min(end, float(video.duration_sec))
+            if end <= start + 0.05:
+                self._status_message = "手动切片：区间超出视频时长"
+                self.statusMessageChanged.emit(self._status_message)
+                return False
+        seg = HighlightSegment(
+            start_sec=start, end_sec=end, score=1.0, selected=True,
+        )
+        self._state.highlight_segments.append(seg)
+        self.highlightsReady.emit(list(self._state.highlight_segments))
+        self._status_message = (
+            f"已添加手动片段 #{len(self._state.highlight_segments)} "
+            f"({start:.1f}s – {end:.1f}s)"
+        )
+        self.statusMessageChanged.emit(self._status_message)
+        return True
+
+    @Slot(int)
+    def remove_highlight_at(self, index: int) -> None:
+        segs = self._state.highlight_segments
+        if index < 0 or index >= len(segs):
+            return
+        segs.pop(index)
+        self.highlightsReady.emit(list(segs))
+        self._status_message = f"已删除片段，剩余 {len(segs)} 段"
+        self.statusMessageChanged.emit(self._status_message)
+
+    @Slot()
+    def clear_highlights(self) -> None:
+        self._state.highlight_segments.clear()
+        self.highlightsReady.emit([])
+        self._status_message = "已清空片段列表"
+        self.statusMessageChanged.emit(self._status_message)
 
     def get_app_state(self) -> AppState:
 

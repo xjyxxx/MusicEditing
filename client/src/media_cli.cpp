@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -17,6 +18,7 @@ static void printUsage() {
     printf("  media_cli version\n");
     printf("  media_cli probe <视频路径>\n");
     printf("  media_cli iterate <视频路径> [最大帧数] [--hw]\n");
+    printf("  media_cli thumbnail <视频路径> <时间秒> <输出.ppm> [--hw] [--max-w 160]\n");
 #ifdef MUSIC_HAS_LLAMA
     printf("  media_cli extract-audio <视频路径> <输出wav>\n");
     printf("  media_cli analyze-speech <transcript.json> <model.gguf> <场景> <最短秒> <最长秒> <敏感度0-1>\n");
@@ -27,6 +29,118 @@ static void printUsage() {
     printf("  media_cli upscale <model.onnx|-> <输入图> <输出图> [scale=2|4] [strength=0-100]\n");
     printf("  media_cli upscale-frames <model.onnx|-> <输入帧目录> <输出帧目录> [scale=2|4] [strength=0-100]\n");
 #endif
+}
+
+static void scaleRgbNearest(
+    const unsigned char* src, int sw, int sh,
+    unsigned char* dst, int dw, int dh)
+{
+    for (int y = 0; y < dh; ++y) {
+        const int sy = (sh > 0) ? (y * sh / dh) : 0;
+        for (int x = 0; x < dw; ++x) {
+            const int sx = (sw > 0) ? (x * sw / dw) : 0;
+            const unsigned char* s = src + (static_cast<size_t>(sy) * sw + sx) * 3;
+            unsigned char* d = dst + (static_cast<size_t>(y) * dw + x) * 3;
+            d[0] = s[0];
+            d[1] = s[1];
+            d[2] = s[2];
+        }
+    }
+}
+
+static bool writePpm(const char* path, const unsigned char* rgb, int w, int h) {
+    FILE* f = nullptr;
+#ifdef _WIN32
+    if (fopen_s(&f, path, "wb") != 0 || !f) {
+        return false;
+    }
+#else
+    f = fopen(path, "wb");
+    if (!f) {
+        return false;
+    }
+#endif
+    if (fprintf(f, "P6\n%d %d\n255\n", w, h) < 0) {
+        fclose(f);
+        return false;
+    }
+    const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h) * 3u;
+    const bool ok = fwrite(rgb, 1, n, f) == n;
+    fclose(f);
+    return ok;
+}
+
+static int cmdThumbnail(const char* path, double timestampSec, const char* outPath,
+                        bool preferHw, int maxW) {
+    media_engine_init();
+
+    int w = 0, h = 0;
+    double dur = 0, fps = 0;
+    int64_t total = 0;
+    char codec[64] = {};
+    char fmt[64] = {};
+    int ret = media_probe_video(path, &w, &h, &dur, &fps, &total,
+        codec, sizeof(codec), fmt, sizeof(fmt));
+    if (ret != 0 || w <= 0 || h <= 0) {
+        fprintf(stderr, "THUMBNAIL_ERROR:probe\n");
+        media_engine_shutdown();
+        return ret != 0 ? ret : -1;
+    }
+
+    if (timestampSec < 0) {
+        timestampSec = 0;
+    }
+    if (dur > 0 && timestampSec > dur) {
+        timestampSec = dur;
+    }
+
+    const int bufSize = w * h * 3;
+    std::vector<unsigned char> rgb(static_cast<size_t>(bufSize));
+    ret = media_extract_thumbnail(path, timestampSec, rgb.data(), bufSize, preferHw ? 1 : 0);
+    fprintf(stderr, "DECODE_HW:%s\n", media_decoder_hwaccel_name());
+    fflush(stderr);
+    if (ret != 0) {
+        fprintf(stderr, "THUMBNAIL_ERROR:%d\n", ret);
+        media_engine_shutdown();
+        return ret;
+    }
+
+    int ow = w;
+    int oh = h;
+    const unsigned char* outRgb = rgb.data();
+    std::vector<unsigned char> scaled;
+    if (maxW > 0 && w > maxW) {
+        ow = maxW;
+        oh = std::max(1, h * maxW / w);
+        scaled.resize(static_cast<size_t>(ow) * static_cast<size_t>(oh) * 3u);
+        scaleRgbNearest(rgb.data(), w, h, scaled.data(), ow, oh);
+        outRgb = scaled.data();
+    }
+
+    try {
+        std::filesystem::path out(outPath);
+        if (out.has_parent_path()) {
+            std::filesystem::create_directories(out.parent_path());
+        }
+    } catch (...) {
+        // 目录创建失败时仍尝试写文件
+    }
+
+    if (!writePpm(outPath, outRgb, ow, oh)) {
+        fprintf(stderr, "THUMBNAIL_ERROR:write\n");
+        media_engine_shutdown();
+        return -4;
+    }
+
+    printf("THUMBNAIL_OK\n");
+    printf("width=%d\n", ow);
+    printf("height=%d\n", oh);
+    printf("src_width=%d\n", w);
+    printf("src_height=%d\n", h);
+    printf("timestamp=%.6f\n", timestampSec);
+    printf("output=%s\n", outPath);
+    media_engine_shutdown();
+    return 0;
 }
 
 static int cmdVersion() {
@@ -479,6 +593,25 @@ static int runCli(int argc, char* argv[]) {
             }
         }
         return cmdIterate(argv[2], maxFrames, preferHw);
+    }
+
+    if (strcmp(cmd, "thumbnail") == 0) {
+        if (argc < 5) { printUsage(); return 1; }
+        bool preferHw = false;
+        int maxW = 160;
+        for (int i = 5; i < argc; ++i) {
+            if (strcmp(argv[i], "--hw") == 0 || strcmp(argv[i], "-hw") == 0) {
+                preferHw = true;
+            } else if (strncmp(argv[i], "--max-w=", 8) == 0) {
+                maxW = atoi(argv[i] + 8);
+            } else if (strcmp(argv[i], "--max-w") == 0 && i + 1 < argc) {
+                maxW = atoi(argv[++i]);
+            }
+        }
+        if (maxW < 0) {
+            maxW = 0;
+        }
+        return cmdThumbnail(argv[2], atof(argv[3]), argv[4], preferHw, maxW);
     }
 
 #ifdef MUSIC_HAS_LLAMA

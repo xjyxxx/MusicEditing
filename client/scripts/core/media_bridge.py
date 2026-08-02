@@ -106,10 +106,16 @@ _EXIF_HIGHLIGHT_TAGS = (
 )
 
 
-def _video_encoder_args() -> list[str]:
+def _video_encoder_args(*, high_quality: bool = False) -> list[str]:
     """捆绑 FFmpeg 无 libx264 时，Windows 使用 Media Foundation H.264。"""
     if sys.platform == "win32":
-        return ["-c:v", "h264_mf", "-pix_fmt", "yuv420p"]
+        args = ["-c:v", "h264_mf", "-pix_fmt", "yuv420p"]
+        if high_quality:
+            # 默认码率偏低会明显糊于原片；补帧等重编码场景提高码率
+            args.extend(["-b:v", "12M", "-maxrate", "18M", "-bufsize", "24M"])
+        return args
+    if high_quality:
+        return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-preset", "medium"]
     return ["-c:v", "libx264", "-pix_fmt", "yuv420p"]
 
 
@@ -296,6 +302,7 @@ class MediaBridge:
         if result.stderr:
             for line in result.stderr.splitlines():
                 if line.startswith(("PROBE_ERROR", "ITERATE_ERROR",
+                                    "THUMBNAIL_ERROR",
                                     "EXTRACT_AUDIO_ERROR", "ANALYZE_SPEECH_ERROR",
                                     "WATERMARK_ERROR")):
                     raise RuntimeError(line.strip())
@@ -338,6 +345,50 @@ class MediaBridge:
             codec_name=data.get("codec", ""),
             format_name=data.get("format", ""),
         )
+
+    def extract_thumbnail(
+        self,
+        file_path: str,
+        timestamp_sec: float,
+        *,
+        output_path: str = "",
+        max_width: int = 160,
+        prefer_hw: Optional[bool] = None,
+        use_cache: bool = True,
+    ) -> str:
+        """
+        抽取指定时刻缩略图（PPM），经 media_cli thumbnail → extractThumbnail。
+        默认写入系统临时目录小图缓存。
+        """
+        if not os.path.isfile(file_path):
+            raise FileNotFoundError(f"文件不存在: {file_path}")
+
+        from core.thumbnail_cache import cache_path, is_fresh
+
+        out = Path(output_path) if output_path else cache_path(
+            file_path, timestamp_sec, max_width=max_width,
+        )
+        if use_cache and is_fresh(out, file_path):
+            return str(out)
+
+        out.parent.mkdir(parents=True, exist_ok=True)
+        args = [
+            "thumbnail",
+            file_path,
+            f"{float(timestamp_sec):.6f}",
+            str(out),
+            f"--max-w={int(max_width)}",
+        ]
+        use_hw = self._prefer_hw_decode if prefer_hw is None else bool(prefer_hw)
+        if use_hw:
+            args.append("--hw")
+
+        text = self._run(args, timeout=120)
+        if "THUMBNAIL_OK" not in text:
+            raise RuntimeError(f"提取缩略图失败:\n{text}")
+        if not out.is_file() or out.stat().st_size < 32:
+            raise RuntimeError(f"缩略图未生成: {out}")
+        return str(out)
 
     def iterate_frames(
         self,
@@ -906,6 +957,110 @@ class MediaBridge:
             return output_path
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def interpolate_video(
+        self,
+        input_path: str,
+        output_path: str,
+        *,
+        fps: float = 0.0,
+        factor: int = 2,
+        start_sec: float = 0.0,
+        end_sec: float = 0.0,
+        quality: str = "fast",
+        on_progress: Optional[Callable[[float, str], None]] = None,
+        **_ignored,
+    ) -> str:
+        """
+        视频补帧：FFmpeg minterpolate 提升帧率（默认 2x）。
+        quality=fast → blend（快，默认）；quality=quality → MCI 运动补偿（慢、更顺）。
+        """
+        factor = 2 if int(factor) <= 2 else 4
+        q = (quality or "fast").strip().lower()
+        if q in ("mci", "hq", "high", "fine", "精细"):
+            q = "quality"
+        if q not in ("fast", "quality"):
+            q = "fast"
+
+        def report(p: float, msg: str):
+            if on_progress:
+                on_progress(p, msg)
+
+        ffmpeg = _find_ffmpeg()
+        if fps <= 0:
+            try:
+                info = self.probe_video(input_path)
+                fps = float(info.fps or 0.0)
+            except Exception:
+                fps = 0.0
+        if fps <= 0:
+            fps = 25.0
+        out_fps = fps * factor
+
+        duration = 0.0
+        if end_sec > start_sec:
+            duration = end_sec - start_sec
+
+        if q == "quality":
+            # 运动补偿更顺，但极慢；关掉 vsbmc 略快一点
+            vf_primary = (
+                f"minterpolate=fps={out_fps:.3f}:mi_mode=mci:"
+                f"mc_mode=aobmc:me_mode=bidir:vsbmc=0"
+            )
+            mode_label = "精细(MCI)"
+            enc = _video_encoder_args(high_quality=True)
+        else:
+            # 帧混合，比 MCI 快一个数量级以上
+            vf_primary = f"minterpolate=fps={out_fps:.3f}:mi_mode=blend"
+            mode_label = "快速(blend)"
+            enc = _video_encoder_args(high_quality=False)
+            if sys.platform == "win32":
+                # 略提高默认 h264_mf 观感，仍比 12M 编码快
+                enc = [
+                    "-c:v", "h264_mf", "-pix_fmt", "yuv420p",
+                    "-b:v", "6M", "-maxrate", "8M", "-bufsize", "12M",
+                ]
+
+        report(
+            5.0,
+            f"FFmpeg 补帧 {mode_label} → {out_fps:.2f} fps"
+            + (f"（{duration:.1f}s）" if duration > 0 else "（全程）")
+            + "…",
+        )
+
+        def _run_with_vf(vf: str) -> subprocess.CompletedProcess:
+            cmd = [str(ffmpeg), "-y", "-hide_banner", "-stats"]
+            if start_sec > 0:
+                cmd.extend(["-ss", f"{start_sec:.3f}"])
+            cmd.extend(["-i", input_path])
+            if duration > 0:
+                cmd.extend(["-t", f"{duration:.3f}"])
+            cmd.extend([
+                "-vf", vf,
+                *enc,
+                "-c:a", "aac", "-b:a", "160k",
+                "-shortest",
+                output_path,
+            ])
+            return subprocess.run(
+                cmd, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", env=self._env,
+            )
+
+        report(15.0, f"正在{mode_label}补帧编码…")
+        result = _run_with_vf(vf_primary)
+        if result.returncode != 0 or not os.path.isfile(output_path):
+            if q == "quality":
+                report(30.0, "MCI 失败，回退 blend…")
+                result = _run_with_vf(
+                    f"minterpolate=fps={out_fps:.3f}:mi_mode=blend"
+                )
+            if result.returncode != 0 or not os.path.isfile(output_path):
+                raise RuntimeError(
+                    (result.stderr or "").strip() or "FFmpeg 补帧失败"
+                )
+        report(100.0, "完成")
+        return output_path
 
     @property
     def yt_dlp_available(self) -> bool:

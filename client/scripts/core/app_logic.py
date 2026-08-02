@@ -97,10 +97,15 @@ class AppLogic:
         want_gpu = gpu_cfg not in ("0", "false", "off", "no")
         self.prefer_hw_decode = want_gpu
         self.use_gpu = self.gpu_info["cuda_available"] and want_gpu
-        if not self.vosk_model_dir:
-            default_vosk = _project_root() / "models" / "vosk-model-small-cn-0.22"
-            if default_vosk.is_dir():
-                self.vosk_model_dir = str(default_vosk)
+        # 解析并校验 Vosk 目录（避免空串/「.」被当成模型路径）
+        try:
+            from core.asr_engine import resolve_vosk_model_dir, is_vosk_model_dir
+            resolved = resolve_vosk_model_dir(self.vosk_model_dir or None)
+            self.vosk_model_dir = str(resolved) if is_vosk_model_dir(resolved) else ""
+        except Exception:
+            if not self.vosk_model_dir:
+                default_vosk = _project_root() / "models" / "vosk-model-small-cn-0.22"
+                self.vosk_model_dir = str(default_vosk) if default_vosk.is_dir() else ""
         self.lama_model_path = cfg.get("lama_model_path", "")
         if not self.lama_model_path:
             default_lama = _project_root() / "models" / "lama.onnx"

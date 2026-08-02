@@ -22,6 +22,7 @@ class TaskType(IntEnum):
     WATERMARK = 2
     EXPORT = 3
     DOWNLOAD = 4
+    INTERPOLATE = 5
 
 
 @dataclass
@@ -43,6 +44,7 @@ class HighlightSegment:
     end_sec: float
     score: float = 0.0
     selected: bool = True
+    thumbnail_path: str = ""
 
 
 @dataclass

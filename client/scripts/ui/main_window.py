@@ -3,19 +3,29 @@
 from __future__ import annotations
 
 import os
+import threading
 
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import Qt, Signal, Slot, QSize
+from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
-    QLabel, QListWidget, QMainWindow, QMessageBox, QProgressBar,
-    QPushButton, QSlider, QComboBox, QSplitter, QTabWidget, QVBoxLayout, QWidget,
+    QApplication, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout, QGroupBox,
+    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+    QProgressBar, QPushButton, QSlider, QComboBox, QSplitter, QTabWidget,
+    QVBoxLayout, QWidget,
 )
 
+from core.time_format import format_range, format_timestamp
 from ui.video_player import VideoPlayerWidget
 from ui.watermark_page import WatermarkPage
 from ui.enhance_page import EnhancePage
 from ui.hot_comments_page import HotCommentsPage
 from ui.download_page import DownloadPage
+from ui.highlight_timeline import HighlightTimelineWidget
+from ui.workflow_link import (
+    TAB_ENHANCE,
+    TAB_WATERMARK,
+    ask_video_handoff,
+)
 from viewmodels.main_vm import MainViewModel
 
 
@@ -112,9 +122,17 @@ class HomePage(QWidget):
 
 
 class SlicePage(QWidget):
-    def __init__(self, vm: MainViewModel, parent=None):
+    """智能切片页：分析高光 → 缩略图时间轴 + 列表。"""
+
+    thumbnailReady = Signal(int, int, str)  # gen, index, path
+
+    def __init__(self, vm: MainViewModel, handoff=None, parent=None):
         super().__init__(parent)
         self._vm = vm
+        self._handoff = handoff  # Callable[[str, int], None]
+        self._duration_sec = 0.0
+        self._syncing_selection = False
+        self._last_result_path = ""
         layout = QVBoxLayout(self)
 
         # 导入区
@@ -122,8 +140,12 @@ class SlicePage(QWidget):
         self._file_label = QLabel("未选择视频")
         btn_import = QPushButton("导入视频")
         btn_import.clicked.connect(self._on_import)
+        btn_use = QPushButton("用当前视频")
+        btn_use.setToolTip("使用其它页已导入的共享视频")
+        btn_use.clicked.connect(self._on_use_current_video)
         import_row.addWidget(self._file_label, 1)
         import_row.addWidget(btn_import)
+        import_row.addWidget(btn_use)
         layout.addLayout(import_row)
 
         # 视频信息
@@ -137,8 +159,17 @@ class SlicePage(QWidget):
 
         self._scene_combo = QComboBox()
         self._scene_combo.addItems(["游戏高光", "演讲金句", "日常精彩片段", "自定义识别"])
+        self._scene_combo.setToolTip(
+            "演讲金句：有 Vosk 则转写+金句词/LLM；无模型则用人声段兜底\n"
+            "下载模型: scripts\\download_vosk_model.bat"
+        )
+        self._scene_hint = QLabel("")
+        self._scene_hint.setStyleSheet("color: #9ab; font-size: 12px;")
+        self._scene_hint.setWordWrap(True)
+        self._scene_combo.currentTextChanged.connect(self._on_scene_changed)
         params_layout.addWidget(QLabel("场景:"), 0, 0)
         params_layout.addWidget(self._scene_combo, 0, 1)
+        params_layout.addWidget(self._scene_hint, 0, 2, 1, 2)
 
         self._min_slider = QSlider(Qt.Horizontal)
         self._min_slider.setRange(3, 30)
@@ -170,29 +201,86 @@ class SlicePage(QWidget):
 
         layout.addWidget(params_box)
 
+        # 手动切片（不依赖 Vosk）
+        manual_box = QGroupBox("手动切片（无需 AI / Vosk）")
+        manual_layout = QGridLayout(manual_box)
+        self._manual_start = QDoubleSpinBox()
+        self._manual_start.setRange(0.0, 86400.0)
+        self._manual_start.setDecimals(1)
+        self._manual_start.setSuffix(" s")
+        self._manual_start.setSingleStep(0.5)
+        self._manual_end = QDoubleSpinBox()
+        self._manual_end.setRange(0.0, 86400.0)
+        self._manual_end.setDecimals(1)
+        self._manual_end.setSuffix(" s")
+        self._manual_end.setSingleStep(0.5)
+        self._manual_end.setValue(10.0)
+        self._manual_range_label = QLabel("0:00 – 0:10")
+        self._manual_range_label.setStyleSheet("color: #8cf;")
+        self._manual_start.valueChanged.connect(self._on_manual_spin)
+        self._manual_end.valueChanged.connect(self._on_manual_spin)
+        manual_layout.addWidget(QLabel("开始:"), 0, 0)
+        manual_layout.addWidget(self._manual_start, 0, 1)
+        manual_layout.addWidget(QLabel("结束:"), 0, 2)
+        manual_layout.addWidget(self._manual_end, 0, 3)
+        manual_layout.addWidget(self._manual_range_label, 0, 4)
+        btn_add_manual = QPushButton("添加到列表")
+        btn_add_manual.setToolTip("按起止时间添加片段，可与 AI 结果混用")
+        btn_add_manual.clicked.connect(self._on_add_manual)
+        btn_del = QPushButton("删除选中")
+        btn_del.clicked.connect(self._on_remove_selected)
+        btn_clear = QPushButton("清空列表")
+        btn_clear.clicked.connect(self._on_clear_segments)
+        manual_layout.addWidget(btn_add_manual, 1, 0, 1, 2)
+        manual_layout.addWidget(btn_del, 1, 2, 1, 1)
+        manual_layout.addWidget(btn_clear, 1, 3, 1, 1)
+        layout.addWidget(manual_box)
+
         # 进度
         self._progress = QProgressBar()
         self._progress.setVisible(False)
         layout.addWidget(self._progress)
 
-        # 高光列表
+        # 高光时间轴（色块 + 片段缩略图）
+        layout.addWidget(QLabel("高光时间轴（缩略图）"))
+        self._timeline = HighlightTimelineWidget()
+        self._timeline.segmentClicked.connect(self._on_timeline_segment)
+        layout.addWidget(self._timeline)
+
+        # 高光列表（带缩略图图标）
         self._highlight_list = QListWidget()
+        self._highlight_list.setIconSize(QSize(96, 54))
+        self._highlight_list.currentRowChanged.connect(self._on_list_row_changed)
         layout.addWidget(self._highlight_list)
+        self._thumb_gen = 0
+        self.thumbnailReady.connect(self._on_thumbnail_ready)
 
         # 操作按钮
         btn_row = QHBoxLayout()
-        btn_analyze = QPushButton("AI 智能分析")
-        btn_analyze.setStyleSheet("background: #5b5bd6; color: white; padding: 8px 20px;")
-        btn_analyze.clicked.connect(self._on_analyze)
+        self._btn_analyze = QPushButton("AI 智能分析")
+        self._btn_analyze.setStyleSheet("background: #5b5bd6; color: white; padding: 8px 20px;")
+        self._btn_analyze.setToolTip(
+            "演讲类需 Vosk 模型；无模型请用「游戏高光」或上方「手动切片」"
+        )
+        self._btn_analyze.clicked.connect(self._on_analyze)
+        btn_analyze = self._btn_analyze
         btn_export = QPushButton("一键高光成片")
-        btn_export.setToolTip("导出各高光片段，并拼接成 highlights_merged.mp4")
+        btn_export.setToolTip("导出列表中的片段，并拼接成 highlights_merged.mp4")
         btn_export.clicked.connect(self._on_export)
         btn_silence = QPushButton("静音剪掉")
         btn_silence.setToolTip("检测静音段并裁掉，生成紧凑口播版")
         btn_silence.clicked.connect(self._on_compact_speech)
+        btn_enhance = QPushButton("送去超分")
+        btn_enhance.setToolTip("将高光成片（或当前视频）导入「画质增强」")
+        btn_enhance.clicked.connect(lambda: self._send_to(TAB_ENHANCE))
+        btn_wm = QPushButton("送去去水印")
+        btn_wm.setToolTip("将高光成片（或当前视频）导入「去水印」")
+        btn_wm.clicked.connect(lambda: self._send_to(TAB_WATERMARK))
         btn_row.addWidget(btn_analyze)
         btn_row.addWidget(btn_export)
         btn_row.addWidget(btn_silence)
+        btn_row.addWidget(btn_enhance)
+        btn_row.addWidget(btn_wm)
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
@@ -202,6 +290,18 @@ class SlicePage(QWidget):
         vm.exportFinished.connect(self._on_export_done)
         vm.silenceFinished.connect(self._on_silence_done)
         vm.errorOccurred.connect(self._show_error)
+        self._on_scene_changed(self._scene_combo.currentText())
+
+    @Slot(str)
+    def _on_scene_changed(self, scene: str):
+        tips = {
+            "游戏高光": "规则时间轴切分（视觉模型待接入）。",
+            "演讲金句": "优先 Vosk 转写 + 金句词/LLM；无模型则用人声段候选。"
+                        "完整识别请运行 scripts\\download_vosk_model.bat。",
+            "日常精彩片段": "同演讲链路，偏向口语兴奋词；无 Vosk 用人声段。",
+            "自定义识别": "通用转写/人声切段，可自行再手动增删。",
+        }
+        self._scene_hint.setText(tips.get(scene, ""))
 
     @Slot()
     def _on_import(self):
@@ -212,16 +312,39 @@ class SlicePage(QWidget):
         if path:
             self._vm.import_video(path)
 
+    @Slot()
+    def _on_use_current_video(self):
+        video = self._vm.get_app_state().current_video
+        if not video or not video.file_path:
+            QMessageBox.information(self, "提示", "尚未导入视频，请先在本页或其它功能页导入。")
+            return
+        self._on_video_loaded(video)
+
     @Slot(object)
     def _on_video_loaded(self, video):
         name = os.path.basename(video.file_path)
         self._file_label.setText(name)
+        self._duration_sec = float(video.duration_sec or 0.0)
         self._info_label.setText(
             f"分辨率: {video.width}x{video.height} | "
-            f"时长: {video.duration_sec:.1f}s | "
+            f"时长: {format_timestamp(self._duration_sec)} ({self._duration_sec:.1f}s) | "
             f"帧率: {video.fps:.1f}fps | "
             f"编码: {video.codec_name}"
         )
+        self._timeline.set_duration(self._duration_sec)
+        # 换片时同步清空 VM 与 UI 片段
+        self._vm.clear_highlights()
+        self._last_result_path = ""
+        # 手动切片起止范围随时长调整
+        max_sec = max(1.0, self._duration_sec)
+        for spin in (self._manual_start, self._manual_end):
+            spin.blockSignals(True)
+            spin.setMaximum(max_sec)
+            spin.blockSignals(False)
+        self._manual_start.setValue(0.0)
+        default_end = min(10.0, max_sec)
+        self._manual_end.setValue(default_end)
+        self._on_manual_spin()
 
     @Slot()
     def _on_analyze(self):
@@ -233,25 +356,142 @@ class SlicePage(QWidget):
         )
         self._progress.setVisible(True)
         self._progress.setValue(0)
+        self._thumb_gen += 1
         self._highlight_list.clear()
+        self._timeline.clear()
+        self._timeline.set_duration(self._duration_sec)
+        self._btn_analyze.setEnabled(False)
+        self._btn_analyze.setText("分析中…")
         self._vm.start_slice_analysis()
 
     @Slot(int, float, str)
     def _on_progress(self, task_id, progress, message):
+        self._progress.setVisible(True)
         self._progress.setValue(int(progress))
 
     @Slot(list)
     def _on_highlights(self, segments):
-        self._progress.setValue(100)
-        for seg in segments:
-            self._highlight_list.addItem(
-                f"[{seg.start_sec:.1f}s - {seg.end_sec:.1f}s] 得分: {seg.score:.2f}"
+        self._btn_analyze.setEnabled(True)
+        self._btn_analyze.setText("AI 智能分析")
+        if self._progress.isVisible():
+            self._progress.setValue(100)
+        # 若视频信息尚未写入时长，用片段末尾兜底
+        if self._duration_sec <= 0 and segments:
+            self._duration_sec = max(float(s.end_sec) for s in segments)
+            self._timeline.set_duration(self._duration_sec)
+        self._timeline.set_segments(segments)
+        self._highlight_list.clear()
+        for i, seg in enumerate(segments):
+            dur = max(0.0, float(seg.end_sec) - float(seg.start_sec))
+            tag = "手动" if abs(float(seg.score) - 1.0) < 1e-6 else f"得分 {seg.score:.2f}"
+            text = (
+                f"#{i + 1}  {format_range(seg.start_sec, seg.end_sec)}  ·  "
+                f"{format_timestamp(dur)}  ·  {tag}"
             )
+            item = QListWidgetItem(text)
+            path = getattr(seg, "thumbnail_path", "") or ""
+            if path and os.path.isfile(path):
+                item.setIcon(QIcon(QPixmap(path)))
+            self._highlight_list.addItem(item)
+        self._start_thumbnail_load(segments)
+
+    def _start_thumbnail_load(self, segments) -> None:
+        """后台抽取各片段中点缩略图 → 时间轴 / 列表图标。"""
+        video = self._vm.get_app_state().current_video
+        bridge = getattr(self._vm, "_bridge", None)
+        if not video or not bridge or not segments:
+            return
+        self._thumb_gen += 1
+        gen = self._thumb_gen
+        path = video.file_path
+        jobs = []
+        for i, seg in enumerate(segments):
+            mid = (float(seg.start_sec) + float(seg.end_sec)) * 0.5
+            jobs.append((i, mid))
+
+        def worker():
+            for index, mid in jobs:
+                if gen != self._thumb_gen:
+                    return
+                try:
+                    out = bridge.extract_thumbnail(path, mid, max_width=160)
+                except Exception:
+                    out = ""
+                if gen != self._thumb_gen:
+                    return
+                if out:
+                    segs = self._vm.get_app_state().highlight_segments
+                    if 0 <= index < len(segs):
+                        segs[index].thumbnail_path = out
+                    self.thumbnailReady.emit(gen, index, out)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    @Slot(int, int, str)
+    def _on_thumbnail_ready(self, gen: int, index: int, path: str):
+        if gen != self._thumb_gen or not path:
+            return
+        self._timeline.set_thumbnail_at(index, path)
+        if 0 <= index < self._highlight_list.count():
+            item = self._highlight_list.item(index)
+            pix = QPixmap(path)
+            if item and not pix.isNull():
+                item.setIcon(QIcon(pix))
+
+    @Slot()
+    def _on_manual_spin(self):
+        a = float(self._manual_start.value())
+        b = float(self._manual_end.value())
+        self._manual_range_label.setText(format_range(a, b))
+
+    @Slot()
+    def _on_add_manual(self):
+        video = self._vm.get_app_state().current_video
+        if not video:
+            QMessageBox.warning(self, "提示", "请先导入视频")
+            return
+        start = float(self._manual_start.value())
+        end = float(self._manual_end.value())
+        if not self._vm.add_manual_highlight(start, end):
+            QMessageBox.warning(
+                self, "手动切片",
+                self._vm.status_message or "添加失败，请检查起止时间",
+            )
+
+    @Slot()
+    def _on_remove_selected(self):
+        row = self._highlight_list.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "提示", "请先在列表中选中一段")
+            return
+        self._vm.remove_highlight_at(row)
+
+    @Slot()
+    def _on_clear_segments(self):
+        if not self._vm.get_app_state().highlight_segments:
+            return
+        if QMessageBox.question(self, "清空列表", "确定清空全部片段？") != QMessageBox.Yes:
+            return
+        self._vm.clear_highlights()
+
+    @Slot(int)
+    def _on_timeline_segment(self, index: int):
+        if index < 0 or index >= self._highlight_list.count():
+            return
+        self._syncing_selection = True
+        self._highlight_list.setCurrentRow(index)
+        self._syncing_selection = False
+
+    @Slot(int)
+    def _on_list_row_changed(self, row: int):
+        if self._syncing_selection:
+            return
+        self._timeline.set_selected_index(row)
 
     @Slot()
     def _on_export(self):
         if not self._vm.get_app_state().highlight_segments:
-            QMessageBox.warning(self, "提示", "请先完成 AI 分析")
+            QMessageBox.warning(self, "提示", "请先添加片段（AI 分析或手动切片）")
             return
         out_dir = QFileDialog.getExistingDirectory(self, "选择导出目录")
         if not out_dir:
@@ -278,21 +518,62 @@ class SlicePage(QWidget):
         self._progress.setValue(0)
         self._vm.compact_speech(out)
 
+    def _handoff_path(self) -> str:
+        """优先最近导出结果，否则当前共享视频。"""
+        if self._last_result_path and os.path.isfile(self._last_result_path):
+            return self._last_result_path
+        video = self._vm.get_app_state().current_video
+        if video and video.file_path and os.path.isfile(video.file_path):
+            return video.file_path
+        return ""
+
+    def _send_to(self, tab_index: int):
+        if not self._handoff:
+            return
+        path = self._handoff_path()
+        if not path:
+            QMessageBox.warning(
+                self, "提示",
+                "请先导入视频，或先「一键高光成片 / 静音剪掉」得到成片后再送去处理。",
+            )
+            return
+        if not self._last_result_path or not os.path.isfile(self._last_result_path):
+            tip = "将把当前完整视频送去下一功能。\n若只要高光，请先「一键高光成片」。\n\n继续？"
+            if QMessageBox.question(self, "功能串联", tip) != QMessageBox.Yes:
+                return
+        self._handoff(path, tab_index)
+
     @Slot(str)
     def _on_export_done(self, path: str):
         self._progress.setValue(100)
-        QMessageBox.information(
-            self, "导出完成",
-            f"高光成片已生成：\n{path}\n\n同目录还有各片段 highlight_XXX.mp4",
+        self._last_result_path = path or ""
+        tab = ask_video_handoff(
+            self,
+            "导出完成",
+            f"高光成片已生成：\n{path}\n\n同目录还有各片段 highlight_XXX.mp4\n\n"
+            "可直接送去画质增强或去水印（无需重新导入）。",
+            [("送去超分", TAB_ENHANCE), ("送去去水印", TAB_WATERMARK)],
         )
+        if tab is not None and self._handoff:
+            self._handoff(path, tab)
 
     @Slot(str)
     def _on_silence_done(self, path: str):
         self._progress.setValue(100)
-        QMessageBox.information(self, "完成", f"紧凑口播已保存：\n{path}")
+        self._last_result_path = path or ""
+        tab = ask_video_handoff(
+            self,
+            "完成",
+            f"紧凑口播已保存：\n{path}\n\n可继续送去超分或去水印。",
+            [("送去超分", TAB_ENHANCE), ("送去去水印", TAB_WATERMARK)],
+        )
+        if tab is not None and self._handoff:
+            self._handoff(path, tab)
 
     @Slot(str)
     def _show_error(self, msg):
+        self._btn_analyze.setEnabled(True)
+        self._btn_analyze.setText("AI 智能分析")
         self._progress.setVisible(False)
         QMessageBox.critical(self, "错误", msg)
 
@@ -358,10 +639,11 @@ class MainWindow(QMainWindow):
         self._tabs = QTabWidget()
         self._home_page = HomePage(self._vm, self._switch_tab)
         self._tabs.addTab(self._home_page, "首页")
-        self._tabs.addTab(SlicePage(self._vm), "智能切片")
-        self._enhance_page = EnhancePage(self._vm)
+        self._slice_page = SlicePage(self._vm, handoff=self.open_with_video)
+        self._tabs.addTab(self._slice_page, "智能切片")
+        self._enhance_page = EnhancePage(self._vm, handoff=self.open_with_video)
         self._tabs.addTab(self._enhance_page, "画质增强")
-        self._watermark_page = WatermarkPage(self._vm)
+        self._watermark_page = WatermarkPage(self._vm, handoff=self.open_with_video)
         self._tabs.addTab(self._watermark_page, "去水印")
         self._hot_comments_page = HotCommentsPage(self._vm)
         self._tabs.addTab(self._hot_comments_page, "热评滚动")
@@ -391,6 +673,19 @@ class MainWindow(QMainWindow):
 
     def _switch_tab(self, index: int):
         self._tabs.setCurrentIndex(index)
+
+    def open_with_video(self, path: str, tab_index: int) -> None:
+        """切 Tab + 异步 import_video（probe 在后台，不卡主线程）。"""
+        if not path or not os.path.isfile(path):
+            QMessageBox.warning(self, "提示", f"文件不存在：\n{path}")
+            return
+        # 先切页，再后台探测；videoLoaded 到达后各页刷新
+        self._tabs.setCurrentIndex(tab_index)
+        if tab_index == TAB_ENHANCE:
+            self._enhance_page.focus_video_tab()
+        elif tab_index == TAB_WATERMARK:
+            self._watermark_page.focus_video_tab()
+        self._vm.import_video(path)
 
     @Slot(str)
     def _on_download_to_home(self, path: str):

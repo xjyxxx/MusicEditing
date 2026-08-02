@@ -27,6 +27,7 @@ extern "C" {
 }
 #endif
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -217,8 +218,16 @@ bool VideoDecoder::extractThumbnail(double timestampSec, unsigned char* rgbBuffe
     const int required = w * h * 3;
     if (bufferSize < required) return false;
 
-    av_seek_frame(impl_->formatCtx, impl_->videoStreamIndex,
-        static_cast<int64_t>(timestampSec * AV_TIME_BASE), AVSEEK_FLAG_BACKWARD);
+    // 与 VideoPlayerEngine::seek 一致：stream_index 模式下时间戳须用流 time_base
+    // （旧写法用 AV_TIME_BASE 直接 seek，靠后时刻会落到文件末尾 → 黑帧）
+    const AVStream* vstream = impl_->formatCtx->streams[impl_->videoStreamIndex];
+    const int64_t seekTs = av_rescale_q(
+        static_cast<int64_t>(timestampSec * AV_TIME_BASE),
+        AV_TIME_BASE_Q, vstream->time_base);
+    if (av_seek_frame(impl_->formatCtx, impl_->videoStreamIndex, seekTs, AVSEEK_FLAG_BACKWARD) < 0) {
+        av_seek_frame(impl_->formatCtx, -1,
+            static_cast<int64_t>(timestampSec * AV_TIME_BASE), AVSEEK_FLAG_BACKWARD);
+    }
 
     common::flushCodec(impl_->codecCtx);
 
@@ -239,10 +248,29 @@ bool VideoDecoder::extractThumbnail(double timestampSec, unsigned char* rgbBuffe
 
     SwsContext* swsCtx = nullptr;
     bool found = false;
+    int decoded = 0;
+    const int maxDecode = 48; // seek 后跳过若干帧，避开未就绪/近黑帧
+
+    auto frameIsMostlyBlack = [&](const unsigned char* rgb) -> bool {
+        // 抽样判断：均值过低视为无效缩略图
+        const int stepX = std::max(1, w / 32);
+        const int stepY = std::max(1, h / 32);
+        int64_t sum = 0;
+        int n = 0;
+        for (int y = 0; y < h; y += stepY) {
+            for (int x = 0; x < w; x += stepX) {
+                const unsigned char* p = rgb + (static_cast<size_t>(y) * w + x) * 3;
+                sum += p[0] + p[1] + p[2];
+                ++n;
+            }
+        }
+        return n > 0 && (sum / n) < 24; // 三通道均值 < 8
+    };
 
     while (av_read_frame(impl_->formatCtx, &packet) >= 0) {
         if (packet.stream_index == impl_->videoStreamIndex) {
             if (common::decodeVideoPacket(impl_->codecCtx, &packet, frame)) {
+                ++decoded;
                 const AVFrame* scaleFrame = frame;
                 if (common::isHwAcceleratedFrame(frame, &impl_->hw)) {
                     if (!impl_->swTransferFrame) {
@@ -251,7 +279,10 @@ bool VideoDecoder::extractThumbnail(double timestampSec, unsigned char* rgbBuffe
                     av_frame_unref(impl_->swTransferFrame);
                     if (!common::transferHwFrameToSoftware(frame, impl_->swTransferFrame)) {
                         common::packetUnref(&packet);
-                        break;
+                        if (decoded >= maxDecode) {
+                            break;
+                        }
+                        continue;
                     }
                     scaleFrame = impl_->swTransferFrame;
                 }
@@ -269,14 +300,32 @@ bool VideoDecoder::extractThumbnail(double timestampSec, unsigned char* rgbBuffe
                 sws_scale(swsCtx, scaleFrame->data, scaleFrame->linesize, 0, h,
                     rgbFrame->data, rgbFrame->linesize);
 
-                impl_->frameProcessor.processRgbFrame(outBuf, w, h, w * 3);
-                std::memcpy(rgbBuffer, outBuf, static_cast<size_t>(required));
-                found = true;
-                common::packetUnref(&packet);
-                break;
+                // 行对齐时 linesize 可能 > w*3，按行拷到紧凑缓冲再判断/输出
+                if (rgbFrame->linesize[0] == w * 3) {
+                    std::memcpy(rgbBuffer, outBuf, static_cast<size_t>(required));
+                } else {
+                    for (int y = 0; y < h; ++y) {
+                        std::memcpy(
+                            rgbBuffer + static_cast<size_t>(y) * w * 3,
+                            outBuf + static_cast<size_t>(y) * rgbFrame->linesize[0],
+                            static_cast<size_t>(w) * 3u);
+                    }
+                }
+
+                impl_->frameProcessor.processRgbFrame(rgbBuffer, w, h, w * 3);
+
+                // 取 seek 后第一帧非近黑画面（缩略图不要求精确到毫秒）
+                if (!frameIsMostlyBlack(rgbBuffer)) {
+                    found = true;
+                    common::packetUnref(&packet);
+                    break;
+                }
             }
         }
         common::packetUnref(&packet);
+        if (decoded >= maxDecode) {
+            break;
+        }
     }
 
     if (swsCtx) {

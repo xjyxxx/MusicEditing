@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from core.image_loader import load_preview, probe_size
 from ui.exif_panel import ExifPanel
+from ui.workflow_link import TAB_WATERMARK, ask_video_handoff
 from viewmodels.main_vm import MainViewModel
 
 _STYLE = """
@@ -307,9 +308,10 @@ class SideBySideCompare(QWidget):
 
 
 class EnhancePage(QWidget):
-    def __init__(self, vm: MainViewModel, parent=None):
+    def __init__(self, vm: MainViewModel, handoff=None, parent=None):
         super().__init__(parent)
         self._vm = vm
+        self._handoff = handoff
         self._preview_png = ""
         self._result_path = ""
         self._src_image_path = ""
@@ -320,8 +322,8 @@ class EnhancePage(QWidget):
         root.setSpacing(8)
 
         hint = QLabel(
-            "左边原图、右边超分结果，中间一条细线。"
-            "鼠标在哪边滚轮就缩放哪边；按住 Ctrl 再滚轮则两侧同步缩放。可拖拽平移。"
+            "图片/视频超分：左原图右结果对比（视频超分默认试前 2 秒）。"
+            "视频补帧：默认处理全程，区间与超分独立。"
         )
         hint.setObjectName("HintLabel")
         hint.setWordWrap(True)
@@ -330,6 +332,7 @@ class EnhancePage(QWidget):
         self._tabs = QTabWidget()
         self._tabs.addTab(self._build_image_tab(), "图片超分")
         self._tabs.addTab(self._build_video_tab(), "视频超分")
+        self._tabs.addTab(self._build_interp_tab(), "视频补帧")
         root.addWidget(self._tabs, 1)
 
         self._progress = QProgressBar()
@@ -343,6 +346,8 @@ class EnhancePage(QWidget):
 
         vm.enhanceProgress.connect(self._on_progress)
         vm.enhanceFinished.connect(self._on_finished)
+        vm.interpolateProgress.connect(self._on_progress)
+        vm.interpolateFinished.connect(self._on_interp_finished)
         vm.errorOccurred.connect(self._show_error)
         vm.videoLoaded.connect(self._on_video_loaded)
 
@@ -464,8 +469,13 @@ class EnhancePage(QWidget):
         btn_import = QPushButton("导入视频")
         btn_import.setObjectName("GhostBtn")
         btn_import.clicked.connect(self._on_import_video)
+        btn_use = QPushButton("用当前视频")
+        btn_use.setObjectName("GhostBtn")
+        btn_use.setToolTip("使用其它页已导入的共享视频（无需重新选择文件）")
+        btn_use.clicked.connect(self._on_use_current_video)
         top.addWidget(self._vid_path_label, 1)
         top.addWidget(btn_import)
+        top.addWidget(btn_use)
         layout.addLayout(top)
 
         self._vid_info = QLabel("—")
@@ -531,11 +541,138 @@ class EnhancePage(QWidget):
         self._btn_folder_vid.setObjectName("GhostBtn")
         self._btn_folder_vid.setEnabled(False)
         self._btn_folder_vid.clicked.connect(self._open_result_folder)
+        self._btn_send_wm = QPushButton("送去去水印")
+        self._btn_send_wm.setObjectName("GhostBtn")
+        self._btn_send_wm.setEnabled(False)
+        self._btn_send_wm.setToolTip("将超分结果导入「去水印」")
+        self._btn_send_wm.clicked.connect(self._on_send_to_watermark)
         actions.addWidget(self._btn_run_vid)
         actions.addWidget(self._btn_open_vid)
         actions.addWidget(self._btn_folder_vid)
+        actions.addWidget(self._btn_send_wm)
         actions.addStretch()
         layout.addLayout(actions)
+
+        scroll.setWidget(body)
+        outer.addWidget(scroll)
+        return page
+
+    def _build_interp_tab(self) -> QWidget:
+        """视频补帧：FFmpeg minterpolate，与超分并列。"""
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        body = QWidget()
+        layout = QVBoxLayout(body)
+
+        tip = QLabel(
+            "把 24/30fps 提到 48/60fps（或 4×）。"
+            "默认「快速」模式（帧混合，明显更快）；「精细」用运动补偿，更顺但很慢。"
+            "建议先「试 5/15 秒」；全程会随片长变慢。补帧会重编码，锐度可能略逊原片。"
+        )
+        tip.setObjectName("HintLabel")
+        tip.setWordWrap(True)
+        layout.addWidget(tip)
+
+        self._interp_path_label = QLabel("未选择视频（请导入或「用当前视频」）")
+        layout.addWidget(self._interp_path_label)
+
+        row = QHBoxLayout()
+        btn_use = QPushButton("用当前视频")
+        btn_use.setObjectName("GhostBtn")
+        btn_use.clicked.connect(self._on_use_current_for_interp)
+        btn_import = QPushButton("导入视频")
+        btn_import.setObjectName("GhostBtn")
+        btn_import.clicked.connect(self._on_import_video)
+        row.addWidget(btn_import)
+        row.addWidget(btn_use)
+        row.addStretch()
+        layout.addLayout(row)
+
+        fac_box = QGroupBox("倍率")
+        fac_l = QHBoxLayout(fac_box)
+        self._interp_x2 = QRadioButton("2×（如 30→60fps）")
+        self._interp_x4 = QRadioButton("4×（如 30→120fps）")
+        self._interp_x2.setChecked(True)
+        self._interp_fac_group = QButtonGroup(self)
+        self._interp_fac_group.addButton(self._interp_x2)
+        self._interp_fac_group.addButton(self._interp_x4)
+        fac_l.addWidget(self._interp_x2)
+        fac_l.addWidget(self._interp_x4)
+        fac_l.addStretch()
+        layout.addWidget(fac_box)
+
+        q_box = QGroupBox("速度 / 质量")
+        q_l = QHBoxLayout(q_box)
+        self._interp_q_fast = QRadioButton("快速（推荐）")
+        self._interp_q_fine = QRadioButton("精细（慢）")
+        self._interp_q_fast.setChecked(True)
+        self._interp_q_fast.setToolTip("帧混合插值，速度快，适合先出片")
+        self._interp_q_fine.setToolTip("运动补偿 MCI，更顺滑但可能慢十几倍")
+        self._interp_q_group = QButtonGroup(self)
+        self._interp_q_group.addButton(self._interp_q_fast)
+        self._interp_q_group.addButton(self._interp_q_fine)
+        q_l.addWidget(self._interp_q_fast)
+        q_l.addWidget(self._interp_q_fine)
+        q_l.addStretch()
+        layout.addWidget(q_box)
+
+        range_box = QGroupBox("处理时间段（默认试 15 秒，可改全程）")
+        rc = QVBoxLayout(range_box)
+        start_row = QHBoxLayout()
+        start_row.addWidget(QLabel("起点"))
+        self._interp_start_slider = QSlider(Qt.Horizontal)
+        self._interp_start_label = QLabel("0.0s")
+        start_row.addWidget(self._interp_start_slider, 1)
+        start_row.addWidget(self._interp_start_label)
+        end_row = QHBoxLayout()
+        end_row.addWidget(QLabel("终点"))
+        self._interp_end_slider = QSlider(Qt.Horizontal)
+        self._interp_end_label = QLabel("—")
+        end_row.addWidget(self._interp_end_slider, 1)
+        end_row.addWidget(self._interp_end_label)
+        rc.addLayout(start_row)
+        rc.addLayout(end_row)
+        quick = QHBoxLayout()
+        for label, secs in (("试 2 秒", 2), ("试 5 秒", 5), ("试 15 秒", 15), ("全程", 0)):
+            b = QPushButton(label)
+            b.setObjectName("PresetBtn")
+            b.clicked.connect(lambda _=False, s=secs: self._set_interp_range_preset(s))
+            quick.addWidget(b)
+        quick.addStretch()
+        rc.addLayout(quick)
+        self._interp_range_hint = QLabel("将处理：15.0 秒")
+        self._interp_range_hint.setObjectName("MetaBadge")
+        rc.addWidget(self._interp_range_hint)
+        layout.addWidget(range_box)
+        self._interp_start_slider.valueChanged.connect(self._on_interp_range_changed)
+        self._interp_end_slider.valueChanged.connect(self._on_interp_range_changed)
+
+        self._interp_info = QLabel("—")
+        self._interp_info.setObjectName("MetaBadge")
+        layout.addWidget(self._interp_info)
+
+        actions = QHBoxLayout()
+        self._btn_run_interp = QPushButton("开始补帧")
+        self._btn_run_interp.setObjectName("PrimaryBtn")
+        self._btn_run_interp.clicked.connect(self._on_run_interp)
+        self._btn_open_interp = QPushButton("打开结果文件")
+        self._btn_open_interp.setObjectName("GhostBtn")
+        self._btn_open_interp.setEnabled(False)
+        self._btn_open_interp.clicked.connect(self._open_result)
+        self._btn_folder_interp = QPushButton("打开文件夹")
+        self._btn_folder_interp.setObjectName("GhostBtn")
+        self._btn_folder_interp.setEnabled(False)
+        self._btn_folder_interp.clicked.connect(self._open_result_folder)
+        actions.addWidget(self._btn_run_interp)
+        actions.addWidget(self._btn_open_interp)
+        actions.addWidget(self._btn_folder_interp)
+        actions.addStretch()
+        layout.addLayout(actions)
+        layout.addStretch()
 
         scroll.setWidget(body)
         outer.addWidget(scroll)
@@ -552,7 +689,11 @@ class EnhancePage(QWidget):
 
     def _set_busy(self, busy: bool):
         self._busy = busy
-        for btn in (getattr(self, "_btn_run_img", None), getattr(self, "_btn_run_vid", None)):
+        for btn in (
+            getattr(self, "_btn_run_img", None),
+            getattr(self, "_btn_run_vid", None),
+            getattr(self, "_btn_run_interp", None),
+        ):
             if btn:
                 btn.setEnabled(not busy)
 
@@ -573,6 +714,37 @@ class EnhancePage(QWidget):
         max_ms = max(1, int(video.duration_sec * 1000))
         self._start_slider.setValue(0)
         self._end_slider.setValue(max_ms if seconds <= 0 else min(max_ms, seconds * 1000))
+
+    def _set_interp_range_preset(self, seconds: int):
+        """补帧专用区间；默认全程，与超分「试 2 秒」独立。"""
+        video = self._vm.get_app_state().current_video
+        if not video or not getattr(self, "_interp_start_slider", None):
+            return
+        max_ms = max(1, int(video.duration_sec * 1000))
+        self._interp_start_slider.setValue(0)
+        self._interp_end_slider.setValue(
+            max_ms if seconds <= 0 else min(max_ms, seconds * 1000)
+        )
+
+    @Slot()
+    def _on_interp_range_changed(self):
+        video = self._vm.get_app_state().current_video
+        if not video or not getattr(self, "_interp_start_slider", None):
+            return
+        start = self._interp_start_slider.value() / 1000.0
+        end = self._interp_end_slider.value() / 1000.0
+        if end <= start:
+            end = min(video.duration_sec, start + 0.1)
+            self._interp_end_slider.blockSignals(True)
+            self._interp_end_slider.setValue(int(end * 1000))
+            self._interp_end_slider.blockSignals(False)
+        self._interp_start_label.setText(f"{start:.1f}s")
+        self._interp_end_label.setText(f"{end:.1f}s")
+        dur = max(0.0, end - start)
+        full = abs(dur - float(video.duration_sec or 0.0)) < 0.15 and start < 0.05
+        self._interp_range_hint.setText(
+            "将处理：全程" if full else f"将处理：{dur:.1f} 秒（{start:.1f}s → {end:.1f}s）"
+        )
 
     @Slot()
     def _on_import_image(self):
@@ -596,6 +768,9 @@ class EnhancePage(QWidget):
         be = self._img_compare.left_view.load_backend() or "—"
         self._status.setText(f"已导入: {os.path.basename(path)}  ·  解码 {be}")
 
+    def focus_video_tab(self) -> None:
+        self._tabs.setCurrentIndex(1)
+
     @Slot()
     def _on_import_video(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -604,6 +779,29 @@ class EnhancePage(QWidget):
         )
         if path:
             self._vm.import_video(path)
+
+    @Slot()
+    def _on_use_current_video(self):
+        video = self._vm.get_app_state().current_video
+        if not video or not video.file_path:
+            QMessageBox.information(self, "提示", "尚未导入视频，请先在本页或其它功能页导入。")
+            return
+        self.focus_video_tab()
+        self._on_video_loaded(video)
+        self._status.setText(f"已使用当前视频: {os.path.basename(video.file_path)}")
+
+    @Slot()
+    def _on_send_to_watermark(self):
+        if not self._handoff:
+            return
+        path = self._result_path
+        if not path or not os.path.isfile(path):
+            QMessageBox.warning(self, "提示", "请先完成视频超分，再送去去水印。")
+            return
+        if path.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".webp")):
+            QMessageBox.information(self, "提示", "当前结果是图片；请对视频结果使用「送去去水印」。")
+            return
+        self._handoff(path, TAB_WATERMARK)
 
     @Slot(object)
     def _on_video_loaded(self, video):
@@ -614,18 +812,40 @@ class EnhancePage(QWidget):
             f"原片  {video.width}×{video.height}  ·  {video.duration_sec:.1f}s  ·  "
             f"{video.fps:.1f} fps  ·  {self._file_size_mb(video.file_path)}"
         )
+        if getattr(self, "_interp_path_label", None):
+            self._interp_path_label.setText(video.file_path)
+        fps = float(video.fps or 25.0)
+        if getattr(self, "_interp_info", None):
+            self._interp_info.setText(
+                f"{video.width}×{video.height}  ·  源 {fps:.1f} fps  ·  "
+                f"2×→{fps * 2:.0f} / 4×→{fps * 4:.0f}  ·  {self._file_size_mb(video.file_path)}"
+            )
         max_ms = max(1, int(video.duration_sec * 1000))
         for s in (self._preview_slider, self._start_slider, self._end_slider):
             s.blockSignals(True)
             s.setMaximum(max_ms)
             s.blockSignals(False)
         self._start_slider.setValue(0)
-        self._end_slider.setValue(min(max_ms, 2000))
+        self._end_slider.setValue(min(max_ms, 2000))  # 超分默认试 2 秒
         self._on_range_changed()
+        # 补帧默认试 15 秒（与超分区间独立；全程可选手动点「全程」）
+        if getattr(self, "_interp_start_slider", None):
+            for s in (self._interp_start_slider, self._interp_end_slider):
+                s.blockSignals(True)
+                s.setMaximum(max_ms)
+                s.blockSignals(False)
+            self._interp_start_slider.setValue(0)
+            self._interp_end_slider.setValue(min(max_ms, 15000))
+            self._on_interp_range_changed()
         self._refresh_video_preview()
         self._vid_compare.clear_result("超分完成后显示结果首帧")
         self._btn_open_vid.setEnabled(False)
         self._btn_folder_vid.setEnabled(False)
+        if getattr(self, "_btn_send_wm", None):
+            self._btn_send_wm.setEnabled(False)
+        if getattr(self, "_btn_open_interp", None):
+            self._btn_open_interp.setEnabled(False)
+            self._btn_folder_interp.setEnabled(False)
 
     @Slot()
     def _on_preview_slider(self):
@@ -738,6 +958,81 @@ class EnhancePage(QWidget):
         )
 
     @Slot()
+    def _on_use_current_for_interp(self):
+        video = self._vm.get_app_state().current_video
+        if not video or not video.file_path:
+            QMessageBox.information(self, "提示", "尚未导入视频，请先导入。")
+            return
+        self._tabs.setCurrentIndex(2)
+        self._on_video_loaded(video)
+        self._status.setText(f"补帧使用: {os.path.basename(video.file_path)}")
+
+    @Slot()
+    def _on_run_interp(self):
+        video = self._vm.get_app_state().current_video
+        if not video:
+            QMessageBox.warning(self, "提示", "请先导入视频")
+            return
+        factor = 4 if self._interp_x4.isChecked() else 2
+        quality = "quality" if self._interp_q_fine.isChecked() else "fast"
+        start = self._interp_start_slider.value() / 1000.0
+        end = self._interp_end_slider.value() / 1000.0
+        if end <= start:
+            QMessageBox.warning(self, "提示", "请设置有效的处理时间段（终点大于起点）")
+            return
+        dur = end - start
+        full = abs(dur - float(video.duration_sec or 0.0)) < 0.15 and start < 0.05
+        stem = Path(video.file_path).stem
+        out, _ = QFileDialog.getSaveFileName(
+            self, "保存补帧视频",
+            str(Path(video.file_path).with_name(f"{stem}_interp_x{factor}.mp4")),
+            "MP4 (*.mp4);;所有文件 (*.*)",
+        )
+        if not out:
+            return
+        if quality == "quality" and (full or dur > 20):
+            ans = QMessageBox.question(
+                self, "精细模式较慢",
+                "「精细」用运动补偿，可能比「快速」慢很多。\n"
+                "建议先用「快速」或缩短到「试 5 秒」。是否仍用精细？",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if ans != QMessageBox.Yes:
+                return
+        elif full and (video.duration_sec or 0) > 120:
+            ans = QMessageBox.question(
+                self, "全程补帧",
+                f"将处理全程约 {video.duration_sec:.0f} 秒。是否继续？",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if ans != QMessageBox.Yes:
+                return
+        self._result_path = out
+        self._progress.setVisible(True)
+        self._progress.setValue(0)
+        self._set_busy(True)
+        range_txt = "全程" if full else f"{dur:.1f}s"
+        mode_txt = "精细" if quality == "quality" else "快速"
+        self._status.setText(f"补帧处理中（{mode_txt} {factor}x · {range_txt}）…")
+        self._vm.start_interpolate_video(
+            out, factor=factor, start_sec=start, end_sec=end, quality=quality,
+        )
+
+    @Slot(int, str)
+    def _on_interp_finished(self, _task_id: int, output_path: str):
+        self._set_busy(False)
+        self._progress.setValue(100)
+        self._result_path = output_path
+        self._tabs.setCurrentIndex(2)
+        self._btn_open_interp.setEnabled(True)
+        self._btn_folder_interp.setEnabled(True)
+        self._status.setText(f"补帧完成 · {os.path.basename(output_path)}")
+        QMessageBox.information(
+            self, "补帧完成",
+            f"已保存：\n{output_path}\n\n可用首页播放器打开查看流畅度。",
+        )
+
+    @Slot()
     def _open_result(self):
         if not self._result_path or not os.path.isfile(self._result_path):
             QMessageBox.warning(self, "提示", "还没有结果文件")
@@ -809,6 +1104,8 @@ class EnhancePage(QWidget):
         self._tabs.setCurrentIndex(1)
         self._btn_open_vid.setEnabled(True)
         self._btn_folder_vid.setEnabled(True)
+        if getattr(self, "_btn_send_wm", None):
+            self._btn_send_wm.setEnabled(True)
         try:
             fd, frame = tempfile.mkstemp(suffix=".png", prefix="sr_out_")
             os.close(fd)
@@ -831,6 +1128,14 @@ class EnhancePage(QWidget):
         except Exception as e:
             self._vid_compare.clear_result(f"结果已保存，预览失败: {e}")
         self._status.setText(f"完成 · {os.path.basename(output_path)}")
+        tab = ask_video_handoff(
+            self,
+            "超分完成",
+            f"视频已保存：\n{output_path}\n\n可继续送去去水印（无需重新导入）。",
+            [("送去去水印", TAB_WATERMARK)],
+        )
+        if tab is not None and self._handoff:
+            self._handoff(output_path, tab)
 
     @Slot(str)
     def _show_error(self, msg: str):

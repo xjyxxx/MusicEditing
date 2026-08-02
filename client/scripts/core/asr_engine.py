@@ -20,42 +20,82 @@ class AsrSegment:
 ProgressFn = Callable[[float, str], None]
 
 
-def _default_vosk_model() -> Path:
+def is_vosk_model_dir(path: Path | str) -> bool:
+    """目录存在且含 Vosk 模型关键文件（避免把 '.' 或空目录当成模型）。"""
+    p = Path(path) if path else Path()
+    if not p.is_dir():
+        return False
+    # 常见结构：am/final.mdl 或 conf/model.conf
+    markers = (
+        p / "am" / "final.mdl",
+        p / "conf" / "model.conf",
+        p / "graph" / "phones" / "word_boundary.int",
+    )
+    return any(m.is_file() for m in markers)
+
+
+def _looks_like_vosk_model(path: Path) -> bool:
+    return is_vosk_model_dir(path)
+
+
+def resolve_vosk_model_dir(model_dir: Optional[str] = None) -> Path:
+    """解析可用的 Vosk 模型绝对路径；找不到则返回期望的默认路径（可能尚不存在）。"""
     root = Path(__file__).resolve().parent.parent.parent.parent
-    candidates = [
-        root / "models" / "vosk-model-small-cn-0.22",
-        Path(os.environ.get("VOSK_MODEL_PATH", "")),
-        Path.home() / "models" / "vosk-model-small-cn-0.22",
-    ]
+    default = root / "models" / "vosk-model-small-cn-0.22"
+    candidates: List[Path] = []
+
+    if model_dir and str(model_dir).strip():
+        candidates.append(Path(str(model_dir).strip()).expanduser())
+
+    env = (os.environ.get("VOSK_MODEL_PATH") or "").strip()
+    if env:
+        candidates.append(Path(env).expanduser())
+
+    candidates.append(default)
+    candidates.append(Path.home() / "models" / "vosk-model-small-cn-0.22")
+
     for p in candidates:
-        if p and p.is_dir():
-            return p
-    return candidates[0]
+        try:
+            resolved = p.resolve()
+        except OSError:
+            continue
+        # 拒绝裸 '.' / 当前工作目录冒充模型
+        if resolved == Path.cwd().resolve() and not _looks_like_vosk_model(resolved):
+            continue
+        if _looks_like_vosk_model(resolved):
+            return resolved
+    return default.resolve()
 
 
 class AsrEngine:
     """Vosk 离线 ASR，输出带时间戳的句段"""
 
     def __init__(self, model_dir: Optional[str] = None):
-        self._model_dir = Path(model_dir) if model_dir else _default_vosk_model()
+        self._model_dir = resolve_vosk_model_dir(model_dir)
         self._model = None
+
+    @property
+    def model_dir(self) -> Path:
+        return self._model_dir
 
     def is_available(self) -> bool:
         try:
             import vosk  # noqa: F401
         except ImportError:
             return False
-        return self._model_dir.is_dir()
+        return _looks_like_vosk_model(self._model_dir)
 
     def _ensure_model(self):
         if self._model is not None:
             return
         from vosk import Model, SetLogLevel
         SetLogLevel(-1)
-        if not self._model_dir.is_dir():
+        if not _looks_like_vosk_model(self._model_dir):
             raise FileNotFoundError(
-                f"未找到 Vosk 模型目录: {self._model_dir}\n"
-                "请下载 vosk-model-small-cn-0.22 并解压到项目 models/ 目录"
+                f"未找到有效的 Vosk 模型目录: {self._model_dir}\n"
+                "请下载 vosk-model-small-cn-0.22 并解压到项目 models/ 目录，"
+                "或在 app.conf 设置 vosk_model_dir=绝对路径。\n"
+                "无模型时可用「游戏高光」规则分析，或使用「手动切片」。"
             )
         self._model = Model(str(self._model_dir))
 
@@ -152,4 +192,6 @@ class AsrEngine:
                 for s in segments
             ]
         }
-        Path(json_path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        Path(json_path).write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )

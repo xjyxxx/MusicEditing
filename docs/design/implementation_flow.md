@@ -426,7 +426,7 @@ GPU 在本产品中承担 **AI 推理** 与 **视频硬解码** 两类加速目�
 | **首页播放器解码** | D3D11VA + GPU→CPU 拷贝 | ✅ x64 已实现 | `VideoPlayerEngine` + `ffmpeg_hwaccel.cpp` |
 | **离线批处理解码** | `VideoDecoder` D3D11VA | ✅ x64 已实现 | `preferHwaccel` / `media_cli iterate --hw`；失败回退 CPU |
 | **OpenCV 帧滤镜** | CPU `cv::Mat` | CPU 运行 | 硬解后在 CPU 做 CLAHE 等，与硬解串联 |
-| **Vosk ASR** | CPU 推理 | ❌ 未启用 | 智能切片转写阶段 |
+| **Vosk ASR** | CPU 推理 | ✅ 可选 | `download_vosk_model.bat`；无模型时人声段兜底 |
 | **llama.cpp 高光分析** | CPU（`n_gpu_layers=0`） | ⏳ 接口已有 | 需 `GGML_CUDA=ON` 编译 + 传入层数 |
 | **去水印 LaMa** | ONNX Runtime + OpenCV | ✅ CPU EP（默认） | 已移除项目内 `cuda_runtime`；可选 `MUSIC_ORT_CUDA=1` |
 | **4K 超分** | Real-ESRGAN ONNX + OpenCV | ✅ CPU EP（默认） | 2× 半分辨率快路径 + tile=384；CUDA 需系统 CUDA 12 运行库（`cublasLt64_12.dll` 等） |
@@ -766,7 +766,8 @@ loop av_read_frame:
 sws_freeContext / av_free / av_frame_free
 ```
 
-- **Seek 参数**：此处用 `videoStreamIndex` + `AV_TIME_BASE`；播放器 `VideoPlayerEngine::seek` 则用 `stream_index=-1`（全局时间基），二者等价场景不同，详见 `player_decode_flow.md`。
+- **Seek 参数**：与播放器一致，对 `videoStreamIndex` 使用 `av_rescale_q(sec*AV_TIME_BASE, AV_TIME_BASE_Q, stream->time_base)`；失败再回退 `stream_index=-1`。勿把 `AV_TIME_BASE` 秒值直接当一流时间戳（会导致靠后时刻抽到黑帧）。
+- **取帧**：seek 后可多解若干帧，跳过近黑/未就绪帧；RGB 按 `linesize` 收成紧凑缓冲。
 - **缓冲区**：调用方必须提供 `width × height × 3` 字节；`media_extract_thumbnail` C API 负责分配/校验。
 
 #### 4.1.8 与 C API / CLI 的对应关系
@@ -775,7 +776,7 @@ sws_freeContext / av_free / av_frame_free
 |---------------------------|-------------------|------------------|
 | `media_probe_video` | `open` → 读 `info()` → `close`（析构） | `probe <path>` |
 | `media_iterate_frames(..., preferHw)` | `open(path, hw)` → `iterateFrames` | `iterate <path> [maxFrames] [--hw]` |
-| `media_extract_thumbnail(..., preferHw)` | `open(path, hw)` → `extractThumbnail` | （API 已有，CLI 未单独暴露） |
+| `media_extract_thumbnail(..., preferHw)` | `open(path, hw)` → `extractThumbnail` | `thumbnail <path> <sec> <out.ppm> [--hw] [--max-w N]` |
 | `media_decoder_hwaccel_name` | `isHwAccelActive` | stderr `DECODE_HW:d3d11va\|cpu` |
 
 每次 CLI 调用都会 **新建一个 `VideoDecoder` 实例**，`open` 处理完即销毁，**不跨命令复用解码器**。
@@ -837,6 +838,24 @@ media_cli iterate <path> [maxFrames] [--hw]
 
 `MediaBridge.iterate_frames`：当 `prefer_hw_decode`（默认跟随 `AppLogic`）为真时自动追加 `--hw`。
 
+**thumbnail 命令：**
+```
+media_cli thumbnail <path> <timestamp_sec> <output.ppm> [--hw] [--max-w 160]
+→ stderr:
+  DECODE_HW:d3d11va   # 或 cpu
+→ stdout:
+  THUMBNAIL_OK
+  width=160
+  height=90
+  src_width=1920
+  src_height=1080
+  timestamp=12.500000
+  output=<path>
+```
+
+流程：`probe` 取分辨率 → `media_extract_thumbnail` 解 RGB24 → 可选最近邻缩到 `--max-w` → 写二进制 PPM（无新库）。  
+`MediaBridge.extract_thumbnail` 默认缓存到 `%TEMP%/MusicEditing/thumbs/`（`core/thumbnail_cache.py`），视频未改则复用。
+
 **upscale 命令：**
 ```
 media_cli upscale <model.onnx|-> <输入图> <输出图> [scale=2|4]
@@ -865,32 +884,68 @@ media_cli upscale-frames <model.onnx|-> <输入帧目录> <输出帧目录> [sca
 
 ---
 
-### 5.1 智能切片完整链路（演讲/解说类 — 已落地）
+### 5.1 智能切片完整链路（演讲金句等 — 已落地）
 
 对应产品文档 4.2 节。**场景：演讲金句、日常精彩片段、自定义识别**
 
 ```
-用户点击「AI 智能分析」
+用户点击「AI 智能分析」（场景=演讲金句）
   │
   ▼
-MainViewModel.start_slice_analysis()
-  → 判断 scene ∈ {演讲金句, 日常精彩片段, 自定义识别}
+MainViewModel.start_slice_analysis()  [后台线程]
   → _analyze_speech_pipeline()
-      │
-      ├─ 1. media_cli extract-audio  → FFmpeg 抽 16kHz WAV
-      ├─ 2. AsrEngine (Vosk)         → 带时间戳文稿 JSON
-      ├─ 3. media_cli analyze-speech → llama.cpp 语义选段（无模型则规则兜底）
-      └─ emit highlightsReady
+      ├─ extract-audio → 16kHz WAV
+      ├─ 有 Vosk：ASR → analyze-speech（LLM 或 C++ 金句规则）
+      │         失败则 Python speech_highlights.score_transcript
+      └─ 无 Vosk：silencedetect 人声段 → clips_from_speech_ranges
+  → highlightsReady → SlicePage 时间轴/列表
+  → SlicePage 后台抽各段中点缩略图 → 时间轴胶片条 + 列表图标
+```
+
+| 资源 | 路径 |
+|------|------|
+| 金句规则 | `client/scripts/core/speech_highlights.py` |
+| Vosk 下载 | `scripts/download_vosk_model.bat` → `models/vosk-model-small-cn-0.22/` |
+| C++ 规则加权 | `highlight_analyzer.cpp` fallbackAnalyze |
+| 缩略图 | 见 §5.1.1 |
+
+**Vosk：** `resolve_vosk_model_dir` 校验 `am/final.mdl`；勿把空路径当成 `.`。无模型时演讲金句仍可用（人声段兜底），完整「听懂金句」需下载模型。
+
+### 5.1.1 高光缩略图时间轴（产品 4.2「缩略图+时间轴」）
+
+对应产品文档：分析完成后展示所有高光片段的**缩略图 + 时间轴**。
+
+```
+highlightsReady(segments)
   │
   ▼
-SlicePage 列表展示 [起止时间 + 得分]
+SlicePage._on_highlights
+  → HighlightTimelineWidget.set_segments（色块）
+  → 列表文字项
+  → 后台线程：对每段 midpoint
+        MediaBridge.extract_thumbnail(video, mid, max_width=160)
+          → media_cli thumbnail … [--hw]
+              → media_extract_thumbnail → PPM（可缩放）
+          → thumbnail_cache（%TEMP%/MusicEditing/thumbs/）
+  → thumbnailReady → 时间轴胶片 + QListWidget 图标
 ```
+
+| 资源 | 路径 |
+|------|------|
+| CLI | `media_cli thumbnail`（`client/src/media_cli.cpp`） |
+| C API | `media_extract_thumbnail` / `VideoDecoder::extractThumbnail` |
+| Bridge | `MediaBridge.extract_thumbnail` |
+| 缓存 | `client/scripts/core/thumbnail_cache.py` |
+| UI | `HighlightTimelineWidget`（色块 + 缩略图条）+ 切片页列表图标 |
+| 模型字段 | `HighlightSegment.thumbnail_path` |
+
+**说明：** 不引入新第三方库；输出 PPM（Qt `QPixmap` 可直接加载）。硬解跟随 `prefer_hw_decode`（`--hw`）。手动增删片段后同样会重新拉缩略图。
 
 **依赖配置**（`client/resources/config/app.conf`）：
 
 | 键 | 说明 |
 |----|------|
-| `vosk_model_dir` | Vosk 中文模型目录，默认 `models/vosk-model-small-cn-0.22` |
+| `vosk_model_dir` | Vosk 中文模型**绝对路径**（含 `am/final.mdl`）；留空自动探测，勿填 `.` |
 | `llm_model_path` | `.gguf` 模型路径；留空则 ASR + 规则打分 |
 
 ### 5.2 游戏高光（占位）
@@ -1054,6 +1109,78 @@ View: VideoPlayerWidget
 
 **当前限制：** 仅外挂文件，不抽内嵌轨；ASS 只取文本时间轴，不渲染样式/特效。
 
+### 5.10 三大功能串联（一站式剪辑，异步）
+
+对应产品文档 §5。任意一页 `import_video` 写入 `AppState.current_video`，其它页经 `videoLoaded` 同步；**结果接力**通过 `MainWindow.open_with_video(path, tab)`。
+
+**线程约定：** 重活在后台 `threading.Thread`；UI 只在主线程经 Qt Signal（Queued）更新。
+
+| 操作 | 线程 |
+|------|------|
+| `import_video`（probe） | 后台 → `videoLoaded` |
+| `start_slice_analysis` | 后台 → `progressUpdated` / `highlightsReady` |
+| 超分 / 去水印 / 导出高光 / 静音剪掉 | 已后台 |
+| `open_with_video` 切 Tab | 主线程（先切页再异步 import） |
+
+```
+切片「一键高光成片 / 静音剪掉」完成（后台）
+  → 主线程弹窗「送去超分 / 送去去水印」
+  → open_with_video：先切 Tab，再异步 import_video(成片)
+
+去水印完成（视频）→「送去超分」
+超分完成（视频）→「送去去水印」
+
+各页按钮：「用当前视频」「送去超分」「送去去水印」
+```
+
+| 资源 | 路径 |
+|------|------|
+| 编排 | `MainWindow.open_with_video` |
+| 弹窗 | `ui/workflow_link.py` |
+| 触发 | `SlicePage` / `EnhancePage` / `WatermarkPage` |
+
+**当前限制：** 未做「自动切片+超分+去水印」无人值守批量队列；单片段高光仍以合并成片为主接力。
+
+### 5.11 视频补帧（FFmpeg minterpolate，与超分并列）
+
+对应画质增强能力：把源帧率按 2× / 4× 提升（如 30→60fps），无需额外 AI 模型。
+
+```
+用户：画质增强 → Tab「视频补帧」→ 选倍率 → 开始补帧
+  │
+  ▼
+View: EnhancePage._on_run_interp()
+  → 与「视频超分」共用起点/终点滑条（start_sec / end_sec）
+  → MainViewModel.start_interpolate_video（后台线程）
+      → MediaBridge.interpolate_video
+          → third_party/ffmpeg …/ffmpeg.exe
+              -vf minterpolate=fps=<源fps×倍率>:mi_mode=mci:…
+              （MCI 失败则 mi_mode=blend）
+              + 项目默认视频编码器 + AAC 音频
+  → emit interpolateProgress / interpolateFinished
+  │
+  ▼
+View 更新进度，可打开结果文件 / 文件夹
+```
+
+| 资源 | 路径 |
+|------|------|
+| UI | `EnhancePage` 第三 Tab「视频补帧」 |
+| ViewModel | `MainViewModel.start_interpolate_video`（`TaskType.INTERPOLATE`） |
+| Bridge | `MediaBridge.interpolate_video` |
+| 引擎 | 项目自带 FFmpeg（`third_party/ffmpeg/{x64\|x86}/bin`） |
+| 滤镜 | `minterpolate`：优先 `mi_mode=mci`（运动补偿），失败回退 `blend` |
+| 依赖 | 仅 FFmpeg，无 PyTorch / ONNX / 外部权重 |
+
+**参数：**
+- `factor`：`2` 或 `4`（UI 单选）
+- `quality`：`fast`（默认，`mi_mode=blend`，快）/ `quality`（MCI 运动补偿，慢）
+- `start_sec` / `end_sec`：补帧页独立区间，**默认试 15 秒**（与超分「试 2 秒」无关；可改全程）
+- 编码：快速约 6Mbps；精细约 12Mbps（`h264_mf`）
+- 输出默认建议名：`{原名}_interp_x{factor}.mp4`
+
+**当前限制：** MCI 精细模式对长片极慢；blend 更快但运动不如 MCI 顺。插帧+重编码会柔化细节。未接入 AI 补帧。
+
 ---
 
 ## 6. 原 §5 智能切片（旧描述保留参考）
@@ -1086,6 +1213,9 @@ CMakeLists.txt (顶层)
 Python 模块依赖
 main.py
 └── ui/main_window.py
+    ├── ui/highlight_timeline.py   (高光色块 + 缩略图条)
+    ├── core/thumbnail_cache.py    (缩略图 PPM 缓存)
+    ├── core/time_format.py        (m:ss / 区间格式化)
     ├── ui/video_player.py
     │   ├── core/player_backend.py  (subprocess → media_player.exe)
     │   ├── core/subtitle_track.py  (外挂 SRT/VTT/ASS)
@@ -1096,7 +1226,7 @@ main.py
     └── viewmodels/main_vm.py
         ├── models/video_model.py
         ├── core/app_logic.py      (GPU 检测)
-        └── core/media_bridge.py   (subprocess → media_cli.exe)
+        └── core/media_bridge.py   (subprocess → media_cli / FFmpeg；含 interpolate_video 补帧)
 ```
 
 ---
@@ -1107,7 +1237,12 @@ main.py
 |------|------|------|
 | FFmpeg 视频打开/探测 | ✅ | VideoDecoder + probe |
 | 视频帧遍历 | ✅ | iterateFrames + CLI |
-| 缩略图提取 | ✅ | extractThumbnail（API 已有，UI 未接） |
+| 缩略图提取 | ✅ | `media_cli thumbnail` + `MediaBridge.extract_thumbnail` + 磁盘小图缓存 |
+| 高光时间轴（缩略图） | ✅ | `HighlightTimelineWidget` 色块+胶片条；列表带图标；见 §5.1.1 |
+| 三大功能串联 | ✅ | `open_with_video` + 完成弹窗/「送去」；批量全流程队列 ⏳ |
+| 切片/导入异步 | ✅ | `import_video` / `start_slice_analysis` 后台线程；UI 收 Signal |
+| 手动切片 | ✅ | SlicePage 起止时间添加/删除/清空；不依赖 Vosk |
+| 视频补帧 | ✅ | EnhancePage「视频补帧」：FFmpeg minterpolate（MCI→blend），无额外模型 |
 | PySide6 多标签 UI | ✅ | 首页/切片/画质增强/去水印/热评滚动；个人中心占位 |
 | 网易云热评滚动 | ✅ | `HotCommentsPage` + 外部爬虫脚本协议；默认演示数据 |
 | 首页本地播放器 | ✅ | FFmpeg 视频 + Qt 音乐；OpenGL 显示；**点击画面暂停/继续** |
@@ -1119,7 +1254,7 @@ main.py
 | GPU 检测与状态栏 | ✅ | `nvidia-smi`；顶栏 `GPU: 型号` / `CPU 模式`（§3.6） |
 | FFmpeg GPU 硬解（D3D11VA） | ✅ | 播放器 + `VideoDecoder`/`iterate --hw`；失败回退 CPU |
 | llama.cpp GPU 推理 | ⏳ | `n_gpu_layers` 接口已有，默认 0；需 `GGML_CUDA=ON` |
-| AI 高光识别（演讲/解说） | ✅ | Vosk ASR + llama.cpp / 规则兜底 |
+| AI 高光识别（演讲/解说） | ✅ | 演讲金句：Vosk+LLM/金句词；无人声模型时人声段兜底 |
 | AI 高光识别（游戏） | ⏳ | 规则兜底，视觉模型待接入 |
 | 批量导出剪辑 | ✅ | `一键高光成片` → 分片 + `highlights_merged.mp4`（ffmpeg） |
 | 静音剪掉 | ✅ | `静音剪掉` → silencedetect + 拼接紧凑口播 |
@@ -1229,4 +1364,5 @@ x64 构建后 Python 可逐步改为 **ctypes 直接加载** `media_engine.dll`�
 .\scripts\download_realesrgan_model.bat    # 画质超分模型（~5MB）
 .\scripts\download_yt_dlp.bat              # 链接下载引擎 yt-dlp.exe → third_party/yt-dlp/
 .\scripts\download_exiftool.bat            # 图片 EXIF：exiftool.exe + exiftool_files → third_party/exiftool/
+.\scripts\download_vosk_model.bat          # 演讲金句 ASR：vosk-model-small-cn-0.22 → models/
 ```
