@@ -4,10 +4,16 @@
 
 ## 功能模块
 
-- **智能高光切片**：长视频自动识别精彩片段
-- **画质增强 / 4K 超分**：1080P 升级 4K（预留 AI 模型接口）
+- **智能高光切片**：演讲金句（Vosk/规则）/ 手动切片；**缩略图时间轴**
+- **画质增强**：Real-ESRGAN / OpenCV 超分；**FFmpeg 视频补帧**（快速 blend / 精细 MCI）
 - **一键去水印**：视频快速(OpenCV) / 图片精修(LaMa)；帧批复用
+- **链接下载 / 外挂字幕 / 热评滚动** 等（详见技术文档）
 - **个人中心**：授权管理（预留）
+
+## 技术文档
+
+- 主文档：[docs/design/implementation_flow.md](docs/design/implementation_flow.md)
+- 索引：[docs/design/README.md](docs/design/README.md)
 
 ## 环境要求
 
@@ -104,16 +110,14 @@ MusicEditing/
 
 ## 架构说明
 
-采用 **MVVM** 双向绑定模式：
+采用 **MVVM**；Python（64-bit）经 **子进程** 调用 C++ `media_cli` / `media_player`（及捆绑 ffmpeg），详见 [docs/design/implementation_flow.md](docs/design/implementation_flow.md) §1。
 
 | 层 | 技术 | 职责 |
 |---|---|---|
 | Model | Python dataclass | 视频信息、任务队列、参数 |
 | ViewModel | PySide6 QObject + Signal/Property | 业务逻辑、状态绑定 |
 | View | PySide6 Widgets | 界面展示、用户交互 |
-| 底层引擎 | C++ media_engine.dll | FFmpeg 解码、帧遍历 |
-
-Python 通过 `ctypes` 调用 `media_engine.dll` 的 C API，无需额外绑定库。
+| 底层引擎 | C++ media_engine / media_cli / media_player | 解码、缩略图、超分/去水印、播放 |
 
 ## 版权与许可证
 
@@ -123,6 +127,6 @@ Python 通过 `ctypes` 调用 `media_engine.dll` 的 C API，无需额外绑定�
 
 ## 开发说明
 
-- C++ 使用 FFmpeg 2.x/3.x 旧版 API（与提供的 .lib 版本匹配）
-- AI 推理模块（PyTorch/CUDA）接口已预留，当前切片分析为帧遍历 + 模拟片段
-- 后续可在 `client/src/core/` 扩展 GPU 加速和 AI 模型调用
+- 功能变更请同步更新 `docs/design/implementation_flow.md`（§5 链路、§7 状态）
+- x64 为推荐开发/运行路径；Win32 旧 API 兼容见文档 §4
+- 播放器细节见 `docs/design/player_decode_flow.md`

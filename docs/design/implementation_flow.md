@@ -1,31 +1,51 @@
-# AI 本地音视频处理工具 — 软件实现流程说明
+# MusicEditing — 软件实现流程说明
 
-> 本文档描述当前代码的实际实现链路，对应产品交互文档中的功能设计。
+> **定位**：描述仓库**当前代码**的实现链路（非产品愿景稿）。  
+> **产品对照**：[AI本地音视频处理工具-产品交互设计文档（开发落地版）.md](../../AI本地音视频处理工具-产品交互设计文档（开发落地版）.md)  
+> **文档索引**：[docs/design/README.md](README.md)  
+> **维护规则**：改功能时同步更新本文（见 `.cursor/skills/music-editing-feature-docs/`）。
+
+---
+
+## 目录
+
+| 章 | 内容 |
+|----|------|
+| [§1 总体架构](#1-总体架构) | 双层架构、编译产物 |
+| [§2 构建与启动](#2-构建与启动流程) | x64 / Win32、启动退出 |
+| [§3 MVVM](#3-mvvm-分层实现) | Model / VM / View、播放器、OpenCV、去水印/超分、GPU |
+| [§4 C++ 引擎](#4-c-媒体引擎实现流程) | VideoDecoder、C API、CLI 协议 |
+| [§5 业务链路](#5-业务功能链路) | 5.1 切片 · 5.1.1 缩略图时间轴 · 5.4 超分 · 5.10 补帧 · … |
+| [§6 模块依赖](#6-模块间依赖关系) | CMake / Python 树 |
+| [§7 状态表](#7-已实现-vs-待实现) | ✅ / ⏳ |
+| [§8 llama.cpp](#8-llamacpp-集成说明) | 目录与 CMake |
+| [§9 扩展指南](#9-扩展接入指南) | 扩展与路线图 |
+| [§10 命令速查](#10-运行命令速查) | bat / 脚本 |
+
+**相关专文：** [player_decode_flow.md](player_decode_flow.md)（播放解码）· [../流程图/README.md](../流程图/README.md)
+
+> **§3 阅读顺序提示：** 文中标题顺序为 3.1–3.5（滤镜）→ **3.7 去水印** → **3.8 超分** → **3.6 GPU**（历史插入顺序，以标题号为准）。
 
 ---
 
 ## 1. 总体架构
 
-软件采用 **C++ 底层 + Python UI** 双层架构，中间通过 **子进程 CLI** 通信（解决 64 位 Python 与 32 位 FFmpeg 库的位数不匹配问题）。
+**C++ 媒体引擎 + Python/PySide6 UI**；Python 经 **MediaBridge / PlayerBackend 子进程**调用 `media_cli.exe`、`media_player.exe` 与捆绑 `ffmpeg.exe`（stdout=协议，stderr=日志）。
+
+日常推荐 **x64**（`build_x64.bat` + `run_ui_x64.bat`）。
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Python 客户端 (64-bit)                    │
-│  ┌─────────┐   ┌──────────────┐   ┌─────────────────────┐  │
-│  │  View   │◄─►│  ViewModel   │◄─►│  Model (dataclass)  │  │
-│  │ PySide6 │   │ MainViewModel│   │ VideoModel/Task...  │  │
-│  └─────────┘   └──────┬───────┘   └─────────────────────┘  │
-│                       │                                      │
-│                ┌──────▼───────┐                              │
-│                │ MediaBridge  │  subprocess                  │
-│                └──────┬───────┘                              │
-└───────────────────────┼─────────────────────────────────────┘
-                        │ stdout/stderr 文本协议
-┌───────────────────────▼─────────────────────────────────────┐
-│                 C++ 媒体引擎 (32-bit Win32)                  │
-│  media_cli.exe ──► media_engine.dll ──► VideoDecoder        │
-│                           │                                  │
-│                    FFmpeg (avcodec/avformat/swscale)         │
+│                 Python 客户端 (64-bit PySide6)               │
+│  View  ◄──►  MainViewModel  ◄──►  models (dataclass)         │
+│                    │                                         │
+│         MediaBridge / PlayerBackend / FFmpeg 封装            │
+└────────────────────┼────────────────────────────────────────┘
+                     │ subprocess
+┌────────────────────▼────────────────────────────────────────┐
+│  media_cli / media_player  →  media_engine.dll               │
+│  VideoDecoder · 播放器 · 超分/去水印 ONNX（可选）              │
+│  FFmpeg · OpenCV · ONNX Runtime ·（可选）llama               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -33,10 +53,11 @@
 
 | 文件 | 作用 |
 |------|------|
-| `media_shared.lib` | 公共静态库（日志、工具、配置） |
-| `media_engine.dll` | FFmpeg 封装，导出 C API |
-| `media_cli.exe` | 命令行入口，供 Python 子进程调用 |
-| `media_engine_test.exe` | C++ 独立测试程序 |
+| `media_shared.lib` | 公共静态库（日志、路径、硬解辅助等） |
+| `media_engine.dll` | 探测 / 遍历 / 缩略图 / 超分·去水印 C API |
+| `media_cli.exe` | CLI（Python 批处理入口） |
+| `media_player.exe` | 首页播放器子进程 |
+| `media_engine_test.exe` | C++ 冒烟测试 |
 
 ---
 
@@ -44,30 +65,28 @@
 
 ### 2.1 编译流程
 
-**Win32（默认）**
+**x64（推荐）**
+
+```
+scripts/setup_ffmpeg_x64.bat   # 首次：FFmpeg → third_party/ffmpeg/x64/
+build_x64.bat  →  cmake -A x64  →  build_x64/bin/Release
+                  OpenCV/ONNX：third_party/opencv|onnxruntime/x64/
+```
+
+**Win32**
 
 ```
 build.bat  →  cmake -A Win32  →  build/bin/Release
               FFmpeg: third_party/ffmpeg/x86/
-              OpenCV: D:/APP/opencv/build_x86
+              OpenCV: third_party/opencv/x86/（需 import）
 ```
 
-**x64**
+Presets：`CMakePresets.json` → `windows-x64-release` / `windows-win32-release`。
 
-```
-scripts/setup_ffmpeg_x64.bat   # 首次：下载 FFmpeg 到 third_party/ffmpeg/x64/
-build_x64.bat  →  cmake -A x64  →  build_x64/bin/Release
-                  FFmpeg: third_party/ffmpeg/x64/
-                  OpenCV: D:/APP/opencv/build
-```
-
-Presets 见 `CMakePresets.json`：`windows-win32-release` / `windows-x64-release`。
-
-**关键点：**
-- FFmpeg **分目录**：Win32 用 `third_party/ffmpeg/x86/`，x64 用 `third_party/ffmpeg/x64/`
-- GLEW（OpenGL 扩展加载器）在 `third_party/opengl/{x64|x86}/`（`glew32.lib` + `glew32.dll`），系统另链 `opengl32`
-- 两套构建输出互不覆盖（`build/` vs `build_x64/`）
-- Python 客户端始终 64-bit；C++ 引擎架构与 FFmpeg/OpenCV 一致
+**要点：**
+- 第三方库按 `{x64|x86}` 分目录，详见各 `third_party/*/README.md`
+- `build/` 与 `build_x64/` 互不覆盖
+- Python 始终 64-bit；C++ 与第三方库架构一致
 
 ### 2.2 启动与退出
 
@@ -78,7 +97,7 @@ run_ui.bat / python client/scripts/main.py
   ├─ MainViewModel（AppLogic GPU 检测、MediaBridge）
   ├─ detect_gpu_info() → 状态栏显示 GPU: 型号 或 CPU 模式
   ├─ 无 NVIDIA GPU 时弹窗提示 CPU 模式（见 §3.6）
-  └─ 显示 5 标签页，进入事件循环
+  └─ 显示多标签页（首页/切片/增强/去水印/热评/下载等），进入事件循环
 ```
 
 **退出（关闭窗口）：**
@@ -101,8 +120,8 @@ MainWindow.shutdown()
 | 类型 | 字段/用途 |
 |------|-----------|
 | `VideoModel` | 文件路径、分辨率、时长、帧率、编码 |
-| `TaskModel` | 任务 ID、类型、状态、进度 |
-| `HighlightSegment` | 高光起止时间、得分、是否选中 |
+| `TaskModel` | 任务 ID、类型（含 `INTERPOLATE`）、状态、进度 |
+| `HighlightSegment` | 起止时间、得分、是否选中、`thumbnail_path` |
 | `SliceParams` | 场景、最短/最长片段、敏感度 |
 | `AppState` | 全局状态容器 |
 
@@ -126,7 +145,9 @@ MainWindow.shutdown()
 | `start_slice_analysis()` | SlicePage「AI 智能分析」 |
 | `start_watermark_image(...)` / `start_watermark_video(...)` | WatermarkPage「开始去水印」 |
 | `start_enhance_image(...)` / `start_enhance_video(...)` | EnhancePage「开始超分」 |
+| `start_interpolate_video(...)` | EnhancePage「视频补帧」 |
 | `import_image(path)` | 图片去水印 / 超分导入 |
+| `add_manual_highlight` / `remove_highlight_at` / `clear_highlights` | 手动切片 |
 | `update_watermark_range(start, end)` | 视频去水印时间段 |
 | `update_enhance_range(start, end)` | 视频超分时间段 |
 | `update_slice_params(...)` | 参数滑块变更 |
@@ -136,13 +157,13 @@ MainWindow.shutdown()
 
 | 页面 | 类 | 状态 |
 |------|-----|------|
-| 首页 | `HomePage` + `VideoPlayerWidget` | 本地预览播放器 + 功能卡片导航 |
-| 智能切片 | `SlicePage` | **已实现完整交互** |
-| 画质增强 | `EnhancePage` + `ExifPanel` | **图片/视频超分**；导入图片显示 ExifTool 元数据 |
-| 去水印 | `WatermarkPage` + `RegionSelectorWidget` + `ExifPanel` | **图片/视频去水印**；导入图片显示 EXIF |
-| 热评滚动 | `HotCommentsPage` | **独立 Tab**：输入歌曲链接/ID → 热评滚动叠加播放器 |
-| 链接下载 | `DownloadPage` | **粘贴 URL → yt-dlp 下视频/音频 → 首页播放** |
-| 个人中心 | `PlaceholderPage` | 占位，待接入授权 |
+| 首页 | `HomePage` + `VideoPlayerWidget` | 本地预览 + 功能卡片 |
+| 智能切片 | `SlicePage` + `HighlightTimelineWidget` | 分析 / 手动切片 / 缩略图时间轴 / 成片 |
+| 画质增强 | `EnhancePage` + `ExifPanel` | 图片超分 · 视频超分 · **视频补帧** |
+| 去水印 | `WatermarkPage` + `RegionSelectorWidget` + `ExifPanel` | 图片/视频去水印 + EXIF |
+| 热评滚动 | `HotCommentsPage` | 歌曲链接/ID → 热评滚动 |
+| 链接下载 | `DownloadPage` | yt-dlp 下载 → 可送首页播放 |
+| 个人中心 | `PlaceholderPage` | 占位（授权待接入） |
 
 播放器组件：`client/scripts/ui/video_player.py`（`GlVideoWidget` OpenGL + `PlayerBackend` → `media_player.exe`）
 
@@ -884,6 +905,10 @@ media_cli upscale-frames <model.onnx|-> <输入帧目录> <输出帧目录> [sca
 
 ---
 
+## 5. 业务功能链路
+
+按产品功能组织的端到端链路（UI → ViewModel → Bridge / CLI / FFmpeg）。
+
 ### 5.1 智能切片完整链路（演讲金句等 — 已落地）
 
 对应产品文档 4.2 节。**场景：演讲金句、日常精彩片段、自定义识别**
@@ -983,11 +1008,8 @@ HotCommentsPage
 
 试例歌曲（晴天）：`186016` 或 `https://music.163.com/#/song?id=186016`
 
-### 5.3 原模拟链路（已替换）
 
-~~`_simulate_highlights()` 均匀切分~~ → 演讲类走 ASR+LLM，游戏类仍用规则兜底。
-
-### 5.4 media_cli 新增命令（§4.3 补充）
+### 5.3 media_cli 新增命令（§4.3 补充）
 
 **extract-audio：**
 ```
@@ -1002,7 +1024,7 @@ media_cli analyze-speech <transcript.json> <model.gguf> <场景> <最短> <最�
 → HIGHLIGHT|12.500|18.000|0.850
 ```
 
-### 5.5 画质增强 / 超分完整链路
+### 5.4 画质增强 / 超分完整链路
 
 对应产品文档 4.3 节。
 
@@ -1023,7 +1045,7 @@ View 更新进度与结果预览
 
 **当前限制：** 视频 AI 超分较慢。对比区左原图 / 右超分结果，中间 1px 细线；滚轮缩放当前侧，Ctrl+滚轮两侧同步；拖拽平移。预览经 `image_loader`（OpenCV 解码）；显示为不透明底软件合成，避免缩小时残影。
 
-### 5.6 一键高光成片 / 静音剪掉
+### 5.5 一键高光成片 / 静音剪掉
 
 ```
 SlicePage「一键高光成片」
@@ -1043,7 +1065,7 @@ SlicePage「静音剪掉」
 
 优先走捆绑 `ffmpeg.exe`，无需新 C++ CLI。静音阈值默认 `-35dB`、最短静音 `0.45s`。
 
-### 5.7 链接下载（yt-dlp）
+### 5.6 链接下载（yt-dlp）
 
 ```
 DownloadPage（内嵌 Tab）
@@ -1068,7 +1090,7 @@ B 站等 DASH：**仅画面**格式播放时会自动 `format+bestaudio` 合并�
 
 **注意：** 仅下载自有/授权素材；站点规则变化时更新 yt-dlp 即可。
 
-### 5.8 图片 EXIF（ExifTool）
+### 5.7 图片 EXIF（ExifTool）
 
 ```
 EnhancePage / WatermarkPage 导入图片
@@ -1085,7 +1107,7 @@ EnhancePage / WatermarkPage 导入图片
 
 **注意：** 复制到 `bin/Release` 时必须同时复制 `exiftool_files`。
 
-### 5.9 外挂字幕（播放器叠加）
+### 5.8 外挂字幕（播放器叠加）
 
 对应产品：本地播放时显示字幕。
 
@@ -1109,7 +1131,7 @@ View: VideoPlayerWidget
 
 **当前限制：** 仅外挂文件，不抽内嵌轨；ASS 只取文本时间轴，不渲染样式/特效。
 
-### 5.10 三大功能串联（一站式剪辑，异步）
+### 5.9 三大功能串联（一站式剪辑，异步）
 
 对应产品文档 §5。任意一页 `import_video` 写入 `AppState.current_video`，其它页经 `videoLoaded` 同步；**结果接力**通过 `MainWindow.open_with_video(path, tab)`。
 
@@ -1141,56 +1163,32 @@ View: VideoPlayerWidget
 
 **当前限制：** 未做「自动切片+超分+去水印」无人值守批量队列；单片段高光仍以合并成片为主接力。
 
-### 5.11 视频补帧（FFmpeg minterpolate，与超分并列）
+### 5.10 视频补帧（FFmpeg minterpolate）
 
-对应画质增强能力：把源帧率按 2× / 4× 提升（如 30→60fps），无需额外 AI 模型。
+对应画质增强 Tab「视频补帧」：2× / 4× 提帧率，**无 AI 模型**（Practical-RIFE 等已移除）。
 
 ```
-用户：画质增强 → Tab「视频补帧」→ 选倍率 → 开始补帧
-  │
-  ▼
-View: EnhancePage._on_run_interp()
-  → 与「视频超分」共用起点/终点滑条（start_sec / end_sec）
-  → MainViewModel.start_interpolate_video（后台线程）
-      → MediaBridge.interpolate_video
-          → third_party/ffmpeg …/ffmpeg.exe
-              -vf minterpolate=fps=<源fps×倍率>:mi_mode=mci:…
-              （MCI 失败则 mi_mode=blend）
-              + 项目默认视频编码器 + AAC 音频
-  → emit interpolateProgress / interpolateFinished
-  │
-  ▼
-View 更新进度，可打开结果文件 / 文件夹
+EnhancePage「视频补帧」
+  → 独立时间段（默认试 15 秒；可全程）+ 快速/精细
+  → MainViewModel.start_interpolate_video
+      → MediaBridge.interpolate_video(quality=fast|quality)
+          → ffmpeg -vf minterpolate=…
+                fast → mi_mode=blend（默认，快）
+                quality → mi_mode=mci（运动补偿，慢；失败回退 blend）
+          → h264_mf / libx264 重编码 + AAC
+  → interpolateProgress / interpolateFinished
 ```
 
 | 资源 | 路径 |
 |------|------|
-| UI | `EnhancePage` 第三 Tab「视频补帧」 |
-| ViewModel | `MainViewModel.start_interpolate_video`（`TaskType.INTERPOLATE`） |
+| UI | `EnhancePage` 第三 Tab |
+| VM | `start_interpolate_video`（`TaskType.INTERPOLATE`） |
 | Bridge | `MediaBridge.interpolate_video` |
-| 引擎 | 项目自带 FFmpeg（`third_party/ffmpeg/{x64\|x86}/bin`） |
-| 滤镜 | `minterpolate`：优先 `mi_mode=mci`（运动补偿），失败回退 `blend` |
-| 依赖 | 仅 FFmpeg，无 PyTorch / ONNX / 外部权重 |
+| 引擎 | `third_party/ffmpeg/{x64\|x86}/bin/ffmpeg.exe` |
 
-**参数：**
-- `factor`：`2` 或 `4`（UI 单选）
-- `quality`：`fast`（默认，`mi_mode=blend`，快）/ `quality`（MCI 运动补偿，慢）
-- `start_sec` / `end_sec`：补帧页独立区间，**默认试 15 秒**（与超分「试 2 秒」无关；可改全程）
-- 编码：快速约 6Mbps；精细约 12Mbps（`h264_mf`）
-- 输出默认建议名：`{原名}_interp_x{factor}.mp4`
+**参数：** `factor=2|4`；`quality=fast|quality`；区间与超分「试 2 秒」**独立**。  
+**限制：** 精细模式慢；插帧+重编码会柔化细节，观感可能不如原片锐利。
 
-**当前限制：** MCI 精细模式对长片极慢；blend 更快但运动不如 MCI 顺。插帧+重编码会柔化细节。未接入 AI 补帧。
-
----
-
-## 6. 原 §5 智能切片（旧描述保留参考）
-
-以下为初版帧遍历描述，演讲类已不再逐帧扫描：
-
-```
-用户点击「AI 智能分析」（旧）
-  → media_cli iterate（已改为仅游戏兜底可选）
-```
 
 ---
 
@@ -1242,7 +1240,7 @@ main.py
 | 三大功能串联 | ✅ | `open_with_video` + 完成弹窗/「送去」；批量全流程队列 ⏳ |
 | 切片/导入异步 | ✅ | `import_video` / `start_slice_analysis` 后台线程；UI 收 Signal |
 | 手动切片 | ✅ | SlicePage 起止时间添加/删除/清空；不依赖 Vosk |
-| 视频补帧 | ✅ | EnhancePage「视频补帧」：FFmpeg minterpolate（MCI→blend），无额外模型 |
+| 视频补帧 | ✅ | EnhancePage：FFmpeg minterpolate；默认快速 blend，可选精细 MCI；默认试 15 秒 |
 | PySide6 多标签 UI | ✅ | 首页/切片/画质增强/去水印/热评滚动；个人中心占位 |
 | 网易云热评滚动 | ✅ | `HotCommentsPage` + 外部爬虫脚本协议；默认演示数据 |
 | 首页本地播放器 | ✅ | FFmpeg 视频 + Qt 音乐；OpenGL 显示；**点击画面暂停/继续** |
@@ -1299,7 +1297,7 @@ endif()
 
 **产物：** `build/lib/Release/llama.lib` + ggml 依赖库
 
-**架构：** 与主工程相同（当前 Win32）；本地 LLM 推理后续建议独立 x64 模块与 32 位 FFmpeg 并存。
+**架构：** 与主工程相同（推荐 x64 `build_x64`）；Win32 亦可编（视预编译包而定）。
 
 ---
 
@@ -1309,14 +1307,11 @@ endif()
 
 1. 在 `client/` 或 `shared/` 新增 `llm_engine` 模块，`target_link_libraries(... music_llama)`
 2. 封装 `llama_model_load` / `llama_decode` 为 C API，经 `media_cli` 或独立 exe 暴露给 Python
-3. 在 `MainViewModel._simulate_highlights()` 处替换为 LLM/多模态打分
+3. 演讲链路已接 Vosk + analyze-speech；游戏视觉模型仍可在 `_analyze_game_fallback` 增强
 
 ### 9.2 接入 PyTorch AI 模型
 
-在 `MainViewModel.start_slice_analysis()` 中：
-
-1. `iterate_frames` 回调里对每帧图像推理（需 C++ 侧增加帧数据导出或 Python 侧用 OpenCV 读帧）
-2. 替换 `_simulate_highlights()` 为真实打分 + 片段聚合逻辑
+游戏高光若接视觉模型：可在 `_analyze_game_fallback` 中增加抽帧/推理；演讲链路已走 ASR，无需逐帧 PyTorch。
 
 ### 9.3 视频导出（已落地）
 

@@ -4,7 +4,7 @@
 
 > 依据 `docs/音视频的流程.txt` 三层架构  
 
-> **详细解码说明见：** [`docs/design/player_decode_flow.md`](../design/player_decode_flow.md)
+> **调用链 / IPC / FFmpeg：** [`docs/design/player_decode_flow.md`](../design/player_decode_flow.md)
 
 
 
@@ -18,7 +18,7 @@ flowchart TB
 
     subgraph UI["表现层 Python (PySide6)"]
 
-        Widget["VideoPlayerWidget\nQLabel 帧 + 控件"]
+        Widget["VideoPlayerWidget\nGlVideoWidget + 控件"]
 
         VM["MainViewModel"]
 
