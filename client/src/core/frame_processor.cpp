@@ -24,6 +24,24 @@ std::string toLower(std::string s) {
 }
 
 #ifdef MUSIC_HAS_OPENCV
+/// RGB 3x3 颜色矩阵（行主序：out = M * in），值域仍在 0–255
+void applyColorMatrix(cv::Mat& frame, const float m[9], float addR = 0.f, float addG = 0.f, float addB = 0.f) {
+    cv::Mat f32;
+    frame.convertTo(f32, CV_32FC3);
+    std::vector<cv::Mat> ch;
+    cv::split(f32, ch);
+    cv::Mat r = ch[0] * m[0] + ch[1] * m[1] + ch[2] * m[2] + addR;
+    cv::Mat g = ch[0] * m[3] + ch[1] * m[4] + ch[2] * m[5] + addG;
+    cv::Mat b = ch[0] * m[6] + ch[1] * m[7] + ch[2] * m[8] + addB;
+    cv::merge(std::vector<cv::Mat>{r, g, b}, f32);
+    f32.convertTo(frame, CV_8UC3);
+}
+
+void applySoftContrast(cv::Mat& frame, float contrast, float lift) {
+    // out = (in - 128) * contrast + 128 + lift
+    frame.convertTo(frame, -1, contrast, 128.f * (1.f - contrast) + lift);
+}
+
 bool probeAndEnableOpenCL() {
     static std::once_flag once;
     static bool ok = false;
@@ -86,6 +104,18 @@ bool FrameProcessor::setModeFromString(const std::string& name) {
         mode_ = FrameFilterMode::Pixel;
         return true;
     }
+    if (k == "warm" || k == "cinema_warm" || k == "movie_warm") {
+        mode_ = FrameFilterMode::Warm;
+        return true;
+    }
+    if (k == "cool" || k == "cinema_cool" || k == "cold") {
+        mode_ = FrameFilterMode::Cool;
+        return true;
+    }
+    if (k == "vintage" || k == "retro" || k == "fade") {
+        mode_ = FrameFilterMode::Vintage;
+        return true;
+    }
     return false;
 }
 
@@ -98,6 +128,9 @@ std::string FrameProcessor::modeName() const {
     case FrameFilterMode::Neon: return "neon";
     case FrameFilterMode::Comic: return "comic";
     case FrameFilterMode::Pixel: return "pixel";
+    case FrameFilterMode::Warm: return "warm";
+    case FrameFilterMode::Cool: return "cool";
+    case FrameFilterMode::Vintage: return "vintage";
     default: return "off";
     }
 }
@@ -272,6 +305,39 @@ bool FrameProcessor::processCpu(uint8_t* rgb, int width, int height, int step) {
         cv::resize(small, frame, cv::Size(width, height), 0, 0, cv::INTER_NEAREST);
         break;
     }
+    case FrameFilterMode::Warm: {
+        // 电影暖调：抬高红橙、压一点蓝，略增对比
+        static const float m[9] = {
+            1.12f, 0.06f, 0.02f,
+            0.04f, 1.04f, 0.00f,
+            0.00f, 0.02f, 0.88f,
+        };
+        applyColorMatrix(frame, m, 6.f, 2.f, -4.f);
+        applySoftContrast(frame, 1.06f, 2.f);
+        break;
+    }
+    case FrameFilterMode::Cool: {
+        // 冷调：抬青蓝、压暖色
+        static const float m[9] = {
+            0.90f, 0.02f, 0.04f,
+            0.02f, 1.02f, 0.06f,
+            0.04f, 0.08f, 1.14f,
+        };
+        applyColorMatrix(frame, m, -4.f, 0.f, 8.f);
+        applySoftContrast(frame, 1.04f, -2.f);
+        break;
+    }
+    case FrameFilterMode::Vintage: {
+        // 复古：轻度 sepia + 降饱和感 + 抬黑雾化
+        static const float m[9] = {
+            0.55f, 0.65f, 0.20f,
+            0.35f, 0.55f, 0.18f,
+            0.20f, 0.35f, 0.22f,
+        };
+        applyColorMatrix(frame, m, 12.f, 8.f, 4.f);
+        applySoftContrast(frame, 0.88f, 10.f);
+        break;
+    }
     default:
         break;
     }
@@ -315,6 +381,11 @@ bool FrameProcessor::processOpenCL(uint8_t* rgb, int width, int height, int step
     }
     case FrameFilterMode::Film:
         // UMat 不支持 Mat 式通道线性组合；胶片调色+暗角整段走 CPU
+        return false;
+    case FrameFilterMode::Warm:
+    case FrameFilterMode::Cool:
+    case FrameFilterMode::Vintage:
+        // LUT 风格矩阵走 CPU（与 Film 相同策略）
         return false;
     case FrameFilterMode::Neon: {
         cv::UMat gray, edges, glow, dark;

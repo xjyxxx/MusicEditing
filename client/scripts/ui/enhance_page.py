@@ -11,7 +11,7 @@ from pathlib import Path
 from PySide6.QtCore import QRectF, Qt, Slot
 from PySide6.QtGui import QColor, QPainter, QWheelEvent
 from PySide6.QtWidgets import (
-    QButtonGroup, QFileDialog, QFrame, QGraphicsPixmapItem, QGraphicsScene,
+    QButtonGroup, QComboBox, QFileDialog, QFrame, QGraphicsPixmapItem, QGraphicsScene,
     QGraphicsView, QGroupBox, QHBoxLayout, QLabel, QMessageBox, QProgressBar,
     QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSlider, QTabWidget,
     QVBoxLayout, QWidget,
@@ -296,6 +296,7 @@ class EnhancePage(QWidget):
         hint = QLabel(
             "图片/视频超分：左原图右结果对比（视频超分默认试前 2 秒）。"
             "视频补帧：默认处理全程，区间与超分独立。"
+            "一键调色：电影暖调/冷调/复古（与播放器滤镜同预设，导出走 lut3d）。"
         )
         hint.setObjectName("HintLabel")
         hint.setWordWrap(True)
@@ -306,6 +307,7 @@ class EnhancePage(QWidget):
         self._tabs.addTab(self._build_image_tab(), "图片超分")
         self._tabs.addTab(self._build_video_tab(), "视频超分")
         self._tabs.addTab(self._build_interp_tab(), "视频补帧")
+        self._tabs.addTab(self._build_grade_tab(), "一键调色")
         root.addWidget(self._tabs, 1)
 
         self._progress = QProgressBar()
@@ -321,6 +323,8 @@ class EnhancePage(QWidget):
         vm.enhanceFinished.connect(self._on_finished)
         vm.interpolateProgress.connect(self._on_progress)
         vm.interpolateFinished.connect(self._on_interp_finished)
+        vm.colorGradeProgress.connect(self._on_progress)
+        vm.colorGradeFinished.connect(self._on_grade_finished)
         vm.errorOccurred.connect(self._show_error)
         vm.videoLoaded.connect(self._on_video_loaded)
 
@@ -650,6 +654,123 @@ class EnhancePage(QWidget):
         outer.addWidget(scroll)
         return page
 
+    def _build_grade_tab(self) -> QWidget:
+        """一键调色：与 FrameProcessor warm/cool/vintage 同层，导出走 lut3d。"""
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        body = QWidget()
+        layout = QVBoxLayout(body)
+
+        tip = QLabel(
+            "电影暖调 / 冷调 / 复古：与首页播放器滤镜同一套矩阵。"
+            "预览用 OpenCV；导出图片同矩阵，视频用 FFmpeg lut3d（.cube）。"
+            "也可在首页滤镜下拉直接预览播放效果。"
+        )
+        tip.setObjectName("HintLabel")
+        tip.setWordWrap(True)
+        layout.addWidget(tip)
+
+        top = QHBoxLayout()
+        self._grade_path_label = QLabel("未选择文件")
+        self._grade_path_label.setObjectName("PathLabel")
+        btn_img = QPushButton("导入图片")
+        btn_img.setObjectName("GhostBtn")
+        btn_img.clicked.connect(self._on_grade_import_image)
+        btn_vid = QPushButton("导入视频")
+        btn_vid.setObjectName("GhostBtn")
+        btn_vid.clicked.connect(self._on_grade_import_video)
+        btn_use = QPushButton("用当前视频")
+        btn_use.setObjectName("GhostBtn")
+        btn_use.clicked.connect(self._on_grade_use_current)
+        top.addWidget(self._grade_path_label, 1)
+        top.addWidget(btn_img)
+        top.addWidget(btn_vid)
+        top.addWidget(btn_use)
+        layout.addLayout(top)
+
+        preset_box = QGroupBox("调色预设（LUT）")
+        pr = QHBoxLayout(preset_box)
+        self._grade_preset = QComboBox()
+        from core.color_grade import list_presets
+        for key, label in list_presets():
+            self._grade_preset.addItem(label, key)
+        pr.addWidget(QLabel("风格"))
+        pr.addWidget(self._grade_preset, 1)
+        btn_prev = QPushButton("刷新预览")
+        btn_prev.setObjectName("GhostBtn")
+        btn_prev.setToolTip("对当前图片或视频预览帧套用调色（不写文件）")
+        btn_prev.clicked.connect(self._on_grade_preview)
+        pr.addWidget(btn_prev)
+        layout.addWidget(preset_box)
+
+        self._grade_compare = SideBySideCompare()
+        self._grade_compare.clear_all("导入图片/视频", "预览或导出后显示调色结果")
+        layout.addWidget(self._grade_compare, 1)
+
+        range_box = QGroupBox("视频导出时间段（图片忽略）")
+        rc = QVBoxLayout(range_box)
+        start_row = QHBoxLayout()
+        start_row.addWidget(QLabel("起点"))
+        self._grade_start = QSlider(Qt.Horizontal)
+        self._grade_start_lbl = QLabel("0.0s")
+        start_row.addWidget(self._grade_start, 1)
+        start_row.addWidget(self._grade_start_lbl)
+        end_row = QHBoxLayout()
+        end_row.addWidget(QLabel("终点"))
+        self._grade_end = QSlider(Qt.Horizontal)
+        self._grade_end_lbl = QLabel("—")
+        end_row.addWidget(self._grade_end, 1)
+        end_row.addWidget(self._grade_end_lbl)
+        rc.addLayout(start_row)
+        rc.addLayout(end_row)
+        quick = QHBoxLayout()
+        for label, secs in (("试 5 秒", 5), ("试 15 秒", 15), ("全程", 0)):
+            b = QPushButton(label)
+            b.setObjectName("PresetBtn")
+            b.clicked.connect(lambda _=False, s=secs: self._set_grade_range_preset(s))
+            quick.addWidget(b)
+        quick.addStretch()
+        rc.addLayout(quick)
+        layout.addWidget(range_box)
+        self._grade_start.valueChanged.connect(self._on_grade_range_changed)
+        self._grade_end.valueChanged.connect(self._on_grade_range_changed)
+
+        self._grade_info = QLabel("—")
+        self._grade_info.setObjectName("MetaBadge")
+        layout.addWidget(self._grade_info)
+
+        actions = QHBoxLayout()
+        self._btn_run_grade = QPushButton("导出调色结果")
+        self._btn_run_grade.setObjectName("PrimaryBtn")
+        self._btn_run_grade.clicked.connect(self._on_run_grade)
+        self._btn_open_grade = QPushButton("打开结果文件")
+        self._btn_open_grade.setObjectName("GhostBtn")
+        self._btn_open_grade.setEnabled(False)
+        self._btn_open_grade.clicked.connect(self._open_result)
+        self._btn_folder_grade = QPushButton("打开文件夹")
+        self._btn_folder_grade.setObjectName("GhostBtn")
+        self._btn_folder_grade.setEnabled(False)
+        self._btn_folder_grade.clicked.connect(self._open_result_folder)
+        self._btn_grade_to_player = QPushButton("套到播放器滤镜")
+        self._btn_grade_to_player.setObjectName("GhostBtn")
+        self._btn_grade_to_player.setToolTip("把当前预设同步到首页播放器 OpenCV 滤镜（需重新编译含 warm/cool/vintage）")
+        self._btn_grade_to_player.clicked.connect(self._on_grade_to_player)
+        actions.addWidget(self._btn_run_grade)
+        actions.addWidget(self._btn_open_grade)
+        actions.addWidget(self._btn_folder_grade)
+        actions.addWidget(self._btn_grade_to_player)
+        actions.addStretch()
+        layout.addLayout(actions)
+
+        self._grade_src_path = ""
+        self._grade_is_image = False
+
+        scroll = QScrollArea()
+        _paint_scroll_dark(scroll, body)
+        outer.addWidget(scroll)
+        return page
+
     def _current_scale(self, prefix: str) -> int:
         return 4 if getattr(self, f"_{prefix}_scale_4").isChecked() else 2
 
@@ -665,6 +786,7 @@ class EnhancePage(QWidget):
             getattr(self, "_btn_run_img", None),
             getattr(self, "_btn_run_vid", None),
             getattr(self, "_btn_run_interp", None),
+            getattr(self, "_btn_run_grade", None),
         ):
             if btn:
                 btn.setEnabled(not busy)
@@ -809,6 +931,20 @@ class EnhancePage(QWidget):
             self._interp_start_slider.setValue(0)
             self._interp_end_slider.setValue(min(max_ms, 15000))
             self._on_interp_range_changed()
+        if getattr(self, "_grade_start", None):
+            self._grade_src_path = video.file_path
+            self._grade_is_image = False
+            self._grade_path_label.setText(video.file_path)
+            for s in (self._grade_start, self._grade_end):
+                s.blockSignals(True)
+                s.setMaximum(max_ms)
+                s.blockSignals(False)
+            self._grade_start.setValue(0)
+            self._grade_end.setValue(min(max_ms, 15000))
+            self._on_grade_range_changed()
+            self._grade_info.setText(
+                f"视频  {video.width}×{video.height}  ·  {video.duration_sec:.1f}s"
+            )
         self._refresh_video_preview()
         self._vid_compare.clear_result("超分完成后显示结果首帧")
         self._btn_open_vid.setEnabled(False)
@@ -927,6 +1063,193 @@ class EnhancePage(QWidget):
         self._vm.start_enhance_video(
             out, start, end, scale=scale, backend=backend,
             strength=self._current_strength("vid"),
+        )
+
+    def _grade_preset_key(self) -> str:
+        return str(self._grade_preset.currentData() or "warm")
+
+    def _set_grade_range_preset(self, seconds: int):
+        video = self._vm.get_app_state().current_video
+        if not video or not getattr(self, "_grade_start", None):
+            return
+        max_ms = max(1, int(video.duration_sec * 1000))
+        self._grade_start.setValue(0)
+        self._grade_end.setValue(max_ms if seconds <= 0 else min(max_ms, seconds * 1000))
+
+    @Slot()
+    def _on_grade_range_changed(self):
+        if not getattr(self, "_grade_start", None):
+            return
+        start = self._grade_start.value() / 1000.0
+        end = self._grade_end.value() / 1000.0
+        if end <= start:
+            end = start + 0.1
+            self._grade_end.blockSignals(True)
+            self._grade_end.setValue(int(end * 1000))
+            self._grade_end.blockSignals(False)
+        self._grade_start_lbl.setText(f"{start:.1f}s")
+        self._grade_end_lbl.setText(f"{end:.1f}s")
+
+    @Slot()
+    def _on_grade_import_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择图片", "",
+            "图片 (*.png *.jpg *.jpeg *.bmp *.webp);;所有文件 (*.*)",
+        )
+        if not path:
+            return
+        self._grade_src_path = path
+        self._grade_is_image = True
+        self._grade_path_label.setText(path)
+        self._grade_compare.set_original(path)
+        self._grade_compare.clear_result("预览或导出后显示")
+        w, h = probe_size(path)
+        self._grade_info.setText(
+            f"图片  {w}×{h}" if w > 0 else f"图片  {self._file_size_mb(path)}"
+        )
+        self._status.setText(f"调色素材: {os.path.basename(path)}")
+
+    @Slot()
+    def _on_grade_import_video(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择视频", "",
+            "视频 (*.mp4 *.mov *.mkv *.avi *.webm);;所有文件 (*.*)",
+        )
+        if path:
+            self._vm.import_video(path)
+            self._tabs.setCurrentIndex(3)
+
+    @Slot()
+    def _on_grade_use_current(self):
+        video = self._vm.get_app_state().current_video
+        if not video or not video.file_path:
+            QMessageBox.information(self, "提示", "尚未导入视频。")
+            return
+        self._tabs.setCurrentIndex(3)
+        self._on_video_loaded(video)
+
+    @Slot()
+    def _on_grade_preview(self):
+        """本地 OpenCV 预览（图片或缩略帧）。"""
+        src = self._grade_src_path
+        if not src or not os.path.isfile(src):
+            QMessageBox.information(self, "提示", "请先导入图片或视频。")
+            return
+        preset = self._grade_preset_key()
+        try:
+            from core.color_grade import apply_grade_opencv_bgr, PRESETS
+            import cv2
+            import numpy as np
+            import tempfile
+
+            if self._grade_is_image:
+                data = np.fromfile(src, dtype=np.uint8)
+                img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+                self._grade_compare.set_original(src)
+            else:
+                t = self._grade_start.value() / 1000.0
+                thumb = self._vm.bridge.extract_thumbnail(
+                    src, t, max_width=960, use_cache=False,
+                )
+                img = cv2.imread(thumb, cv2.IMREAD_COLOR)
+                self._grade_compare.set_original(thumb)
+            if img is None:
+                raise RuntimeError("解码失败")
+            out = apply_grade_opencv_bgr(img, preset)
+            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            tmp.close()
+            ok, buf = cv2.imencode(".png", out)
+            if not ok:
+                raise RuntimeError("编码预览失败")
+            buf.tofile(tmp.name)
+            self._grade_compare.set_result(tmp.name)
+            self._status.setText(f"预览: {PRESETS.get(preset, preset)}")
+        except Exception as e:
+            try:
+                self._grade_preview_ffmpeg(src, preset)
+            except Exception as e2:
+                QMessageBox.warning(self, "预览失败", f"{e}\n{e2}")
+
+    def _grade_preview_ffmpeg(self, src: str, preset: str):
+        from core.color_grade import grade_with_ffmpeg, PRESETS
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        tmp.close()
+        t0 = self._grade_start.value() / 1000.0 if not self._grade_is_image else 0.0
+        grade_with_ffmpeg(src, tmp.name, preset, start_sec=t0, end_sec=t0 + 0.08)
+        if not self._grade_is_image:
+            try:
+                thumb = self._vm.bridge.extract_thumbnail(
+                    src, t0, max_width=960, use_cache=False,
+                )
+                self._grade_compare.set_original(thumb)
+            except Exception:
+                pass
+        else:
+            self._grade_compare.set_original(src)
+        self._grade_compare.set_result(tmp.name)
+        self._status.setText(f"预览: {PRESETS.get(preset, preset)}")
+
+    @Slot()
+    def _on_run_grade(self):
+        src = self._grade_src_path
+        if not src or not os.path.isfile(src):
+            QMessageBox.warning(self, "提示", "请先导入图片或视频")
+            return
+        preset = self._grade_preset_key()
+        stem = Path(src).stem
+        if self._grade_is_image:
+            default = str(Path(src).with_name(f"{stem}_{preset}.png"))
+            filt = "PNG (*.png);;JPEG (*.jpg);;所有文件 (*.*)"
+        else:
+            default = str(Path(src).with_name(f"{stem}_{preset}.mp4"))
+            filt = "MP4 (*.mp4);;所有文件 (*.*)"
+        out, _ = QFileDialog.getSaveFileName(self, "保存调色结果", default, filt)
+        if not out:
+            return
+        start = self._grade_start.value() / 1000.0
+        end = self._grade_end.value() / 1000.0
+        self._result_path = out
+        self._progress.setVisible(True)
+        self._progress.setValue(0)
+        self._set_busy(True)
+        self._grade_compare.clear_result("调色导出中…")
+        self._status.setText(f"调色导出（{preset}）…")
+        self._vm.start_color_grade(
+            src, out, preset,
+            start_sec=0.0 if self._grade_is_image else start,
+            end_sec=0.0 if self._grade_is_image else end,
+        )
+
+    @Slot(int, str)
+    def _on_grade_finished(self, _task_id: int, output_path: str):
+        self._set_busy(False)
+        self._progress.setValue(100)
+        self._result_path = output_path
+        self._tabs.setCurrentIndex(3)
+        self._btn_open_grade.setEnabled(True)
+        self._btn_folder_grade.setEnabled(True)
+        if output_path.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".webp")):
+            if self._grade_src_path:
+                self._grade_compare.set_original(self._grade_src_path)
+            self._grade_compare.set_result(output_path)
+        self._status.setText(f"调色完成 · {os.path.basename(output_path)}")
+        QMessageBox.information(self, "调色完成", f"已保存：\n{output_path}")
+
+    @Slot()
+    def _on_grade_to_player(self):
+        preset = self._grade_preset_key()
+        # 通过 MainWindow 的手递：emit 不够，直接找顶层
+        win = self.window()
+        home = getattr(win, "_home_page", None)
+        if home and hasattr(home, "apply_opencv_filter"):
+            if home.apply_opencv_filter(preset):
+                self._status.setText(f"已套到播放器滤镜: {preset}")
+                return
+        QMessageBox.information(
+            self, "播放器滤镜",
+            f"请切换到首页，在滤镜下拉选择对应项（{preset}）。\n"
+            "若没有暖调/冷调/复古，请重新编译 media_player（build_x64.bat）。",
         )
 
     @Slot()

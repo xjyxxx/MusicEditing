@@ -42,6 +42,7 @@ from models.video_model import (
 
 
 SPEECH_SCENES = frozenset({"演讲金句", "日常精彩片段", "自定义识别"})
+LOUDNESS_SCENES = frozenset({"响度高潮"})
 
 
 
@@ -72,6 +73,10 @@ class MainViewModel(QObject):
     interpolateProgress = Signal(int, float, str)
 
     interpolateFinished = Signal(int, str)
+
+    colorGradeProgress = Signal(int, float, str)
+
+    colorGradeFinished = Signal(int, str)
 
     exportFinished = Signal(str)
 
@@ -890,6 +895,10 @@ class MainViewModel(QObject):
 
                     segments = self._analyze_speech_pipeline(video, params, report)
 
+                elif params.scene in LOUDNESS_SCENES:
+
+                    segments = self._analyze_loudness_climaxes(video, params, report)
+
                 else:
 
                     segments = self._analyze_game_fallback(video, params, report)
@@ -910,7 +919,12 @@ class MainViewModel(QObject):
 
 
 
-                mode = "LLM+ASR" if params.scene in SPEECH_SCENES else "规则"
+                if params.scene in SPEECH_SCENES:
+                    mode = "LLM+ASR"
+                elif params.scene in LOUDNESS_SCENES:
+                    mode = "ebur128"
+                else:
+                    mode = "规则"
 
                 self._status_message = f"[{mode}] 识别出 {len(segments)} 个高光片段"
 
@@ -1240,6 +1254,40 @@ class MainViewModel(QObject):
 
         report(80.0, "生成规则候选片段…")
         return self._simulate_highlights(video.duration_sec, params)
+
+
+
+    def _analyze_loudness_climaxes(
+        self, video: VideoModel, params: SliceParams, report
+    ) -> List[HighlightSegment]:
+        """响度高潮：FFmpeg ebur128 瞬时响度峰值 → 片段。"""
+        from core.audio_viz import analyze_ebur128, find_loudness_climaxes
+
+        report(5.0, "响度分析（ebur128）…")
+
+        def ebur_report(p: float, msg: str):
+            report(5.0 + max(0.0, min(100.0, p)) * 0.75, msg)
+
+        samples, integrated, lra, _peak = analyze_ebur128(
+            video.file_path, on_progress=ebur_report
+        )
+        report(82.0, f"I={integrated:.1f} LUFS，LRA={lra:.1f}，找高潮…")
+        clipped = find_loudness_climaxes(
+            samples,
+            duration_sec=float(video.duration_sec or 0.0),
+            min_duration=params.min_duration,
+            max_duration=params.max_duration,
+            sensitivity=params.sensitivity,
+            max_segments=24,
+        )
+        if not clipped:
+            report(90.0, "未检出响度高潮，回退时间规则…")
+            return self._simulate_highlights(video.duration_sec, params)
+        report(95.0, f"响度高潮 {len(clipped)} 段")
+        return [
+            HighlightSegment(start_sec=s, end_sec=e, score=sc, selected=True)
+            for s, e, sc in clipped
+        ]
 
 
 
@@ -1688,6 +1736,58 @@ class MainViewModel(QObject):
         import threading
         threading.Thread(target=run, daemon=True).start()
 
+    def start_color_grade(
+        self,
+        input_path: str,
+        output_path: str,
+        preset: str,
+        *,
+        start_sec: float = 0.0,
+        end_sec: float = 0.0,
+    ):
+        """一键调色（warm/cool/vintage）→ lut3d / OpenCV 矩阵。"""
+        if not input_path or not os.path.isfile(input_path):
+            self.errorOccurred.emit("调色：输入文件无效")
+            return
+        task = TaskModel(
+            task_id=self._next_task_id,
+            task_type=TaskType.COLOR_GRADE,
+            file_path=input_path,
+            state=TaskState.PROCESSING,
+        )
+        self._next_task_id += 1
+        self._state.tasks.append(task)
+        task_id = task.task_id
+        bridge = self._bridge
+
+        def run():
+            try:
+                def report(p: float, msg: str):
+                    task.progress = p
+                    self.colorGradeProgress.emit(task_id, p, msg)
+
+                out = bridge.apply_color_grade(
+                    input_path,
+                    output_path,
+                    preset,
+                    start_sec=start_sec,
+                    end_sec=end_sec,
+                    on_progress=report,
+                )
+                task.state = TaskState.COMPLETED
+                task.progress = 100.0
+                self.taskStateChanged.emit(task_id, TaskState.COMPLETED)
+                self.colorGradeFinished.emit(task_id, out or output_path)
+                self._status_message = f"调色完成: {os.path.basename(out or output_path)}"
+                self.statusMessageChanged.emit(self._status_message)
+            except Exception as e:
+                task.state = TaskState.FAILED
+                self.taskStateChanged.emit(task_id, TaskState.FAILED)
+                self.errorOccurred.emit(str(e))
+
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+
 
     @Slot(str, float, float, float)
 
@@ -1814,6 +1914,8 @@ class MainViewModel(QObject):
         def analyze(video, params, report):
             if params.scene in SPEECH_SCENES:
                 return self._analyze_speech_pipeline(video, params, report)
+            if params.scene in LOUDNESS_SCENES:
+                return self._analyze_loudness_climaxes(video, params, report)
             return self._analyze_game_fallback(video, params, report)
 
         def on_update(index: int, job: PipelineJob):

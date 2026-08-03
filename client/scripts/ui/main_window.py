@@ -173,9 +173,10 @@ class SlicePage(QWidget):
         params_layout = QGridLayout(params_box)
 
         self._scene_combo = QComboBox()
-        self._scene_combo.addItems(["游戏高光", "演讲金句", "日常精彩片段", "自定义识别"])
+        self._scene_combo.addItems(["游戏高光", "演讲金句", "日常精彩片段", "响度高潮", "自定义识别"])
         self._scene_combo.setToolTip(
             "演讲金句：有 Vosk 则转写+金句词/LLM；无模型则用人声段兜底\n"
+            "响度高潮：FFmpeg ebur128 找响度峰值\n"
             "下载模型: scripts\\download_vosk_model.bat"
         )
         self._scene_hint = QLabel("")
@@ -322,6 +323,7 @@ class SlicePage(QWidget):
             "演讲金句": "优先 Vosk 转写 + 金句词/LLM；无模型则用人声段候选。"
                         "完整识别请运行 scripts\\download_vosk_model.bat。",
             "日常精彩片段": "同演讲链路，偏向口语兴奋词；无 Vosk 用人声段。",
+            "响度高潮": "FFmpeg ebur128 瞬时响度峰值找高潮；敏感度控制阈值，无需 Vosk。",
             "自定义识别": "通用转写/人声切段，可自行再手动增删。",
         }
         self._scene_hint.setText(tips.get(scene, ""))

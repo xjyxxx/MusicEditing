@@ -15,6 +15,9 @@ enum class FrameFilterMode {
     Neon,       ///< 霓虹：边缘高亮
     Comic,      ///< 漫画：平滑 + 墨线
     Pixel,      ///< 像素风：最近邻放大
+    Warm,       ///< 电影暖调（LUT 风格矩阵）
+    Cool,       ///< 冷调
+    Vintage,    ///< 复古褪色
 };
 
 /// 滤镜计算设备：auto 优先 OpenCL，失败回退 CPU
@@ -37,7 +40,7 @@ public:
     void setMode(FrameFilterMode mode) { mode_ = mode; }
     FrameFilterMode mode() const { return mode_; }
 
-    /// clahe | denoise | sharpen | film | neon | comic | pixel | off
+    /// clahe | denoise | sharpen | film | neon | comic | pixel | warm | cool | vintage | off
     bool setModeFromString(const std::string& name);
 
     std::string modeName() const;

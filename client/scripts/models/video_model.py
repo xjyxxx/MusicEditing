@@ -23,6 +23,7 @@ class TaskType(IntEnum):
     EXPORT = 3
     DOWNLOAD = 4
     INTERPOLATE = 5
+    COLOR_GRADE = 6
 
 
 @dataclass

@@ -28,6 +28,7 @@ from core.app_logic import AppLogic, load_app_config
 from core.app_logger import setup_logging
 from core.subtitle_track import SubtitleTrack, find_sidecar_subtitles
 from ui.gl_video_widget import GlVideoWidget, _default_surface_format
+from ui.waveform_widget import WaveformWidget
 
 log = setup_logging("VideoPlayer", __import__("os").environ.get("MUSIC_LOG_LEVEL", "INFO"))
 
@@ -122,6 +123,7 @@ class VideoPlayerWidget(QWidget):
         self._hw_decode_active = False
         self._audio_only = False
         self._subtitles = SubtitleTrack()
+        self._audio_viz_token = 0
 
 
 
@@ -151,6 +153,11 @@ class VideoPlayerWidget(QWidget):
             "当前为预留；见 app.conf live_subtitle_* 与 core/live_subtitle/"
         )
         self._live_pipeline = None
+
+        self._waveform = WaveformWidget()
+        self._waveform.setToolTip(
+            "FFmpeg showwavespic 波形 + ebur128 响度曲线\n点击跳转时间"
+        )
 
 
 
@@ -184,6 +191,9 @@ class VideoPlayerWidget(QWidget):
             ("降噪", "denoise"),
             ("锐化", "sharpen"),
             ("胶片", "film"),
+            ("电影暖调", "warm"),
+            ("冷调", "cool"),
+            ("复古", "vintage"),
             ("霓虹", "neon"),
             ("漫画", "comic"),
             ("像素", "pixel"),
@@ -234,6 +244,8 @@ class VideoPlayerWidget(QWidget):
 
         layout.addWidget(self._display, 1)
 
+        layout.addWidget(self._waveform)
+
         layout.addLayout(seek_row)
 
         layout.addLayout(ctrl)
@@ -257,6 +269,8 @@ class VideoPlayerWidget(QWidget):
         self._btn_sub.clicked.connect(self._on_load_subtitle)
         self._btn_clear_sub.clicked.connect(self._on_clear_subtitle)
         self._btn_live_sub.clicked.connect(self._on_live_subtitle)
+
+        self._waveform.seekRequested.connect(self._on_waveform_seek)
 
         self._filter_combo.currentIndexChanged.connect(self._on_filter_changed)
 
@@ -429,6 +443,9 @@ class VideoPlayerWidget(QWidget):
         self._show_music_cover(playing=False)
         self._display.set_paused_overlay(True)
         log.info("音乐已打开 %s", path)
+        self._waveform.set_duration(self._duration_sec)
+        self._start_audio_viz(self._current_path)
+        self.fileOpened.emit(self._current_path)
         if auto_play:
             self.play()
 
@@ -508,6 +525,9 @@ class VideoPlayerWidget(QWidget):
 
         # 自动加载同目录同名字幕
         self._try_autoload_sidecar_subtitles(path)
+
+        self._waveform.set_duration(self._duration_sec)
+        self._start_audio_viz(self._current_path)
 
         # 同步到 ViewModel（此时 current_path 已设置，不会触发重复 open）
         self.fileOpened.emit(self._current_path)
@@ -755,38 +775,105 @@ class VideoPlayerWidget(QWidget):
 
         ratio = self._progress.value() / max(self._progress.maximum(), 1)
 
-        self._position_sec = ratio * self._duration_sec
+        self._seek_to(ratio * self._duration_sec, resume=self._was_playing_before_seek)
 
+    def _seek_to(self, position_sec: float, *, resume: bool | None = None):
+        """统一 seek（进度条 / 波形点击）。"""
+        if not self._current_path or self._duration_sec <= 0:
+            return
+        self._position_sec = max(0.0, min(float(position_sec), self._duration_sec))
+        self._progress.setValue(int(self._position_sec * 1000))
         if self._audio_only:
             self._audio.seek(self._position_sec)
             self._update_time_label()
-            if self._was_playing_before_seek:
+            if resume:
                 self.play()
             return
-
         if not self._backend:
             return
-
         try:
-
             self._backend.seek(self._position_sec)
-
             if self._has_audio:
-
                 self._audio.seek(self._position_sec)
-
             self._pull_and_show_frame()
-
         except RuntimeError as e:
-
             self._title.setText(f"Seek 失败: {e}")
+            return
+        self._update_time_label()
+        if resume:
+            self.play()
 
+    @Slot(float)
+    def _on_waveform_seek(self, sec: float):
+        was = self._playing
+        if was:
+            self.pause()
+        self._seek_to(sec, resume=was)
+
+    def _start_audio_viz(self, path: str):
+        """后台生成 showwavespic + ebur128，完成后刷新波形条。"""
+        self._audio_viz_token += 1
+        token = self._audio_viz_token
+        self._waveform.clear()
+        self._waveform.set_duration(self._duration_sec)
+        self._waveform.set_busy(True, "分析波形 / 响度…")
+        if not path or not os.path.isfile(path):
             return
 
+        from PySide6.QtCore import QObject
 
+        class _Sig(QObject):
+            done = Signal(object)
+            fail = Signal(str)
 
-        if self._was_playing_before_seek:
-            self.play()
+        sig = _Sig(self)
+
+        def on_ok(result):
+            if token != self._audio_viz_token:
+                return
+            if not result:
+                return
+            self._waveform.set_duration(self._duration_sec or result.duration_hint)
+            if result.waveform_png:
+                self._waveform.set_waveform_png(result.waveform_png)
+            self._waveform.set_loudness(
+                result.samples,
+                integrated_lufs=result.integrated_lufs,
+                lra=result.lra,
+            )
+            log.info(
+                "音频可视化就绪 samples=%d I=%.1f PNG=%s",
+                len(result.samples),
+                result.integrated_lufs,
+                bool(result.waveform_png),
+            )
+
+        def on_err(msg: str):
+            if token != self._audio_viz_token:
+                return
+            self._waveform.set_busy(False, f"可视化失败: {msg[:80]}")
+            log.warning("音频可视化失败: %s", msg)
+
+        sig.done.connect(on_ok)
+        sig.fail.connect(on_err)
+
+        import threading
+        from core.audio_viz import analyze_media_audio
+
+        media = path
+        dur = self._duration_sec
+
+        def run():
+            try:
+                w = max(640, int(self._waveform.width()) * 2 or 1280)
+                res = analyze_media_audio(media, wave_width=w, wave_height=72)
+                if dur > 0:
+                    res.duration_hint = dur
+                sig.done.emit(res)
+            except Exception as e:
+                sig.fail.emit(str(e))
+
+        threading.Thread(target=run, daemon=True).start()
 
 
 
@@ -959,6 +1046,7 @@ class VideoPlayerWidget(QWidget):
         self._time_label.setText(
             f"{_format_time(self._position_sec)} / {_format_time(self._duration_sec)}"
         )
+        self._waveform.set_position(self._position_sec)
         self._sync_subtitle()
 
     def _sync_subtitle(self):

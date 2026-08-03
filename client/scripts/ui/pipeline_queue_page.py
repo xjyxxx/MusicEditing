@@ -356,7 +356,7 @@ class PipelineQueuePage(QWidget):
         g.setVerticalSpacing(8)
         g.addWidget(self._field_label("场景"), 0, 0)
         self._scene = QComboBox()
-        self._scene.addItems(["游戏高光", "演讲金句", "日常精彩片段", "自定义识别"])
+        self._scene.addItems(["游戏高光", "演讲金句", "日常精彩片段", "响度高潮", "自定义识别"])
         g.addWidget(self._scene, 0, 1, 1, 3)
         g.addWidget(self._field_label("最短秒"), 1, 0)
         self._min_dur = QDoubleSpinBox()

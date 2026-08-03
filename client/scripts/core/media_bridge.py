@@ -1897,5 +1897,37 @@ class MediaBridge:
                 except OSError:
                     pass
 
+    def apply_color_grade(
+        self,
+        input_path: str,
+        output_path: str,
+        preset: str,
+        *,
+        start_sec: float = 0.0,
+        end_sec: float = 0.0,
+        on_progress: Optional[Callable[[float, str], None]] = None,
+    ) -> str:
+        """一键调色：图片走 OpenCV 矩阵，视频走 FFmpeg lut3d（.cube）。"""
+        from core.color_grade import grade_image_file, grade_with_ffmpeg, normalize_preset
+
+        preset = normalize_preset(preset)
+        ext = os.path.splitext(input_path)[1].lower()
+        is_image = ext in {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}
+        if is_image:
+            if on_progress:
+                on_progress(10.0, f"图片调色 {preset}…")
+            out = grade_image_file(input_path, output_path, preset)
+            if on_progress:
+                on_progress(100.0, "调色完成")
+            return out
+        return grade_with_ffmpeg(
+            input_path,
+            output_path,
+            preset,
+            start_sec=start_sec,
+            end_sec=end_sec,
+            on_progress=on_progress,
+        )
+
     def shutdown(self):
         pass

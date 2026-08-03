@@ -15,7 +15,7 @@
 | [§2 构建与启动](#2-构建与启动流程) | x64 / Win32、启动退出 |
 | [§3 MVVM](#3-mvvm-分层实现) | Model / VM / View、播放器、OpenCV、去水印/超分、GPU |
 | [§4 C++ 引擎](#4-c-媒体引擎实现流程) | VideoDecoder、C API、CLI 协议 |
-| [§5 业务链路](#5-业务功能链路) | 5.1 切片 · 5.1.1 缩略图时间轴 · 5.4 超分 · 5.10 补帧 · … |
+| [§5 业务链路](#5-业务功能链路) | 5.1 切片 · 5.8 字幕 · 5.12 波形响度 · 5.13 调色 · … |
 | [§6 模块依赖](#6-模块间依赖关系) | CMake / Python 树 |
 | [§7 状态表](#7-已实现-vs-待实现) | ✅ / ⏳ |
 | [§8 llama.cpp](#8-llamacpp-集成说明) | 目录与 CMake |
@@ -212,7 +212,7 @@ OpenCV **仅用于解码后的 RGB24 帧处理**，不参与 FFmpeg 解码本身
 #### 3.5.1 配置项（`client/resources/config/app.conf`）
 
 ```ini
-# OpenCV 帧滤镜（需编译时启用 OpenCV）：clahe | denoise | sharpen | film | neon | comic | pixel | off
+# OpenCV 帧滤镜：clahe | denoise | sharpen | film | warm | cool | vintage | neon | comic | pixel | off
 opencv_filter=clahe
 # 滤镜设备：auto（优先 OpenCL）| cpu | opencl
 opencv_filter_device=auto
@@ -226,12 +226,15 @@ opencv_filter_playback=false
 | `denoise` | 轻度降噪 | `bilateralFilter` |
 | `sharpen` | 锐化 | `GaussianBlur` + `addWeighted` |
 | `film` | 胶片暖色 + 暗角（雨天氛围推荐） | sepia 矩阵 + vignette |
+| `warm` | 电影暖调 | 3×3 色矩阵 + 轻对比（与增强页 LUT 同预设） |
+| `cool` | 冷调 | 3×3 色矩阵 |
+| `vintage` | 复古褪色 | sepia 弱化 + 降对比抬黑 |
 | `neon` | 霓虹描边 | `Canny` 边缘叠色 |
 | `comic` | 漫画风 | bilateral + 自适应阈值墨线 |
 | `pixel` | 像素风 | 缩小再 `INTER_NEAREST` 放大 |
 | `off` | 关闭，直通原帧 | 不调用 OpenCV |
 
-首页播放器控制栏有滤镜下拉；选「胶片/霓虹/漫画/像素」后**播放中也会套滤镜**。
+首页播放器控制栏有滤镜下拉；选「胶片/暖调/冷调/复古/霓虹…」后**播放中也会套滤镜**。增强页「一键调色」导出同预设（FFmpeg `lut3d`）。
 
 #### 3.5.2 界面显示
 
@@ -1351,6 +1354,69 @@ MainWindow.__init__
 **限制：** 城市来自**本机出口 IP 粗定位**（代理/VPN 会偏到出口城市，非 GPS）；单次请求超时 5s，失败显示「天气: 暂不可用」。不自动改滤镜，需用户点击。
 
 
+
+### 5.12 波形 + 响度可视化 / 响度高潮
+
+纯 FFmpeg：`showwavespic` 出波形图，`ebur128` + `ametadata=print` 出瞬时响度曲线；无新第三方库。
+
+#### 首页播放器
+
+```
+打开视频/音乐
+  → VideoPlayerWidget._start_audio_viz（后台线程）
+      → core.audio_viz.analyze_media_audio
+            showwavespic → .cache/audio_viz/*_wave.png
+            ebur128=metadata=1,ametadata=print → M/S/I 采样
+  → WaveformWidget：底图波形 + 青绿响度曲线 + 琥珀播放头
+  → 点击波形 → seek
+```
+
+| 资源 | 路径 |
+|------|------|
+| UI | `ui/waveform_widget.py`（嵌在 `VideoPlayerWidget` 画面下方） |
+| 分析 | `core/audio_viz.py` |
+| 缓存 | `.cache/audio_viz/`（gitignore） |
+
+#### 切片「响度高潮」
+
+```
+SlicePage 场景「响度高潮」→ AI 智能分析
+  → MainViewModel._analyze_loudness_climaxes
+      → analyze_ebur128 → find_loudness_climaxes（阈值随敏感度）
+  → highlightsReady（同其它场景）
+```
+
+全流程队列场景下拉同样可选「响度高潮」。
+
+**限制：** 长视频分析耗时随时长线性增长（有磁盘缓存）；响度高潮偏音乐/情绪起伏，不替代游戏视觉切点或演讲语义。
+
+
+
+### 5.13 LUT / 一键调色
+
+与 `FrameProcessor` 滤镜同层预设：`warm`（电影暖调）/ `cool`（冷调）/ `vintage`（复古）。
+
+```
+首页滤镜下拉 warm|cool|vintage
+  → media_player set_filter → FrameProcessor 色矩阵（实时预览）
+
+EnhancePage「一键调色」
+  → 预览：OpenCV 同矩阵
+  → 导出：MediaBridge.apply_color_grade
+        图片 → OpenCV；视频 → FFmpeg lut3d（.cache/luts/*.cube）
+  → 「套到播放器滤镜」→ HomePage.apply_opencv_filter
+```
+
+| 资源 | 路径 |
+|------|------|
+| C++ | `frame_processor.h/.cpp`（Warm/Cool/Vintage） |
+| Python | `core/color_grade.py`（cube 生成 + lut3d） |
+| UI | `EnhancePage` Tab「一键调色」；播放器滤镜下拉 |
+| VM | `MainViewModel.start_color_grade` |
+
+**限制：** 调色矩阵为风格化近似，非专业电影 LUT 包；`lut3d` 失败时回退 `colorbalance`/`eq`。
+
+
 ---
 
 ## 6. 模块间依赖关系
@@ -1379,6 +1445,8 @@ main.py
     │   ├── core/player_backend.py  (subprocess → media_player.exe)
     │   ├── core/subtitle_track.py  (外挂 SRT/VTT/ASS)
     │   ├── core/live_subtitle/     (实时字幕 2-pass 接口预留)
+    │   ├── core/audio_viz.py       (showwavespic + ebur128)
+    │   ├── ui/waveform_widget.py   (波形/响度条)
     │   └── ui/gl_video_widget.py   (OpenGL 画面 + 字幕叠加)
     ├── ui/enhance_page.py / watermark_page.py
     │   ├── ui/exif_panel.py       (ExifTool 元数据面板)
@@ -1413,6 +1481,8 @@ main.py
 | Studio 视觉主题 | ✅ | `ui/theme.py` 炭黑+琥珀；顶栏胶囊；§3.3.1 |
 | 网易云热评滚动 | ✅ | `HotCommentsPage` + 外部爬虫脚本协议；默认演示数据 |
 | 首页本地播放器 | ✅ | FFmpeg 视频 + Qt 音乐；OpenGL 显示；**点击画面暂停/继续** |
+| 波形/响度可视化 | ✅ | showwavespic + ebur128；播放器下方可点击 seek（§5.12） |
+| 响度高潮切片 | ✅ | 场景「响度高潮」；ebur128 峰值成段（§5.12） |
 | 外挂字幕 | ✅ | SRT/VTT/简易 ASS；同名自动加载；`GlVideoWidget` 底部叠加 |
 | 实时字幕（流式/同传） | ⏳ | `core/live_subtitle` 接口预留（2-pass、WS 分路、云/FunASR 占位）；§5.8.2 |
 | OpenCV 帧处理 | ✅ | `FrameProcessor`：CPU + **OpenCL UMat**；标题 `OpenCV:clahe/opencl` |
@@ -1428,7 +1498,8 @@ main.py
 | 批量导出剪辑 | ✅ | `一键高光成片` → 分片 + `highlights_merged.mp4`（ffmpeg） |
 | 竖屏短视频导出 | ✅ | 切片成片→9:16 裁切+字幕烧录（§5.5）；居中/偏上/偏下 |
 | 静音剪掉 | ✅ | `静音剪掉` → silencedetect + 拼接紧凑口播 |
-| OpenCV 趣味滤镜 | ✅ | film / neon / comic / pixel；播放器下拉切换 |
+| OpenCV 趣味滤镜 | ✅ | film / warm / cool / vintage / neon / comic / pixel；播放器下拉 |
+| LUT 一键调色 | ✅ | 增强页 Tab + lut3d 导出；与 FrameProcessor 同预设（§5.13） |
 | OpenCV GPU 滤镜 | ✅ | OpenCL `cv::UMat`（`opencv_filter_device=auto`）；失败回退 CPU |
 | 链接下载 | ✅ | `DownloadPage` + yt-dlp；「仅获取信息」左右分栏 + `url_info_cache`（歌名/片名目录） |
 | 图片 EXIF | ✅ | 图片右上角悬浮摘要 +「全部」弹窗；`exif_panel.py`（§5.7） |
