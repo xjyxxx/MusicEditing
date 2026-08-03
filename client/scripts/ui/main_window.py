@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import threading
 
-from PySide6.QtCore import Qt, Signal, Slot, QSize, QTimer
+from PySide6.QtCore import Qt, Signal, Slot, QEvent, QSize, QTimer
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout, QGroupBox,
@@ -20,10 +20,12 @@ from ui.watermark_page import WatermarkPage
 from ui.enhance_page import EnhancePage
 from ui.hot_comments_page import HotCommentsPage
 from ui.download_page import DownloadPage
+from ui.pipeline_queue_page import PipelineQueuePage
 from ui.highlight_timeline import HighlightTimelineWidget
 from ui.theme import app_stylesheet
 from ui.workflow_link import (
     TAB_ENHANCE,
+    TAB_PIPELINE,
     TAB_WATERMARK,
     ask_video_handoff,
 )
@@ -95,6 +97,7 @@ class HomePage(QWidget):
             ("一键去水印", "复杂水印、边角水印智能去除", 3),
             ("热评滚动", "网易云热评叠加播放器滚动显示", 4),
             ("链接下载", "粘贴网页链接，下载视频或音频", 5),
+            ("全流程队列", "切片→超分→去水印，批量无人值守", TAB_PIPELINE),
         ]
         for i, (t, d, idx) in enumerate(cards):
             grid.addWidget(FeatureCard(t, d, idx, switch_tab), i // 3, i % 3)
@@ -127,6 +130,10 @@ class HomePage(QWidget):
 
     def shutdown_player(self):
         self._player.shutdown()
+
+    def apply_opencv_filter(self, mode: str) -> bool:
+        """应用首页播放器滤镜（今日氛围等）。"""
+        return self._player.set_filter_mode(mode)
 
 
 class SlicePage(QWidget):
@@ -275,6 +282,11 @@ class SlicePage(QWidget):
         btn_export = QPushButton("一键高光成片")
         btn_export.setToolTip("导出列表中的片段，并拼接成 highlights_merged.mp4")
         btn_export.clicked.connect(self._on_export)
+        btn_vertical = QPushButton("竖屏短视频")
+        btn_vertical.setToolTip(
+            "切片成片 → 9:16 裁切；若有同名 .srt/.vtt/.ass 则烧录字幕（片段会重定时）"
+        )
+        btn_vertical.clicked.connect(self._on_vertical_export)
         btn_silence = QPushButton("静音剪掉")
         btn_silence.setToolTip("检测静音段并裁掉，生成紧凑口播版")
         btn_silence.clicked.connect(self._on_compact_speech)
@@ -286,6 +298,7 @@ class SlicePage(QWidget):
         btn_wm.clicked.connect(lambda: self._send_to(TAB_WATERMARK))
         btn_row.addWidget(btn_analyze)
         btn_row.addWidget(btn_export)
+        btn_row.addWidget(btn_vertical)
         btn_row.addWidget(btn_silence)
         btn_row.addWidget(btn_enhance)
         btn_row.addWidget(btn_wm)
@@ -297,13 +310,15 @@ class SlicePage(QWidget):
         vm.highlightsReady.connect(self._on_highlights)
         vm.exportFinished.connect(self._on_export_done)
         vm.silenceFinished.connect(self._on_silence_done)
+        vm.verticalExportFinished.connect(self._on_vertical_done)
         vm.errorOccurred.connect(self._show_error)
         self._on_scene_changed(self._scene_combo.currentText())
 
     @Slot(str)
     def _on_scene_changed(self, scene: str):
         tips = {
-            "游戏高光": "规则时间轴切分（视觉模型待接入）。",
+            "游戏高光": "PySceneDetect 视觉场景切点（Adaptive）；失败则时间轴规则兜底。"
+                        "未安装可运行 scripts\\install_scenedetect.bat。",
             "演讲金句": "优先 Vosk 转写 + 金句词/LLM；无模型则用人声段候选。"
                         "完整识别请运行 scripts\\download_vosk_model.bat。",
             "日常精彩片段": "同演讲链路，偏向口语兴奋词；无 Vosk 用人声段。",
@@ -509,6 +524,64 @@ class SlicePage(QWidget):
         self._vm.export_highlights(out_dir, concat=True)
 
     @Slot()
+    def _on_vertical_export(self):
+        video = self._vm.get_app_state().current_video
+        if not video:
+            QMessageBox.warning(self, "提示", "请先导入视频")
+            return
+        segs = [
+            s for s in self._vm.get_app_state().highlight_segments
+            if s.selected and s.end_sec > s.start_sec
+        ]
+        use_hl = bool(segs)
+        if not use_hl:
+            tip = (
+                "当前没有高光片段。\n"
+                "将对整段视频做 9:16 竖屏裁切（有同名字幕则烧录）。\n\n继续？"
+            )
+            if QMessageBox.question(self, "竖屏短视频", tip) != QMessageBox.Yes:
+                return
+
+        # 裁切位置
+        bias_box = QMessageBox(self)
+        bias_box.setWindowTitle("竖屏裁切位置")
+        bias_box.setText(
+            "选择画面裁切锚点（横屏素材变 9:16 时保留哪一侧）："
+            + ("\n将先拼接高光成片再竖屏导出。" if use_hl else "")
+        )
+        btn_c = bias_box.addButton("居中", QMessageBox.AcceptRole)
+        btn_t = bias_box.addButton("偏上", QMessageBox.AcceptRole)
+        btn_b = bias_box.addButton("偏下", QMessageBox.AcceptRole)
+        bias_box.addButton("取消", QMessageBox.RejectRole)
+        bias_box.exec()
+        clicked = bias_box.clickedButton()
+        if clicked is None or clicked not in (btn_c, btn_t, btn_b):
+            return
+        if clicked is btn_t:
+            bias = "top"
+        elif clicked is btn_b:
+            bias = "bottom"
+        else:
+            bias = "center"
+
+        base = os.path.splitext(os.path.basename(video.file_path))[0]
+        default = f"{base}_vertical.mp4"
+        out, _ = QFileDialog.getSaveFileName(
+            self, "保存竖屏短视频", default,
+            "MP4 (*.mp4);;所有文件 (*.*)",
+        )
+        if not out:
+            return
+        self._progress.setVisible(True)
+        self._progress.setValue(0)
+        self._vm.export_vertical_short(
+            out,
+            crop_bias=bias,
+            burn_subtitles=True,
+            use_highlights=use_hl,
+        )
+
+    @Slot()
     def _on_compact_speech(self):
         video = self._vm.get_app_state().current_video
         if not video:
@@ -579,6 +652,21 @@ class SlicePage(QWidget):
             self._handoff(path, tab)
 
     @Slot(str)
+    def _on_vertical_done(self, path: str):
+        self._progress.setValue(100)
+        self._last_result_path = path or ""
+        tab = ask_video_handoff(
+            self,
+            "竖屏短视频完成",
+            f"9:16 成片已保存：\n{path}\n\n"
+            "有同名字幕时已尝试烧录（高光片段已重定时）。\n"
+            "可继续送去超分或去水印。",
+            [("送去超分", TAB_ENHANCE), ("送去去水印", TAB_WATERMARK)],
+        )
+        if tab is not None and self._handoff:
+            self._handoff(path, tab)
+
+    @Slot(str)
     def _show_error(self, msg):
         self._btn_analyze.setEnabled(True)
         self._btn_analyze.setText("AI 智能分析")
@@ -604,7 +692,8 @@ class PlaceholderPage(QWidget):
 
 
 class MainWindow(QMainWindow):
-    weatherUpdated = Signal(str)
+    # WeatherInfo | None（失败时为 None）
+    weatherUpdated = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -613,6 +702,8 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(app_stylesheet())
 
         self._vm = MainViewModel()
+        self._weather_mood = None
+        self._weather_mood_hinted = False
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -636,6 +727,7 @@ class MainWindow(QMainWindow):
         self._weather_label = QLabel("天气: …")
         self._weather_label.setObjectName("ChromeWeather")
         self._weather_label.setToolTip("按本机公网 IP 定位本地城市，经 Open-Meteo 显示天气")
+        self._weather_label.installEventFilter(self)
         self._version_label = QLabel(f"v{self._vm.version}")
         self._version_label.setObjectName("ChromeVersion")
 
@@ -650,10 +742,9 @@ class MainWindow(QMainWindow):
 
         self._vm.gpuNameChanged.connect(lambda n: self._gpu_label.setText(f"GPU  {n}"))
         self._vm.authTypeChanged.connect(lambda a: self._auth_label.setText(f"授权  {a}"))
-        self.weatherUpdated.connect(self._weather_label.setText)
+        self.weatherUpdated.connect(self._on_weather_updated)
         self._gpu_label.setText(f"GPU  {self._vm.gpu_name}")
         self._auth_label.setText(f"授权  {self._vm.auth_type}")
-        self._start_weather_refresh()
 
         # 标签页
         self._tabs = QTabWidget()
@@ -669,6 +760,8 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._hot_comments_page, "热评滚动")
         self._download_page = DownloadPage(self._vm)
         self._tabs.addTab(self._download_page, "链接下载")
+        self._pipeline_page = PipelineQueuePage(self._vm)
+        self._tabs.addTab(self._pipeline_page, "全流程队列")
         self._tabs.addTab(PlaceholderPage("个人中心",
             "卡密兑换、版本更新、关于软件。"), "个人中心")
         main_layout.addWidget(self._tabs, 1)
@@ -681,6 +774,9 @@ class MainWindow(QMainWindow):
         self._status_label.setObjectName("FooterStatus")
         self._vm.statusMessageChanged.connect(self._status_label.setText)
         main_layout.addWidget(self._status_label)
+
+        # 天气刷新依赖底栏提示，放在 status_label 之后
+        self._start_weather_refresh()
 
         # GPU 提示
         from core.app_logic import AppLogic
@@ -701,16 +797,75 @@ class MainWindow(QMainWindow):
 
     def _refresh_weather(self):
         def worker():
+            info = None
             try:
-                from core.weather_service import fetch_local_weather, format_status_text, format_status_error
+                from core.weather_service import fetch_local_weather
                 info = fetch_local_weather(timeout=5.0)
-                text = format_status_text(info)
-            except Exception as e:
-                from core.weather_service import format_status_error
-                text = format_status_error(e)
-            self.weatherUpdated.emit(text)
+            except Exception:
+                info = None
+            self.weatherUpdated.emit(info)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    @Slot(object)
+    def _on_weather_updated(self, info):
+        from core.weather_service import (
+            format_status_error,
+            format_status_text,
+            recommend_mood,
+        )
+
+        if info is None:
+            self._weather_mood = None
+            self._weather_label.setText(format_status_error())
+            self._weather_label.setToolTip("天气暂不可用（网络或定位失败）")
+            self._weather_label.setCursor(Qt.ArrowCursor)
+            return
+
+        mood = recommend_mood(info.weather_code)
+        self._weather_mood = mood
+        self._weather_label.setText(format_status_text(info))
+        if mood:
+            tip = (
+                f"{info.city} · {info.weather_text} {info.temperature_c:.0f}°C\n"
+                f"今日氛围：{mood.reason}\n"
+                f"点击应用「{mood.label}」滤镜到首页播放器"
+            )
+            self._weather_label.setToolTip(tip)
+            self._weather_label.setCursor(Qt.PointingHandCursor)
+            if not self._weather_mood_hinted:
+                self._weather_mood_hinted = True
+                self._status_label.setText(
+                    f"今日氛围 · {mood.reason}，点击顶栏天气可套用「{mood.label}」"
+                )
+        else:
+            self._weather_label.setToolTip(
+                f"{info.city} · {info.weather_text} {info.temperature_c:.0f}°C\n"
+                "按本机公网 IP 定位，经 Open-Meteo 显示天气"
+            )
+            self._weather_label.setCursor(Qt.ArrowCursor)
+
+    def eventFilter(self, obj, event):
+        if obj is self._weather_label and event.type() == QEvent.Type.MouseButtonRelease:
+            if event.button() == Qt.LeftButton:
+                self._on_weather_clicked()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _on_weather_clicked(self):
+        mood = self._weather_mood
+        if mood is None:
+            return
+        self._tabs.setCurrentIndex(0)
+        ok = self._home_page.apply_opencv_filter(mood.filter_mode)
+        if ok:
+            self._status_label.setText(
+                f"今日氛围 · 已套用「{mood.label}」滤镜（{mood.reason}）"
+            )
+        else:
+            self._status_label.setText(
+                f"今日氛围 · 无法应用「{mood.label}」滤镜（播放器未就绪或模式不可用）"
+            )
 
     def _switch_tab(self, index: int):
         self._tabs.setCurrentIndex(index)

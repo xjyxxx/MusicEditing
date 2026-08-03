@@ -153,17 +153,20 @@ MainWindow.shutdown()
 | `update_enhance_range(start, end)` | 视频超分时间段 |
 | `update_slice_params(...)` | 参数滑块变更 |
 | `set_output_dir(path)` | 导出目录选择 |
+| `export_highlights` / `compact_speech` / `export_vertical_short` | SlicePage 成片 / 静音 / 竖屏 |
+| `start_pipeline_queue` / pause / skip / cancel | 全流程队列页 |
 
 ### 3.3 View 层 (`client/scripts/ui/main_window.py`)
 
 | 页面 | 类 | 状态 |
 |------|-----|------|
 | 首页 | `HomePage` + `VideoPlayerWidget` | 本地预览 + 功能卡片 |
-| 智能切片 | `SlicePage` + `HighlightTimelineWidget` | 分析 / 手动切片 / 缩略图时间轴 / 成片 |
+| 智能切片 | `SlicePage` + `HighlightTimelineWidget` | 分析 / 手动 / 成片 / **竖屏短视频** |
 | 画质增强 | `EnhancePage` + `ExifPanel` | 图片超分 · 视频超分 · **视频补帧**；内页 Scroll 深色底 |
 | 去水印 | `WatermarkPage` + `RegionSelectorWidget` + `ExifPanel` | 图片/视频去水印 + EXIF |
 | 热评滚动 | `HotCommentsPage` | 歌曲链接/ID → 热评滚动 |
 | 链接下载 | `DownloadPage` | yt-dlp 下载 → 可送首页播放 |
+| 全流程队列 | `PipelineQueuePage` | 切片成片→超分→去水印；批量无人值守（§5.9.1） |
 | 个人中心 | `PlaceholderPage` | 占位（授权待接入） |
 
 播放器组件：`client/scripts/ui/video_player.py`（`GlVideoWidget` OpenGL + `PlayerBackend` → `media_player.exe`）
@@ -219,10 +222,10 @@ opencv_filter_playback=false
 
 | 值 | 效果 | OpenCV 实现 |
 |----|------|-------------|
-| `clahe`（默认） | 对比度增强，偏「画质预览」 | `COLOR_RGB2Lab` + `createCLAHE` |
+| `clahe`（默认） | 明亮 / 对比度增强（晴天氛围推荐） | `COLOR_RGB2Lab` + `createCLAHE` |
 | `denoise` | 轻度降噪 | `bilateralFilter` |
 | `sharpen` | 锐化 | `GaussianBlur` + `addWeighted` |
-| `film` | 胶片暖色 + 暗角 | sepia 矩阵 + vignette |
+| `film` | 胶片暖色 + 暗角（雨天氛围推荐） | sepia 矩阵 + vignette |
 | `neon` | 霓虹描边 | `Canny` 边缘叠色 |
 | `comic` | 漫画风 | bilateral + 自适应阈值墨线 |
 | `pixel` | 像素风 | 缩小再 `INTER_NEAREST` 放大 |
@@ -465,6 +468,7 @@ GPU 在本产品中承担 **AI 推理** 与 **视频硬解码** 两类加速目�
 | **离线批处理解码** | `VideoDecoder` D3D11VA | ✅ x64 已实现 | `preferHwaccel` / `media_cli iterate --hw`；失败回退 CPU |
 | **OpenCV 帧滤镜** | CPU `cv::Mat` | CPU 运行 | 硬解后在 CPU 做 CLAHE 等，与硬解串联 |
 | **Vosk ASR** | CPU 推理 | ✅ 可选 | `download_vosk_model.bat`；无模型时人声段兜底 |
+| **实时字幕（流式）** | 云/本地流式 ASR | ⏳ 接口预留 | `core/live_subtitle`：2-pass + WS 分路；见 §5.8 |
 | **llama.cpp 高光分析** | CPU（`n_gpu_layers=0`） | ⏳ 接口已有 | 需 `GGML_CUDA=ON` 编译 + 传入层数 |
 | **去水印 LaMa** | ONNX Runtime + OpenCV | ✅ CPU EP（默认） | 已移除项目内 `cuda_runtime`；可选 `MUSIC_ORT_CUDA=1` |
 | **4K 超分** | Real-ESRGAN ONNX + OpenCV | ✅ CPU EP（默认） | 2× 半分辨率快路径 + tile=384；CUDA 需系统 CUDA 12 运行库（`cublasLt64_12.dll` 等） |
@@ -989,10 +993,38 @@ SlicePage._on_highlights
 |----|------|
 | `vosk_model_dir` | Vosk 中文模型**绝对路径**（含 `am/final.mdl`）；留空自动探测，勿填 `.` |
 | `llm_model_path` | `.gguf` 模型路径；留空则 ASR + 规则打分 |
+| `live_subtitle_provider` | 实时字幕后端：`stub` / `funasr` / `aliyun` / `tencent`（§5.8） |
+| `live_subtitle_mode` | `two_pass` / `realtime_dynamic` / `delayed_steady` |
 
-### 5.2 游戏高光（占位）
+### 5.2 游戏高光（PySceneDetect 场景切点）
 
-**场景：游戏高光** → `_analyze_game_fallback()`：抽音频 + 时间轴规则切分，视觉动作检测待接入。
+**场景：游戏高光** → `_analyze_game_fallback()`：
+
+```
+SlicePage「游戏高光」→ start_slice_analysis
+  → _analyze_game_fallback
+      → core.scene_detect.detect_scene_ranges
+            AdaptiveDetector（默认，抗快速运镜）或 ContentDetector
+            敏感度 → adaptive_threshold / content threshold
+      → ranges_to_clipped_segments（按最短/最长整形，最多约 24 段）
+      → 失败 / 未安装 → 时间轴规则 `_simulate_highlights` 兜底
+```
+
+| 资源 | 路径 |
+|------|------|
+| 封装 | `client/scripts/core/scene_detect.py` |
+| 第三方库 | `scenedetect`（[PySceneDetect](https://www.scenedetect.com/)） |
+| 安装 | `run_ui_*.bat` 自动 `pip install -e third_party/PySceneDetect`；或 `scripts/install_scenedetect.bat` |
+| 本地源码 | **已随仓库** `third_party/PySceneDetect`（见 `README.MusicEditing.md`） |
+
+**配置（`app.conf`）：**
+
+| 键 | 说明 |
+|----|------|
+| `scenedetect_method` | `adaptive`（默认）\| `content` |
+| `scenedetect_frame_skip` | 跳帧加速，`0` 最准 |
+
+**限制：** 切的是画面内容变化场景，不是「击杀/高光事件」语义；后者仍属视觉模型范畴。长视频可把 `scenedetect_frame_skip` 调到 `1`–`3` 提速。
 
 ### 5.2.1 网易云热评滚动（已落地）
 
@@ -1062,7 +1094,7 @@ View 更新进度与结果预览
 
 **当前限制：** 视频 AI 超分较慢。对比区左原图 / 右超分结果，中间 1px 细线；滚轮缩放当前侧，Ctrl+滚轮两侧同步；拖拽平移。预览经 `image_loader`（OpenCV 解码）；显示为不透明底软件合成，避免缩小时残影。
 
-### 5.5 一键高光成片 / 静音剪掉
+### 5.5 一键高光成片 / 静音剪掉 / 竖屏短视频
 
 ```
 SlicePage「一键高光成片」
@@ -1078,9 +1110,20 @@ SlicePage「静音剪掉」
           → ffmpeg silencedetect 解析静音区间
           → 反推有声段 → export_clip × N → concat
   → silenceFinished
+
+SlicePage「竖屏短视频」
+  → 选裁切锚点（居中/偏上/偏下）→ 保存路径
+  → MainViewModel.export_vertical_short
+      ├─ 有高光片段：export_highlights 临时成片
+      ├─ 同名 .srt/.vtt/.ass：重定时（按片段拼接轴）→ 临时 burn.srt
+      └─ MediaBridge.export_vertical_short
+            → ffmpeg scale+crop 9:16（默认 1080x1920）
+            → 可选 subtitles 滤镜烧录
+  → verticalExportFinished → 可送去超分/去水印
 ```
 
-优先走捆绑 `ffmpeg.exe`，无需新 C++ CLI。静音阈值默认 `-35dB`、最短静音 `0.45s`。
+优先走捆绑 `ffmpeg.exe`，无需新 C++ CLI。静音阈值默认 `-35dB`、最短静音 `0.45s`。  
+竖屏字幕依赖 **libass/subtitles** 滤镜；失败时自动降级为无字幕竖屏。裁切不做主体追踪（MVP）。
 
 ### 5.6 链接下载（yt-dlp）
 
@@ -1125,9 +1168,11 @@ EnhancePage / WatermarkPage 导入图片
 
 **注意：** 复制到 `bin/Release` 时必须同时复制 `exiftool_files`。不再在图片下方常驻大段文本。
 
-### 5.8 外挂字幕（播放器叠加）
+### 5.8 外挂字幕与实时字幕
 
-对应产品：本地播放时显示字幕。
+对应产品：本地播放显示字幕；实时同传按平台常见手法预留接口。
+
+#### 5.8.1 外挂字幕（播放器叠加）
 
 ```
 打开视频 / 点击「字幕…」
@@ -1149,6 +1194,36 @@ View: VideoPlayerWidget
 
 **当前限制：** 仅外挂文件，不抽内嵌轨；ASS 只取文本时间轴，不渲染样式/特效。
 
+#### 5.8.2 实时字幕（流式 2-pass + 分路，接口预留）
+
+对齐 B 站/虎牙/云厂商常见工程手法（**已去掉 Whisper 离线批处理路径**）：
+
+```
+「实时字幕」
+  → LiveSubtitleConfig（app.conf live_subtitle_*）
+  → create_pipeline()
+        StreamingAsrBackend（Pass-1 草稿 partial）
+        → [句末] Pass-2 / end_utterance → final（稳态订正）
+        → [可选] TranslationBackend
+        → FanOutSink：PlayerOverlaySink + WebSocketSubtitleSink
+```
+
+| 手法 | 代码入口 | 状态 |
+|------|----------|------|
+| 2-pass 草稿→订正 | `TwoPassSubtitlePipeline` + `SubtitleDisplayMode` | ✅ 编排层 |
+| 字幕与视频分路 | `WebSocketSubtitleSink` | ⏳ WS 发送体预留 |
+| 游戏热词 | `HotwordLexicon` / `set_hotwords` | ✅ 数据结构 |
+| 云 ASR / FunASR | `providers`: stub / aliyun / tencent / funasr | ⏳ 占位，未接 SDK |
+| 播放器 PCM 抽头 | `pipeline.feed_pcm` | ⏳ 待接通解码音轨 |
+
+| 资源 | 路径 |
+|------|------|
+| 包 | `client/scripts/core/live_subtitle/` |
+| 配置 | `app.conf`：`live_subtitle_provider|mode|hotwords|ws_url|…` |
+| UI | `VideoPlayerWidget`「实时字幕」 |
+
+**接入步骤（扩展）：** 实现 `StreamingAsrBackend` → 在 `providers.build_asr` 注册 → 设置 `live_subtitle_provider` → 从播放器/直播拉流向 `feed_pcm` 喂 16 kHz s16le mono。
+
 ### 5.9 三大功能串联（一站式剪辑，异步）
 
 对应产品文档 §5。任意一页 `import_video` 写入 `AppState.current_video`，其它页经 `videoLoaded` 同步；**结果接力**通过 `MainWindow.open_with_video(path, tab)`。
@@ -1161,6 +1236,7 @@ View: VideoPlayerWidget
 | `start_slice_analysis` | 后台 → `progressUpdated` / `highlightsReady` |
 | 超分 / 去水印 / 导出高光 / 静音剪掉 | 已后台 |
 | `open_with_video` 切 Tab | 主线程（先切页再异步 import） |
+| `start_pipeline_queue` | 后台单线程顺序跑完整条链路（§5.9.1） |
 
 ```
 切片「一键高光成片 / 静音剪掉」完成（后台）
@@ -1179,7 +1255,34 @@ View: VideoPlayerWidget
 | 弹窗 | `ui/workflow_link.py` |
 | 触发 | `SlicePage` / `EnhancePage` / `WatermarkPage` |
 
-**当前限制：** 未做「自动切片+超分+去水印」无人值守批量队列；单片段高光仍以合并成片为主接力。
+### 5.9.1 批量全流程队列（无人值守）
+
+对应产品文档 §5.4「自动切片 + 画质增强 + 去水印」一站式批量。独立 Tab「全流程队列」，**不走**各页完成弹窗，直接调 `MediaBridge` + 切片分析逻辑。
+
+```
+PipelineQueuePage「开始队列」
+  → MainViewModel.start_pipeline_queue(paths, PipelineSettings)
+      → 后台线程 core/pipeline_runner.run_pipeline_queue
+            对每个视频顺序：
+              probe
+              → [可选] analyze（复用演讲/游戏切片）→ export_highlights → highlights_merged.mp4
+              → [可选] upscale_video（OpenCV / Real-ESRGAN）
+              → [可选] watermark_inpaint_video（角标预设区域）
+      → pipelineItemUpdated / pipelineFinished（主线程刷新列表）
+```
+
+| 资源 | 路径 |
+|------|------|
+| UI | `ui/pipeline_queue_page.py`（双栏：左队列 / 右步骤芯片+参数；底栏进度与操作） |
+| 模型 | `models/pipeline_model.py` |
+| 编排 | `core/pipeline_runner.py` |
+| VM | `MainViewModel.start_pipeline_queue` / pause / skip / cancel |
+
+**参数要点：** 步骤可勾选；超分默认 OpenCV 2×，试跑秒数 `0=全程`；去水印默认关，开启后用右上/左上等角标框（按成片分辨率比例），无需逐文件框选。输出：`output_root/<文件名>/`（未选目录则视频旁 `pipeline_out/<文件名>/`）。
+
+**控制：** 暂停（进度回调处挂起）、跳过当前、取消队列。
+
+**限制：** 单线程顺序执行（非底层多任务并行）；角标去水印是启发式框，复杂游走水印仍需去水印页手动画框；切片场景与单页相同（游戏为规则兜底）。
 
 ### 5.10 视频补帧（FFmpeg minterpolate）
 
@@ -1209,7 +1312,7 @@ EnhancePage「视频补帧」
 
 ### 5.11 状态栏天气（IP 定位 + Open-Meteo）
 
-顶栏显示本地城市与当前天气；**不阻塞 UI**。
+顶栏显示本地城市与当前天气；**不阻塞 UI**。晴/雨时附带「今日氛围」滤镜推荐（趣味彩蛋）。
 
 ```
 MainWindow.__init__
@@ -1221,17 +1324,31 @@ MainWindow.__init__
                 │     ├─ ip-api → Nominatim 反查中文城市
                 │     └─ ipwho.is → Nominatim 反查
                 └─ Open-Meteo /v1/forecast?current=temperature_2m,weather_code,…
-          → weatherUpdated.emit("北京 晴 26°C")
-              → _weather_label.setText
+          → weatherUpdated.emit(WeatherInfo | None)
+              → _on_weather_updated
+                    ├─ 文案：如「深圳 小毛毛雨 25°C · 胶片」
+                    ├─ recommend_mood(code)：晴→明亮(clahe) / 雨→胶片(film)
+                    └─ 可点天气胶囊 → 切首页 + VideoPlayerWidget.set_filter_mode
 ```
 
 | 资源 | 路径 |
 |------|------|
-| UI | `MainWindow._weather_label` / `_refresh_weather` |
-| 服务 | `core/weather_service.py` |
+| UI | `MainWindow._weather_label` / `_on_weather_clicked` |
+| 服务 | `core/weather_service.py`（`recommend_mood` / `WeatherMood`） |
+| 滤镜落地 | `HomePage.apply_opencv_filter` → `VideoPlayerWidget.set_filter_mode` |
 | 天气 API | `https://api.open-meteo.com`（免 Key） |
 
-**限制：** 城市来自**本机出口 IP 粗定位**（代理/VPN 会偏到出口城市，非 GPS）；单次请求超时 5s，失败显示「天气: 暂不可用」。
+**今日氛围映射（WMO code）：**
+
+| 天气 | code | 推荐标签 | OpenCV 模式 |
+|------|------|----------|-------------|
+| 晴 / 晴间多云 | 0, 1 | 明亮 | `clahe` |
+| 毛毛雨/雨/阵雨/雷暴 | 50–69, 80–82, ≥95 | 胶片 | `film` |
+| 其它 | — | （无推荐） | — |
+
+点击天气胶囊：切到首页并把滤镜套到本地预览播放器（需已打开视频才看得见画面变化；纯音乐无视频轨时滤镜下拉仍会切换）。首次拉到可推荐天气时，底栏提示一次「今日氛围…」。
+
+**限制：** 城市来自**本机出口 IP 粗定位**（代理/VPN 会偏到出口城市，非 GPS）；单次请求超时 5s，失败显示「天气: 暂不可用」。不自动改滤镜，需用户点击。
 
 
 ---
@@ -1261,6 +1378,7 @@ main.py
     ├── ui/video_player.py
     │   ├── core/player_backend.py  (subprocess → media_player.exe)
     │   ├── core/subtitle_track.py  (外挂 SRT/VTT/ASS)
+    │   ├── core/live_subtitle/     (实时字幕 2-pass 接口预留)
     │   └── ui/gl_video_widget.py   (OpenGL 画面 + 字幕叠加)
     ├── ui/enhance_page.py / watermark_page.py
     │   ├── ui/exif_panel.py       (ExifTool 元数据面板)
@@ -1269,6 +1387,10 @@ main.py
         ├── models/video_model.py
         ├── core/app_logic.py      (GPU 检测)
         ├── core/weather_service.py (IP 定位 + Open-Meteo 天气)
+        ├── core/pipeline_runner.py (批量全流程：切片→超分→去水印)
+        ├── core/scene_detect.py (PySceneDetect 游戏高光切点)
+        ├── core/live_subtitle/ (流式字幕 2-pass / WS 分路预留)
+        ├── core/asr_engine.py (Vosk)
         └── core/media_bridge.py   (subprocess → media_cli / FFmpeg；含 interpolate_video 补帧)
 ```
 
@@ -1282,7 +1404,8 @@ main.py
 | 视频帧遍历 | ✅ | iterateFrames + CLI |
 | 缩略图提取 | ✅ | `media_cli thumbnail` + `MediaBridge.extract_thumbnail` + 磁盘小图缓存 |
 | 高光时间轴（缩略图） | ✅ | `HighlightTimelineWidget` 色块+胶片条；列表带图标；见 §5.1.1 |
-| 三大功能串联 | ✅ | `open_with_video` + 完成弹窗/「送去」；批量全流程队列 ⏳ |
+| 三大功能串联 | ✅ | `open_with_video` + 完成弹窗/「送去」；批量全流程队列见下 |
+| 批量全流程队列 | ✅ | `PipelineQueuePage`：切片成片→超分→去水印；暂停/跳过/取消（§5.9.1） |
 | 切片/导入异步 | ✅ | `import_video` / `start_slice_analysis` 后台线程；UI 收 Signal |
 | 手动切片 | ✅ | SlicePage 起止时间添加/删除/清空；不依赖 Vosk |
 | 视频补帧 | ✅ | EnhancePage：FFmpeg minterpolate；默认快速 blend，可选精细 MCI；默认试 15 秒 |
@@ -1291,17 +1414,19 @@ main.py
 | 网易云热评滚动 | ✅ | `HotCommentsPage` + 外部爬虫脚本协议；默认演示数据 |
 | 首页本地播放器 | ✅ | FFmpeg 视频 + Qt 音乐；OpenGL 显示；**点击画面暂停/继续** |
 | 外挂字幕 | ✅ | SRT/VTT/简易 ASS；同名自动加载；`GlVideoWidget` 底部叠加 |
+| 实时字幕（流式/同传） | ⏳ | `core/live_subtitle` 接口预留（2-pass、WS 分路、云/FunASR 占位）；§5.8.2 |
 | OpenCV 帧处理 | ✅ | `FrameProcessor`：CPU + **OpenCL UMat**；标题 `OpenCV:clahe/opencl` |
 | GLEW / OpenGL 第三方 | ✅ | `third_party/opengl`；`media_player` 链 GLEW |
 | OpenGL 视频显示 | ✅ | `GlVideoWidget` 替换 QLabel；首页/热评页播放器共用 |
 | MVVM 双向绑定 | ✅ | Signal/Slot |
 | GPU 检测与状态栏 | ✅ | `nvidia-smi`；顶栏 `GPU: 型号` / `CPU 模式`（§3.6） |
-| 状态栏天气 | ✅ | IP 定位城市 + Open-Meteo；`weather_service.py`（§5.11） |
+| 状态栏天气 | ✅ | IP 定位 + Open-Meteo；晴/雨「今日氛围」推荐滤镜（§5.11） |
 | FFmpeg GPU 硬解（D3D11VA） | ✅ | 播放器 + `VideoDecoder`/`iterate --hw`；失败回退 CPU |
 | llama.cpp GPU 推理 | ⏳ | `n_gpu_layers` 接口已有，默认 0；需 `GGML_CUDA=ON` |
 | AI 高光识别（演讲/解说） | ✅ | 演讲金句：Vosk+LLM/金句词；无人声模型时人声段兜底 |
-| AI 高光识别（游戏） | ⏳ | 规则兜底，视觉模型待接入 |
+| AI 高光识别（游戏） | ✅ | PySceneDetect 场景切点（§5.2）；失败回退时间规则 |
 | 批量导出剪辑 | ✅ | `一键高光成片` → 分片 + `highlights_merged.mp4`（ffmpeg） |
+| 竖屏短视频导出 | ✅ | 切片成片→9:16 裁切+字幕烧录（§5.5）；居中/偏上/偏下 |
 | 静音剪掉 | ✅ | `静音剪掉` → silencedetect + 拼接紧凑口播 |
 | OpenCV 趣味滤镜 | ✅ | film / neon / comic / pixel；播放器下拉切换 |
 | OpenCV GPU 滤镜 | ✅ | OpenCL `cv::UMat`（`opencv_filter_device=auto`）；失败回退 CPU |
@@ -1354,20 +1479,20 @@ endif()
 
 1. 在 `client/` 或 `shared/` 新增 `llm_engine` 模块，`target_link_libraries(... music_llama)`
 2. 封装 `llama_model_load` / `llama_decode` 为 C API，经 `media_cli` 或独立 exe 暴露给 Python
-3. 演讲链路已接 Vosk + analyze-speech；游戏视觉模型仍可在 `_analyze_game_fallback` 增强
+3. 演讲链路已接 Vosk + analyze-speech；游戏高光已接 PySceneDetect 场景切点（§5.2），语义级「击杀检测」仍可另接视觉模型
 
 ### 9.2 接入 PyTorch AI 模型
 
-游戏高光若接视觉模型：可在 `_analyze_game_fallback` 中增加抽帧/推理；演讲链路已走 ASR，无需逐帧 PyTorch。
+游戏「击杀/高光事件」语义检测若接视觉模型：可在 `_analyze_game_fallback` 中叠在 PySceneDetect 结果之上；演讲链路已走 ASR，无需逐帧 PyTorch。
 
 ### 9.3 视频导出（已落地）
 
 已用 Python + 捆绑 ffmpeg 实现，无需 C++ `clip` 子命令：
 
-1. `MediaBridge.export_clip` / `concat_clips` / `export_highlights`
+1. `MediaBridge.export_clip` / `concat_clips` / `export_highlights` / `export_vertical_short`
 2. `MediaBridge.detect_speech_segments` / `remove_silence`
-3. `MainViewModel.export_highlights` / `compact_speech`
-4. `SlicePage`：「一键高光成片」「静音剪掉」
+3. `MainViewModel.export_highlights` / `compact_speech` / `export_vertical_short`
+4. `SlicePage`：「一键高光成片」「竖屏短视频」「静音剪掉」
 
 ### 9.4 x64 与 Win32 并存
 
@@ -1391,6 +1516,15 @@ x64 构建后 Python 可逐步改为 **ctypes 直接加载** `media_engine.dll`�
 
 待做：llama `GGML_CUDA` + `n_gpu_layers`。
 
+### 9.6 接入实时字幕（流式 ASR / 云同传）
+
+见 **§5.8.2**。步骤摘要：
+
+1. 实现 `StreamingAsrBackend`（`feed_pcm` / `on_partial` / `on_final`）
+2. 在 `core/live_subtitle/providers.py` 的 `build_asr` 注册，并设 `live_subtitle_provider`
+3. 可选：实现 `TranslationBackend`、填写 `live_subtitle_ws_url` 启用字幕分路
+4. 接通播放器或直播音轨 PCM → `TwoPassSubtitlePipeline.feed_pcm`
+
 ---
 
 ## 10. 运行命令速查
@@ -1407,4 +1541,5 @@ x64 构建后 Python 可逐步改为 **ctypes 直接加载** `media_engine.dll`�
 .\scripts\download_yt_dlp.bat              # 链接下载引擎 yt-dlp.exe → third_party/yt-dlp/
 .\scripts\download_exiftool.bat            # 图片 EXIF：exiftool.exe + exiftool_files → third_party/exiftool/
 .\scripts\download_vosk_model.bat          # 演讲金句 ASR：vosk-model-small-cn-0.22 → models/
+.\scripts\install_scenedetect.bat          # 游戏高光：安装 PySceneDetect（scenedetect）
 ```

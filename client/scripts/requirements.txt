@@ -2,3 +2,5 @@ PySide6>=6.6.0
 vosk>=0.3.45
 numpy>=1.24.0
 opencv-python-headless>=4.8.0
+# PySceneDetect: install via run_ui_*.bat / scripts/install_scenedetect.bat
+# from absolute path third_party/PySceneDetect (relative -e paths break under pip+cwd)

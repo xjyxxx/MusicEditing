@@ -147,17 +147,18 @@ if exist "%PROJECT_DIR%\third_party\exiftool\exiftool.exe" (
     )
 )
 
+set PYTHONUTF8=1
 pip install -r "%PROJECT_DIR%\client\scripts\requirements.txt" -q
-
 if errorlevel 1 (
-
     echo [错误] Python 依赖安装失败
-
     exit /b 1
-
 )
-
-
+if exist "%PROJECT_DIR%\third_party\PySceneDetect\scenedetect\__init__.py" (
+    pip install -e "%PROJECT_DIR%\third_party\PySceneDetect" -q
+    if errorlevel 1 (
+        echo [警告] PySceneDetect 安装失败，游戏高光将回退时间规则
+    )
+)
 
 set "PATH=%BIN%;%PATH%"
 

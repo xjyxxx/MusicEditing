@@ -15,6 +15,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+*.egg-info/
 
 # IDE / 工具
 .vs/

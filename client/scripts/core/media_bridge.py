@@ -1769,5 +1769,133 @@ class MediaBridge:
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    @staticmethod
+    def _escape_subtitles_path(path: str) -> str:
+        """FFmpeg subtitles 滤镜路径转义（Windows 盘符冒号等）。"""
+        p = os.path.abspath(path).replace("\\", "/")
+        p = p.replace("\\", "/")
+        p = p.replace(":", r"\:")
+        p = p.replace("'", r"\'")
+        p = p.replace("[", r"\[")
+        p = p.replace("]", r"\]")
+        return p
+
+    def export_vertical_short(
+        self,
+        input_path: str,
+        output_path: str,
+        *,
+        width: int = 1080,
+        height: int = 1920,
+        crop_bias: str = "center",
+        subtitle_path: Optional[str] = None,
+        on_progress: Optional[Callable[[float, str], None]] = None,
+    ) -> str:
+        """
+        竖屏短视频：缩放到覆盖 9:16 后裁切，可选烧录外挂字幕。
+        crop_bias: center | top | bottom（裁切窗在画面上的垂直位置）。
+        """
+        if not input_path or not os.path.isfile(input_path):
+            raise FileNotFoundError(f"输入不存在: {input_path}")
+        w = int(width) if int(width) > 0 else 1080
+        h = int(height) if int(height) > 0 else 1920
+        # 保证偶数（yuv420）
+        w -= w % 2
+        h -= h % 2
+        bias = (crop_bias or "center").strip().lower()
+        if bias in ("top", "上", "0"):
+            y_expr = "0"
+            bias_label = "偏上"
+        elif bias in ("bottom", "下", "1"):
+            y_expr = "ih-oh"
+            bias_label = "偏下"
+        else:
+            y_expr = "(ih-oh)/2"
+            bias_label = "居中"
+
+        def report(p: float, msg: str):
+            if on_progress:
+                on_progress(p, msg)
+
+        ffmpeg = _find_ffmpeg()
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+
+        # scale 覆盖目标画幅 → crop 到精确 9:16
+        vf_parts = [
+            f"scale={w}:{h}:force_original_aspect_ratio=increase",
+            f"crop={w}:{h}:(iw-ow)/2:{y_expr}",
+        ]
+
+        sub_tmp: Optional[str] = None
+        if subtitle_path and os.path.isfile(subtitle_path):
+            report(8.0, "准备字幕烧录…")
+            # 拷到临时 ASCII 名，避免中文路径/空格坑 subtitles 滤镜
+            ext = os.path.splitext(subtitle_path)[1].lower() or ".srt"
+            if ext not in (".srt", ".ass", ".ssa", ".vtt"):
+                ext = ".srt"
+            fd, sub_tmp = tempfile.mkstemp(prefix="me_sub_", suffix=ext)
+            os.close(fd)
+            shutil.copy2(subtitle_path, sub_tmp)
+            esc = self._escape_subtitles_path(sub_tmp)
+            # 竖屏底部大字号
+            style = (
+                "FontName=Microsoft YaHei,FontSize=16,"
+                "PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,"
+                "BorderStyle=1,Outline=2,Shadow=0,"
+                "Alignment=2,MarginV=48"
+            )
+            vf_parts.append(f"subtitles='{esc}':force_style='{style}'")
+
+        vf = ",".join(vf_parts)
+        report(12.0, f"竖屏导出 9:16 {w}x{h}（{bias_label}）…")
+
+        cmd = [
+            str(ffmpeg), "-y", "-hide_banner", "-stats",
+            "-i", input_path,
+            "-vf", vf,
+            *_video_encoder_args(high_quality=True),
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", env=self._env,
+            )
+            if result.returncode != 0 or not os.path.isfile(output_path):
+                err = (result.stderr or result.stdout or "").strip()
+                # 字幕滤镜失败时降级：无字幕再导一次
+                if subtitle_path and "subtitles" in vf:
+                    report(40.0, "字幕烧录失败，改为无字幕竖屏导出…")
+                    vf2 = ",".join(vf_parts[:2])
+                    cmd2 = [
+                        str(ffmpeg), "-y", "-hide_banner", "-stats",
+                        "-i", input_path,
+                        "-vf", vf2,
+                        *_video_encoder_args(high_quality=True),
+                        "-c:a", "aac", "-b:a", "192k",
+                        "-movflags", "+faststart",
+                        output_path,
+                    ]
+                    result2 = subprocess.run(
+                        cmd2, capture_output=True, text=True,
+                        encoding="utf-8", errors="replace", env=self._env,
+                    )
+                    if result2.returncode != 0 or not os.path.isfile(output_path):
+                        raise RuntimeError(
+                            (result2.stderr or err or "竖屏导出失败").strip()
+                        )
+                else:
+                    raise RuntimeError(err or "竖屏导出失败")
+            report(100.0, "竖屏导出完成")
+            return output_path
+        finally:
+            if sub_tmp:
+                try:
+                    os.remove(sub_tmp)
+                except OSError:
+                    pass
+
     def shutdown(self):
         pass

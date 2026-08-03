@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 
 import tempfile
+import threading
 
 from typing import List, Optional
 
@@ -18,7 +19,7 @@ from PySide6.QtCore import QObject, Property, Signal, Slot
 
 
 
-from core.app_logic import AppLogic
+from core.app_logic import AppLogic, load_app_config
 
 from core.asr_engine import AsrEngine
 
@@ -28,6 +29,9 @@ from core.speech_highlights import (
 )
 
 from core.media_bridge import MediaBridge
+from core.pipeline_runner import run_pipeline_queue
+
+from models.pipeline_model import PipelineJob, PipelineSettings
 
 from models.video_model import (
 
@@ -73,6 +77,10 @@ class MainViewModel(QObject):
 
     silenceFinished = Signal(str)
 
+    verticalExportProgress = Signal(int, float, str)
+
+    verticalExportFinished = Signal(str)
+
     downloadProgress = Signal(int, float, str)
 
     downloadFinished = Signal(str)
@@ -83,7 +91,10 @@ class MainViewModel(QObject):
 
     statusMessageChanged = Signal(str)
 
-
+    # 批量全流程队列
+    pipelineItemUpdated = Signal(int, object)  # index, PipelineJob
+    pipelineFinished = Signal()
+    pipelineStatusChanged = Signal(str)
 
     gpuNameChanged = Signal(str)
 
@@ -108,6 +119,13 @@ class MainViewModel(QObject):
         self._next_task_id = 1
         self._slice_running = False
         self._import_running = False
+        self._pipeline_running = False
+        self._pipeline_jobs: list[PipelineJob] = []
+        self._pipeline_cancel = threading.Event()
+        self._pipeline_skip = threading.Event()
+        # set = 运行；clear = 暂停
+        self._pipeline_pause = threading.Event()
+        self._pipeline_pause.set()
 
 
 
@@ -1148,30 +1166,79 @@ class MainViewModel(QObject):
 
     ) -> List[HighlightSegment]:
 
-        """游戏高光：视觉模型待接入，暂用时间轴规则兜底"""
+        """游戏高光：PySceneDetect 视觉切点；失败则回退时间轴规则。"""
 
-        report(10.0, "游戏模式：视觉模型开发中，使用音频/时间规则…")
+        from core.scene_detect import (
+            detect_scene_ranges,
+            ranges_to_clipped_segments,
+            scenedetect_available,
+        )
 
+        report(5.0, "游戏模式：视觉场景切点（PySceneDetect）…")
 
+        if scenedetect_available():
+            cfg = load_app_config()
+            method = (cfg.get("scenedetect_method") or "adaptive").strip().lower()
+            try:
+                frame_skip = int(cfg.get("scenedetect_frame_skip") or "0")
+            except ValueError:
+                frame_skip = 0
+
+            def sd_report(p: float, msg: str):
+                # 映射到 5–75
+                report(5.0 + max(0.0, min(100.0, p)) * 0.70, msg)
+
+            try:
+                ranges = detect_scene_ranges(
+                    video.file_path,
+                    sensitivity=params.sensitivity,
+                    min_scene_sec=max(0.5, params.min_duration * 0.35),
+                    method=method,
+                    frame_skip=max(0, frame_skip),
+                    on_progress=sd_report,
+                )
+                clipped = ranges_to_clipped_segments(
+                    ranges,
+                    min_duration=params.min_duration,
+                    max_duration=params.max_duration,
+                    sensitivity=params.sensitivity,
+                )
+                if clipped:
+                    report(90.0, f"场景切点完成：{len(clipped)} 段")
+                    import logging
+                    logging.getLogger("SceneDetect").info(
+                        "游戏高光采用 PySceneDetect 结果 segments=%d", len(clipped),
+                    )
+                    return [
+                        HighlightSegment(
+                            start_sec=s, end_sec=e, score=sc, selected=True,
+                        )
+                        for s, e, sc in clipped
+                    ]
+                report(70.0, "未检出有效场景，回退时间规则…")
+                import logging
+                logging.getLogger("SceneDetect").warning("场景为空，回退时间规则")
+            except Exception as e:
+                report(50.0, f"场景检测失败（{e}），回退时间规则…")
+                import logging
+                logging.getLogger("SceneDetect").exception("场景检测失败，回退时间规则")
+        else:
+            report(
+                20.0,
+                "未安装 scenedetect，回退时间规则（可运行 scripts\\install_scenedetect.bat）…",
+            )
+            import logging
+            logging.getLogger("SceneDetect").warning("scenedetect 不可用，回退时间规则")
 
         try:
-
             with tempfile.TemporaryDirectory(prefix="music_edit_") as tmp:
-
                 wav_path = os.path.join(tmp, "audio.wav")
-
                 self._bridge.extract_audio(video.file_path, wav_path)
-
-                report(40.0, "已提取音频（后续接入动作检测）")
-
+                report(55.0, "已提取音频（规则兜底）")
         except Exception:
-
             pass
 
-
-
-        report(60.0, "生成候选片段…")
-
+        report(80.0, "生成规则候选片段…")
         return self._simulate_highlights(video.duration_sec, params)
 
 
@@ -1335,6 +1402,129 @@ class MainViewModel(QObject):
                 self.taskStateChanged.emit(task.task_id, TaskState.FAILED)
                 self.errorOccurred.emit(f"静音裁剪失败: {e}")
 
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+
+    def export_vertical_short(
+        self,
+        output_path: str,
+        *,
+        crop_bias: str = "center",
+        burn_subtitles: bool = True,
+        use_highlights: bool = True,
+        width: int = 1080,
+        height: int = 1920,
+    ) -> None:
+        """
+        竖屏短视频：可选先拼高光成片 → 9:16 裁切 → 烧录外挂字幕（片段时间轴重定时）。
+        """
+        video = self._state.current_video
+        if not video or not self._bridge:
+            self.errorOccurred.emit("请先导入视频")
+            return
+        if not output_path:
+            self.errorOccurred.emit("请指定输出路径")
+            return
+
+        segs = [
+            s for s in self._state.highlight_segments
+            if s.selected and s.end_sec > s.start_sec
+        ]
+        use_hl = bool(use_highlights and segs)
+        ranges = [(s.start_sec, s.end_sec) for s in segs] if use_hl else []
+        src_path = video.file_path
+        bias = crop_bias
+        burn = burn_subtitles
+        out_path = os.path.abspath(output_path)
+        w, h = int(width), int(height)
+
+        task = TaskModel(
+            task_id=self._next_task_id,
+            task_type=TaskType.EXPORT,
+            file_path=src_path,
+            state=TaskState.PROCESSING,
+            total_frames=1,
+        )
+        self._next_task_id += 1
+        self._state.tasks.append(task)
+        self.taskStateChanged.emit(task.task_id, TaskState.PROCESSING)
+        self._status_message = "竖屏短视频导出中…"
+        self.statusMessageChanged.emit(self._status_message)
+
+        def run():
+            tmp_dir = ""
+            try:
+                from core.subtitle_track import (
+                    SubtitleTrack,
+                    find_sidecar_subtitles,
+                    retime_cues_for_segments,
+                    write_srt,
+                )
+
+                def report(p: float, msg: str):
+                    task.progress = p
+                    self.progressUpdated.emit(task.task_id, p, msg)
+                    self.verticalExportProgress.emit(task.task_id, p, msg)
+
+                work_input = src_path
+                if use_hl:
+                    report(5.0, "正在导出高光成片…")
+                    tmp_dir = tempfile.mkdtemp(prefix="me_vertical_")
+                    _clips, merged = self._bridge.export_highlights(
+                        src_path, ranges, tmp_dir, concat=True,
+                        on_progress=lambda p, m: report(5.0 + p * 0.35, m),
+                    )
+                    if not merged or not os.path.isfile(merged):
+                        raise RuntimeError("高光成片未生成")
+                    work_input = merged
+
+                sub_path = None
+                if burn:
+                    side = find_sidecar_subtitles(src_path)
+                    if side:
+                        report(42.0, f"处理字幕 {os.path.basename(side)}…")
+                        track = SubtitleTrack.from_file(side)
+                        cues = track.cues
+                        if use_hl and ranges:
+                            cues = retime_cues_for_segments(cues, ranges)
+                        if cues:
+                            if not tmp_dir:
+                                tmp_dir = tempfile.mkdtemp(prefix="me_vertical_")
+                            sub_path = os.path.join(tmp_dir, "burn.srt")
+                            write_srt(cues, sub_path)
+                        else:
+                            report(45.0, "字幕与片段无交集，跳过烧录")
+                    else:
+                        report(42.0, "未找到同名外挂字幕，仅裁切竖屏")
+
+                report(50.0, "正在竖屏裁切 / 烧录…")
+                self._bridge.export_vertical_short(
+                    work_input,
+                    out_path,
+                    width=w,
+                    height=h,
+                    crop_bias=bias,
+                    subtitle_path=sub_path,
+                    on_progress=lambda p, m: report(50.0 + p * 0.5, m),
+                )
+                task.state = TaskState.COMPLETED
+                task.progress = 100.0
+                self.taskStateChanged.emit(task.task_id, TaskState.COMPLETED)
+                self._status_message = f"竖屏短视频已生成: {os.path.basename(out_path)}"
+                self.statusMessageChanged.emit(self._status_message)
+                self.verticalExportFinished.emit(out_path)
+            except Exception as e:
+                task.state = TaskState.FAILED
+                self.taskStateChanged.emit(task.task_id, TaskState.FAILED)
+                self.errorOccurred.emit(f"竖屏导出失败: {e}")
+            finally:
+                if tmp_dir:
+                    try:
+                        shutil.rmtree(tmp_dir, ignore_errors=True)
+                    except Exception:
+                        pass
+
+        import shutil
         import threading
         threading.Thread(target=run, daemon=True).start()
 
@@ -1557,6 +1747,129 @@ class MainViewModel(QObject):
         self.highlightsReady.emit([])
         self._status_message = "已清空片段列表"
         self.statusMessageChanged.emit(self._status_message)
+
+    # ── 批量全流程队列 ─────────────────────────────────────────
+
+    @property
+    def pipeline_running(self) -> bool:
+        return self._pipeline_running
+
+    @property
+    def pipeline_paused(self) -> bool:
+        return self._pipeline_running and not self._pipeline_pause.is_set()
+
+    @property
+    def pipeline_jobs(self) -> list[PipelineJob]:
+        return list(self._pipeline_jobs)
+
+    def start_pipeline_queue(self, paths: list[str], settings: PipelineSettings) -> None:
+        if self._pipeline_running:
+            self.errorOccurred.emit("全流程队列正在运行")
+            return
+        if not self._bridge:
+            self.errorOccurred.emit("全流程队列：媒体引擎未加载")
+            return
+        clean = [os.path.abspath(p) for p in paths if p and os.path.isfile(p)]
+        if not clean:
+            self.errorOccurred.emit("全流程队列：没有有效视频文件")
+            return
+        if not (settings.do_slice or settings.do_enhance or settings.do_watermark):
+            self.errorOccurred.emit("全流程队列：请至少启用一个步骤")
+            return
+
+        self._pipeline_jobs = [PipelineJob(path=p) for p in clean]
+        self._pipeline_cancel.clear()
+        self._pipeline_skip.clear()
+        self._pipeline_pause.set()
+        self._pipeline_running = True
+        self._status_message = f"全流程队列启动：{len(clean)} 个任务"
+        self.statusMessageChanged.emit(self._status_message)
+        self.pipelineStatusChanged.emit(self._status_message)
+
+        bridge = self._bridge
+        # 快照模型路径，避免后台线程读配置竞态
+        try:
+            upscale_model = self._upscale_model_path(
+                "opencv" if settings.enhance_backend in ("opencv", "cv", "fast", "bicubic")
+                else "realesrgan"
+            )
+        except Exception as e:
+            self._pipeline_running = False
+            self.errorOccurred.emit(f"全流程队列：{e}")
+            return
+        try:
+            wm_model = self._watermark_model_path(
+                "opencv" if settings.watermark_backend in ("opencv", "cv", "fast") else "lama"
+            )
+        except Exception as e:
+            if settings.do_watermark:
+                self._pipeline_running = False
+                self.errorOccurred.emit(f"全流程队列：{e}")
+                return
+            wm_model = "-"
+
+        jobs = self._pipeline_jobs
+        snap = PipelineSettings(**settings.__dict__)
+
+        def analyze(video, params, report):
+            if params.scene in SPEECH_SCENES:
+                return self._analyze_speech_pipeline(video, params, report)
+            return self._analyze_game_fallback(video, params, report)
+
+        def on_update(index: int, job: PipelineJob):
+            self.pipelineItemUpdated.emit(index, job)
+            self._status_message = (
+                f"全流程 [{index + 1}/{len(jobs)}] {job.state.value} "
+                f"{job.phase.value} {job.message}"
+            )
+            self.statusMessageChanged.emit(self._status_message)
+
+        def run():
+            try:
+                run_pipeline_queue(
+                    bridge=bridge,
+                    jobs=jobs,
+                    settings=snap,
+                    analyze_fn=analyze,
+                    upscale_model_path=upscale_model,
+                    watermark_model_path=wm_model,
+                    cancel_event=self._pipeline_cancel,
+                    skip_event=self._pipeline_skip,
+                    pause_event=self._pipeline_pause,
+                    on_update=on_update,
+                )
+            except Exception as e:
+                self.errorOccurred.emit(f"全流程队列异常: {e}")
+            finally:
+                self._pipeline_running = False
+                self._pipeline_pause.set()
+                self.pipelineFinished.emit()
+                self._status_message = "全流程队列结束"
+                self.statusMessageChanged.emit(self._status_message)
+                self.pipelineStatusChanged.emit(self._status_message)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def pause_pipeline_queue(self) -> None:
+        if self._pipeline_running:
+            self._pipeline_pause.clear()
+            self.pipelineStatusChanged.emit("全流程队列已暂停")
+
+    def resume_pipeline_queue(self) -> None:
+        self._pipeline_pause.set()
+        if self._pipeline_running:
+            self.pipelineStatusChanged.emit("全流程队列继续")
+
+    def skip_pipeline_current(self) -> None:
+        if self._pipeline_running:
+            self._pipeline_skip.set()
+            self.pipelineStatusChanged.emit("将跳过当前任务…")
+
+    def cancel_pipeline_queue(self) -> None:
+        if self._pipeline_running:
+            self._pipeline_cancel.set()
+            self._pipeline_pause.set()  # 解除暂停以便退出
+            self.pipelineStatusChanged.emit("正在取消全流程队列…")
 
     def get_app_state(self) -> AppState:
 

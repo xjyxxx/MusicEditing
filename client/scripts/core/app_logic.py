@@ -91,6 +91,8 @@ class AppLogic:
         cfg = load_app_config()
         self.llm_model_path = cfg.get("llm_model_path", "")
         self.vosk_model_dir = cfg.get("vosk_model_dir", "")
+        from core.live_subtitle import LiveSubtitleConfig
+        self.live_subtitle_config = LiveSubtitleConfig.from_mapping(cfg)
         self.opencv_filter = cfg.get("opencv_filter", "clahe")
         self.opencv_filter_device = cfg.get("opencv_filter_device", "auto")
         gpu_cfg = cfg.get("gpu_enabled", "true").strip().lower()

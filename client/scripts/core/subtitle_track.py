@@ -213,3 +213,61 @@ class SubtitleTrack:
         if cue.start <= t <= cue.end:
             return cue.text
         return ""
+
+
+def _sec_to_srt_ts(sec: float) -> str:
+    if sec < 0:
+        sec = 0.0
+    ms = int(round(sec * 1000.0))
+    h, ms = divmod(ms, 3600_000)
+    m, ms = divmod(ms, 60_000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def write_srt(cues: List[Cue], path: str) -> str:
+    """写入 UTF-8 SRT（带 BOM 便于部分播放器识别中文）。"""
+    lines: List[str] = []
+    idx = 1
+    for c in cues:
+        if c.end <= c.start:
+            continue
+        text = (c.text or "").strip()
+        if not text:
+            continue
+        lines.append(str(idx))
+        lines.append(f"{_sec_to_srt_ts(c.start)} --> {_sec_to_srt_ts(c.end)}")
+        lines.append(text)
+        lines.append("")
+        idx += 1
+    Path(path).write_text("\ufeff" + "\n".join(lines), encoding="utf-8")
+    return path
+
+
+def retime_cues_for_segments(
+    cues: List[Cue],
+    segments: List[Tuple[float, float]],
+) -> List[Cue]:
+    """
+    将原片时间轴字幕，按导出片段拼接后的新时间轴重定时。
+    segments: [(start_sec, end_sec), ...] 与成片拼接顺序一致。
+    """
+    out: List[Cue] = []
+    t_cursor = 0.0
+    for seg_start, seg_end in segments:
+        if seg_end <= seg_start:
+            continue
+        for cue in cues:
+            a = max(float(cue.start), float(seg_start))
+            b = min(float(cue.end), float(seg_end))
+            if b <= a:
+                continue
+            out.append(
+                Cue(
+                    start=t_cursor + (a - seg_start),
+                    end=t_cursor + (b - seg_start),
+                    text=cue.text,
+                )
+            )
+        t_cursor += seg_end - seg_start
+    return out

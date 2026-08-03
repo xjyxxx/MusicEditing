@@ -16,7 +16,8 @@ from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QSurfaceFormat
 
 from PySide6.QtWidgets import (
-    QComboBox, QFileDialog, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget,
+    QComboBox, QFileDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+    QSlider, QVBoxLayout, QWidget,
 )
 
 
@@ -144,6 +145,13 @@ class VideoPlayerWidget(QWidget):
         self._btn_sub.setToolTip("加载外挂字幕（SRT / VTT）；打开视频时自动匹配同名字幕")
         self._btn_clear_sub = QPushButton("关字幕")
         self._btn_clear_sub.setEnabled(False)
+        self._btn_live_sub = QPushButton("实时字幕")
+        self._btn_live_sub.setToolTip(
+            "流式 ASR 两遍管线（草稿→稳态）+ 字幕分路接口\n"
+            "当前为预留；见 app.conf live_subtitle_* 与 core/live_subtitle/"
+        )
+        self._live_pipeline = None
+
 
 
 
@@ -172,7 +180,7 @@ class VideoPlayerWidget(QWidget):
         self._filter_combo.setToolTip("OpenCV 实时滤镜（播放时也会生效）")
         for label, mode in (
             ("滤镜:关闭", "off"),
-            ("CLAHE", "clahe"),
+            ("明亮", "clahe"),
             ("降噪", "denoise"),
             ("锐化", "sharpen"),
             ("胶片", "film"),
@@ -198,6 +206,7 @@ class VideoPlayerWidget(QWidget):
 
         ctrl.addWidget(self._btn_sub)
         ctrl.addWidget(self._btn_clear_sub)
+        ctrl.addWidget(self._btn_live_sub)
 
         ctrl.addWidget(self._filter_combo)
 
@@ -247,6 +256,7 @@ class VideoPlayerWidget(QWidget):
 
         self._btn_sub.clicked.connect(self._on_load_subtitle)
         self._btn_clear_sub.clicked.connect(self._on_clear_subtitle)
+        self._btn_live_sub.clicked.connect(self._on_live_subtitle)
 
         self._filter_combo.currentIndexChanged.connect(self._on_filter_changed)
 
@@ -536,6 +546,19 @@ class VideoPlayerWidget(QWidget):
         if self._hw_decode_active and not self._opencv_filter_playback:
             return f"OpenCV:{self._opencv_filter}/{dev}·预览"
         return f"OpenCV:{self._opencv_filter}/{dev}"
+
+    def set_filter_mode(self, mode: str) -> bool:
+        """外部设置滤镜（天气氛围推荐等）；下拉已是目标值时也会刷新一帧。"""
+        if not isinstance(mode, str) or not mode:
+            return False
+        idx = self._filter_combo.findData(mode)
+        if idx < 0:
+            return False
+        if self._filter_combo.currentIndex() == idx:
+            self._on_filter_changed(idx)
+        else:
+            self._filter_combo.setCurrentIndex(idx)
+        return True
 
     @Slot(int)
     def _on_filter_changed(self, _index: int):
@@ -999,6 +1022,60 @@ class VideoPlayerWidget(QWidget):
         self._clear_subtitles(silent=False)
         log.info("已关闭字幕")
 
+    @Slot()
+    def _on_live_subtitle(self):
+        """实时字幕：尝试启动预留管线；后端未接时展示接入说明。"""
+        from core.live_subtitle import (
+            LiveSubtitleConfig,
+            create_pipeline,
+            provider_status,
+        )
+
+        # 若已在跑，则停止
+        if self._live_pipeline is not None and getattr(self._live_pipeline, "running", False):
+            try:
+                self._live_pipeline.stop()
+            except Exception:
+                log.exception("停止实时字幕失败")
+            self._live_pipeline = None
+            self._btn_live_sub.setText("实时字幕")
+            self._display.set_subtitle_text("")
+            QMessageBox.information(self, "实时字幕", "已关闭实时字幕会话。")
+            return
+
+        cfg_map = load_app_config()
+        config = LiveSubtitleConfig.from_mapping(cfg_map)
+        # AppLogic 若已解析配置，优先覆盖
+        app = AppLogic()
+        if getattr(app, "live_subtitle_config", None):
+            config = app.live_subtitle_config
+
+        status = provider_status(config)
+        try:
+            pipeline = create_pipeline(
+                config,
+                self._display.set_subtitle_text,
+                enable_ws=True,
+            )
+            pipeline.start()
+        except Exception as e:
+            QMessageBox.information(
+                self,
+                "实时字幕（接口预留）",
+                f"{e}\n\n—— 当前配置 ——\n{status}",
+            )
+            return
+
+        self._live_pipeline = pipeline
+        self._btn_live_sub.setText("停实时字幕")
+        QMessageBox.information(
+            self,
+            "实时字幕",
+            "实时字幕会话已启动。\n"
+            "请向 pipeline.feed_pcm() 喂入 16kHz PCM（播放器音轨抽头尚未接通）。\n\n"
+            f"{status}",
+        )
+
     def load_from_video_model(self, video, auto_play: bool = False):
 
         if video and getattr(video, "file_path", ""):
@@ -1018,6 +1095,12 @@ class VideoPlayerWidget(QWidget):
         self._playing = False
         self._has_audio = False
         self._current_path = ""
+        if self._live_pipeline is not None:
+            try:
+                self._live_pipeline.stop()
+            except Exception:
+                pass
+            self._live_pipeline = None
         self._audio.shutdown()
         if self._backend:
             self._backend.shutdown()

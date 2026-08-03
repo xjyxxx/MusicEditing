@@ -1,0 +1,173 @@
+#
+#         PySceneDetect: Python-Based Video Scene Detector
+#   ---------------------------------------------------------------
+#     [  Site: http://www.bcastell.com/projects/PySceneDetect/   ]
+#     [  Github: https://github.com/Breakthrough/PySceneDetect/  ]
+#     [  Documentation: http://www.scenedetect.com/docs/         ]
+#
+# Copyright (C) 2014 Brandon Castellano <http://www.bcastell.com>.
+#
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scenedetect-core"
+dynamic = ["version"]
+description = "The detection pipeline for PySceneDetect (core library, minimal dependencies)."
+readme = { file = "packaging/package-info.rst", content-type = "text/x-rst" }
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Brandon Castellano", email = "brandon248@gmail.com" }]
+keywords = ["video", "computer-vision", "analysis"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Environment :: Console :: Curses",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Multimedia :: Video :: Conversion",
+    "Topic :: Multimedia :: Video :: Non-Linear Editor",
+    "Topic :: Utilities",
+]
+# OpenCV is required at runtime but intentionally NOT declared: any of the four
+# opencv-python* variants satisfies the library for development installs. This root
+# config (`scenedetect-core`) is used for local/dev installs only and is NOT
+# published to PyPI (0.7.1 was published briefly and yanked - layering the published
+# packages over a shared core dist is unsafe with pip; see
+# https://scenedetect.com/issues/558). The published `scenedetect` and
+# `scenedetect-headless` packages (packaging/variants/) ship the same code with a
+# concrete OpenCV variant plus the CLI dependencies.
+dependencies = [
+    "numpy",
+]
+
+[project.optional-dependencies]
+opencv = ["opencv-python"]
+opencv-headless = ["opencv-python-headless"]
+pyav = ["av>=9.2"]
+moviepy = ["moviepy"]
+dev = [
+    "av>=9.2",
+    # click 8.3.0 specifically is excluded per https://scenedetect.com/issues/521; 8.3.1+ are fine.
+    "click~=8.0,!=8.3.0",
+    "moviepy",
+    "opencv-python",
+    "platformdirs",
+    "pytest>=7.0",
+    "pytest-rerunfailures",
+    "tqdm",
+]
+docs = ["Sphinx==7.0.1", "sphinx-copybutton==0.5.2"]
+website = ["mkdocs==1.5.2", "jinja2>=3.1.6"]
+
+[project.urls]
+Homepage = "https://www.scenedetect.com"
+Documentation = "https://www.scenedetect.com/docs/"
+Source = "https://github.com/Breakthrough/PySceneDetect"
+Issues = "https://github.com/Breakthrough/PySceneDetect/issues"
+
+# No [project.scripts]: the `scenedetect` console script is declared by the
+# scenedetect/scenedetect-headless variants (packaging/variants/) so a core
+# install stays library-only. Use `python -m scenedetect` from a core-only install.
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["scenedetect*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "scenedetect.__version__" }
+
+[tool.pytest.ini_options]
+markers = [
+    "release: opt-in release-validation tests; excluded by default (run with `pytest -m release`)",
+]
+addopts = "-m 'not release'"
+filterwarnings = [
+    "ignore:TODO.*Update caller to handle VFR:UserWarning",
+]
+
+[tool.ruff]
+line-length = 100
+indent-width = 4
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = [
+    # flake8-bugbear
+    "B",
+    # pycodestyle
+    "E",
+    "W",
+    # Pyflakes
+    "F",
+    # isort
+    "I",
+    # pyupgrade
+    "UP",
+    # flake8-simplify
+    "SIM",
+    # ruff-native checks
+    "RUF",
+]
+ignore = [
+    # TODO: Audit re-exports in __init__.py files. Add `__all__` (note: must be kept in sync as
+    # new public symbols are added) or use redundant-alias form (`from x import Y as Y`).
+    "F401",
+]
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.per-file-ignores]
+# Vendored third-party code: don't rewrite/modernize upstream source.
+"scenedetect/_thirdparty/*" = ["UP"]
+# CLI help text and validation messages are intentionally long.
+"scenedetect/_cli/*" = ["E501"]
+# Test data tables and golden output strings are clearer unwrapped.
+"tests/*" = ["E501"]
+# Doc generators and benchmark scripts mirror the CLI strings.
+"docs/*" = ["E501"]
+"benchmark/*" = ["E501"]
+
+[tool.pyright]
+include = ["scenedetect", "tests", "scripts", "packaging"]
+exclude = [
+    # Pyright built-in defaults
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.*",
+    ".venv",
+    # Vendored third-party code
+    "scenedetect/_thirdparty",
+    # Release tests pull in extra deps (opentimelineio, psutil) that aren't in [dev]
+    "tests/release",
+    # User-local scripts (gitignored)
+    "scripts/local",
+]
+
+# Modes: "off" | "basic" | "standard" | "strict". The 0.7 codebase is clean
+# at "basic". When tightening to "standard" or "strict" in the future, the
+# cv2 / av / numpy / moviepy noise rules (reportUnknown*, reportMissingTypeStubs)
+# will likely need to be re-added with "none" or scoped per-file.
+typeCheckingMode = "basic"
+
+# Analyze against the minimum supported Python so 3.11+-only APIs get flagged
+# regardless of which interpreter runs pyright.
+pythonVersion = "3.10"

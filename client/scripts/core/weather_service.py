@@ -61,6 +61,35 @@ class WeatherInfo:
     longitude: float = 0.0
 
 
+@dataclass(frozen=True)
+class WeatherMood:
+    """今日氛围：天气 → 播放器 OpenCV 滤镜推荐（趣味彩蛋）。"""
+
+    filter_mode: str  # 对应 VideoPlayer 下拉 data：clahe / film / …
+    label: str        # 状态栏短标签：明亮 / 胶片
+    reason: str       # tooltip / 底栏文案
+
+
+def recommend_mood(weather_code: int) -> Optional[WeatherMood]:
+    """晴天→明亮(CLAHE)，雨天→胶片；其它天气不推荐。"""
+    code = int(weather_code)
+    # WMO: 0 晴, 1 晴间多云
+    if code in (0, 1):
+        return WeatherMood(
+            filter_mode="clahe",
+            label="明亮",
+            reason="晴天适合明亮预览（CLAHE）",
+        )
+    # 毛毛雨/雨/冻雨(50–69)、阵雨(80–82)、雷暴(≥95)
+    if (50 <= code < 70) or (80 <= code <= 82) or code >= 95:
+        return WeatherMood(
+            filter_mode="film",
+            label="胶片",
+            reason="雨天试试胶片滤镜",
+        )
+    return None
+
+
 def weather_code_text(code: int) -> str:
     if code in _WEATHER_TEXT:
         return _WEATHER_TEXT[code]
@@ -260,8 +289,14 @@ def fetch_local_weather(timeout: float = 5.0) -> WeatherInfo:
     return info
 
 
-def format_status_text(info: WeatherInfo) -> str:
-    return f"{info.city} {info.weather_text} {info.temperature_c:.0f}°C"
+def format_status_text(info: WeatherInfo, *, with_mood: bool = True) -> str:
+    base = f"{info.city} {info.weather_text} {info.temperature_c:.0f}°C"
+    if not with_mood:
+        return base
+    mood = recommend_mood(info.weather_code)
+    if mood:
+        return f"{base} · {mood.label}"
+    return base
 
 
 def format_status_error(err: str | BaseException | None = None) -> str:
