@@ -31,7 +31,7 @@ class RegionSelectorWidget(QLabel):
         self.setAlignment(Qt.AlignCenter)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setStyleSheet(
-            "background: #111; border: 1px solid #444; color: #666;"
+            "background: #080A0E; border: 1px solid #2A3344; color: #8B95A8; border-radius: 10px;"
         )
         self.setText("导入图片或视频预览帧后，在此拖拽框选水印区域")
 

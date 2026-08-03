@@ -46,7 +46,7 @@ class DownloadPage(QWidget):
             "已缓存可直接播放。请仅处理自有或已获授权内容。"
         )
         tip.setWordWrap(True)
-        tip.setStyleSheet("color:#9a9ab0; padding:6px;")
+        tip.setObjectName("MutedText")
         root.addWidget(tip)
 
         self._tabs = QTabWidget()
@@ -105,7 +105,7 @@ class DownloadPage(QWidget):
 
         out_row = QHBoxLayout()
         self._out_label = QLabel(self._out_dir)
-        self._out_label.setStyleSheet("color:#8cf;")
+        self._out_label.setObjectName("InfoText")
         btn_out = QPushButton("保存目录…")
         btn_out.clicked.connect(self._on_pick_dir)
         out_row.addWidget(QLabel("保存到:"))
@@ -124,14 +124,12 @@ class DownloadPage(QWidget):
         lay.addWidget(self._progress)
 
         self._dl_status = QLabel("")
-        self._dl_status.setStyleSheet("color:#aaa;")
+        self._dl_status.setObjectName("MutedText")
         lay.addWidget(self._dl_status)
 
         btn_row = QHBoxLayout()
         self._btn_dl = QPushButton("开始下载")
-        self._btn_dl.setStyleSheet(
-            "background:#5b5bd6; color:white; padding:10px 22px; font-weight:600;"
-        )
+        self._btn_dl.setObjectName("primaryButton")
         self._btn_dl.clicked.connect(self._on_download)
         btn_row.addWidget(self._btn_dl)
         btn_row.addStretch()
@@ -146,7 +144,7 @@ class DownloadPage(QWidget):
         cache_row = QHBoxLayout()
         cache_row.addWidget(QLabel("缓存路径:"))
         self._cache_path_label = QLabel(self._cache.root)
-        self._cache_path_label.setStyleSheet("color:#8cf;")
+        self._cache_path_label.setObjectName("InfoText")
         self._cache_path_label.setWordWrap(True)
         cache_row.addWidget(self._cache_path_label, 1)
         btn_cache_dir = QPushButton("更改…")
@@ -163,7 +161,7 @@ class DownloadPage(QWidget):
             "播放过的格式会各存一条，可直接点右侧播放。"
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#9a9ab0;")
+        hint.setObjectName("MutedText")
         lay.addWidget(hint)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -179,9 +177,7 @@ class DownloadPage(QWidget):
         btn_paste = QPushButton("粘贴")
         btn_paste.clicked.connect(self._on_paste_info)
         self._btn_info_fetch = QPushButton("获取信息")
-        self._btn_info_fetch.setStyleSheet(
-            "background:#5b5bd6; color:white; padding:8px 16px; font-weight:600;"
-        )
+        self._btn_info_fetch.setObjectName("primaryButton")
         self._btn_info_fetch.clicked.connect(self._on_fetch_info)
         url_row.addWidget(self._info_url, 1)
         url_row.addWidget(btn_paste)
@@ -189,28 +185,22 @@ class DownloadPage(QWidget):
         left_lay.addLayout(url_row)
 
         self._name_label = QLabel("名称：—")
-        self._name_label.setStyleSheet(
-            "font-size:16px; font-weight:700; color:#e0e0ff; padding:8px 0;"
-        )
+        self._name_label.setObjectName("FeatureCardTitle")
         self._name_label.setWordWrap(True)
         left_lay.addWidget(self._name_label)
 
         self._meta_label = QLabel("")
-        self._meta_label.setStyleSheet("color:#8cf;")
+        self._meta_label.setObjectName("InfoText")
         self._meta_label.setWordWrap(True)
         left_lay.addWidget(self._meta_label)
 
         self._hint_label = QLabel("")
-        self._hint_label.setStyleSheet("color:#e8a87c;")
+        self._hint_label.setObjectName("WarnText")
         self._hint_label.setWordWrap(True)
         left_lay.addWidget(self._hint_label)
 
         left_lay.addWidget(QLabel("列表（双击播放）："))
         self._list = QListWidget()
-        self._list.setStyleSheet(
-            "QListWidget { background:#2d2d3a; border:1px solid #555; }"
-            "QListWidget::item:selected { background:#5b5bd6; }"
-        )
         self._list.itemDoubleClicked.connect(self._on_item_play)
         left_lay.addWidget(self._list, 1)
 
@@ -228,7 +218,7 @@ class DownloadPage(QWidget):
         left_lay.addLayout(act_row)
 
         self._info_status = QLabel("")
-        self._info_status.setStyleSheet("color:#aaa;")
+        self._info_status.setObjectName("MutedText")
         left_lay.addWidget(self._info_status)
 
         use_row = QHBoxLayout()
@@ -244,10 +234,6 @@ class DownloadPage(QWidget):
         right_lay.setContentsMargins(4, 0, 0, 0)
         right_lay.addWidget(QLabel("已缓存媒体（每条格式/曲目一条）："))
         self._cache_list = QListWidget()
-        self._cache_list.setStyleSheet(
-            "QListWidget { background:#252536; border:1px solid #555; }"
-            "QListWidget::item:selected { background:#3d5a80; }"
-        )
         self._cache_list.itemDoubleClicked.connect(self._on_cache_item_activate)
         right_lay.addWidget(self._cache_list, 1)
 
@@ -267,7 +253,7 @@ class DownloadPage(QWidget):
         right_lay.addLayout(cache_act)
 
         self._cache_status = QLabel("")
-        self._cache_status.setStyleSheet("color:#aaa;")
+        self._cache_status.setObjectName("MutedText")
         right_lay.addWidget(self._cache_status)
 
         splitter.addWidget(left)

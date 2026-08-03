@@ -96,6 +96,7 @@ run_ui.bat / python client/scripts/main.py
   ├─ PySide6 QApplication（setQuitOnLastWindowClosed）
   ├─ MainViewModel（AppLogic GPU 检测、MediaBridge）
   ├─ detect_gpu_info() → 状态栏显示 GPU: 型号 或 CPU 模式
+  ├─ 后台线程：IP 定位城市 + Open-Meteo → 状态栏天气（§5.11）
   ├─ 无 NVIDIA GPU 时弹窗提示 CPU 模式（见 §3.6）
   └─ 显示多标签页（首页/切片/增强/去水印/热评/下载等），进入事件循环
 ```
@@ -159,13 +160,29 @@ MainWindow.shutdown()
 |------|-----|------|
 | 首页 | `HomePage` + `VideoPlayerWidget` | 本地预览 + 功能卡片 |
 | 智能切片 | `SlicePage` + `HighlightTimelineWidget` | 分析 / 手动切片 / 缩略图时间轴 / 成片 |
-| 画质增强 | `EnhancePage` + `ExifPanel` | 图片超分 · 视频超分 · **视频补帧** |
+| 画质增强 | `EnhancePage` + `ExifPanel` | 图片超分 · 视频超分 · **视频补帧**；内页 Scroll 深色底 |
 | 去水印 | `WatermarkPage` + `RegionSelectorWidget` + `ExifPanel` | 图片/视频去水印 + EXIF |
 | 热评滚动 | `HotCommentsPage` | 歌曲链接/ID → 热评滚动 |
 | 链接下载 | `DownloadPage` | yt-dlp 下载 → 可送首页播放 |
 | 个人中心 | `PlaceholderPage` | 占位（授权待接入） |
 
 播放器组件：`client/scripts/ui/video_player.py`（`GlVideoWidget` OpenGL + `PlayerBackend` → `media_player.exe`）
+
+#### 3.3.1 视觉主题（Studio UI）
+
+全局样式集中在 `client/scripts/ui/theme.py`，由 `MainWindow.setStyleSheet(app_stylesheet())` 注入。
+
+**方向：** 借鉴媒体工具（Splice 炭黑扁平、Cinema Studio 琥珀 CTA）——深炭画布 + 发丝边 + 琥珀主按钮，去掉旧版紫调 `#5b5bd6`。
+
+| 令牌 | 色值 | 用途 |
+|------|------|------|
+| `BG` | `#0E1116` | 窗口底 |
+| `SURFACE` / `SURFACE_2` | `#161B22` / `#1C2330` | 顶栏、Tab 面板 |
+| `ACCENT` | `#E8A45C` | 主按钮 / 选中 Tab / 进度条 |
+| `SIGNAL` | `#3DB8A8` | 信息文字、GroupBox 标题 |
+| 字体 | YaHei UI / Segoe UI Semibold | 中文桌面可读 |
+
+顶栏为圆角 `TopChrome`：品牌名 + GPU/授权/天气胶囊 + 版本号。主按钮用 `objectName="primaryButton"`。
 
 ### 3.4 首页播放器交互（统一 FFmpeg 播放器）
 
@@ -433,7 +450,7 @@ EnhancePage
 | 3 回退 | Qt `QImageReader` | 无 OpenCV 或解码失败时 |
 | 4 显示 | `QGraphicsView` 软件合成（不透明底 + 全量刷新） | 曾用 OpenGL 视口，缩小时易残影，已去掉；解码仍走 OpenCV |
 
-去水印页导入图片/预览帧同样走 `load_preview`。导入图片时额外调用 `MediaBridge.read_image_exif`（`third_party/exiftool`），在 `ExifPanel` 展示常用字段 + 全部标签。
+去水印页导入图片/预览帧同样走 `load_preview`。导入图片时额外调用 `MediaBridge.read_image_exif`（`third_party/exiftool`），在图片右上角悬浮摘要，完整标签进弹窗。
 
 ### 3.6 GPU 硬件加速
 
@@ -456,14 +473,14 @@ GPU 在本产品中承担 **AI 推理** 与 **视频硬解码** 两类加速目�
 
 #### 3.6.2 界面与启动流程
 
-**状态栏（`MainWindow` 顶部）：**
+**状态栏（`MainWindow` 顶部 `TopChrome`）：**
 
 ```
-GPU: NVIDIA GeForce RTX 3060    # 检测到 NVIDIA 且 use_gpu=true
-GPU: CPU 模式                   # 无 NVIDIA 或 use_gpu=false
+MusicEditing   [GPU  RTX…]   [授权  试用]   [深圳 晴 26°C]          v0.x
 ```
 
-逻辑见 `client/scripts/viewmodels/main_vm.py` 的 `gpu_name` 属性：读取 `AppLogic.use_gpu` 与 `gpu_info["name"]`。
+逻辑见 `client/scripts/viewmodels/main_vm.py` 的 `gpu_name` 属性：读取 `AppLogic.use_gpu` 与 `gpu_info["name"]`。  
+天气见 `core/weather_service.py` + `MainWindow._refresh_weather`（§5.11）。视觉见 §3.3.1。
 
 **启动时弹窗（`main_window.py`）：** 若 `cuda_available == false`，提示「当前为 CPU 模式，处理速度较慢。支持 NVIDIA 显卡硬件加速（CUDA）。」
 
@@ -1094,18 +1111,19 @@ B 站等 DASH：**仅画面**格式播放时会自动 `format+bestaudio` 合并�
 
 ```
 EnhancePage / WatermarkPage 导入图片
-  → ExifPanel.load_path
-      → MediaBridge.read_image_exif
-          → third_party/exiftool/exiftool.exe（旁路 exiftool_files/）
-  → 面板显示「常用信息」+「全部标签」
+  → ExifPanel.load_path（异步）
+      → MediaBridge.read_image_exif(full=True)
+          → third_party/exiftool/exiftool.exe
+  → 图片右上角悬浮摘要（常用字段约 5 行）
+  → 点「全部」/ 双击摘要 → ExifFullDialog 查看完整标签
 ```
 
 | 资源 | 路径 |
 |------|------|
 | 引擎 | `third_party/exiftool/exiftool.exe` + `exiftool_files/`（`scripts/download_exiftool.bat`） |
-| UI | `client/scripts/ui/exif_panel.py` |
+| UI | `client/scripts/ui/exif_panel.py`（`ExifPanel` 悬浮 + `attach_exif_overlay`） |
 
-**注意：** 复制到 `bin/Release` 时必须同时复制 `exiftool_files`。
+**注意：** 复制到 `bin/Release` 时必须同时复制 `exiftool_files`。不再在图片下方常驻大段文本。
 
 ### 5.8 外挂字幕（播放器叠加）
 
@@ -1189,6 +1207,32 @@ EnhancePage「视频补帧」
 **参数：** `factor=2|4`；`quality=fast|quality`；区间与超分「试 2 秒」**独立**。  
 **限制：** 精细模式慢；插帧+重编码会柔化细节，观感可能不如原片锐利。
 
+### 5.11 状态栏天气（IP 定位 + Open-Meteo）
+
+顶栏显示本地城市与当前天气；**不阻塞 UI**。
+
+```
+MainWindow.__init__
+  → _start_weather_refresh()
+      → QTimer 30min + 立即 _refresh_weather()
+          → 后台线程 fetch_local_weather(timeout=5s)
+                ├─ locate_by_ip()  # 按本机公网 IP 粗定位本地城市
+                │     ├─ 太平洋/pconline ipJson（中文省市）→ Open-Meteo 地理编码
+                │     ├─ ip-api → Nominatim 反查中文城市
+                │     └─ ipwho.is → Nominatim 反查
+                └─ Open-Meteo /v1/forecast?current=temperature_2m,weather_code,…
+          → weatherUpdated.emit("北京 晴 26°C")
+              → _weather_label.setText
+```
+
+| 资源 | 路径 |
+|------|------|
+| UI | `MainWindow._weather_label` / `_refresh_weather` |
+| 服务 | `core/weather_service.py` |
+| 天气 API | `https://api.open-meteo.com`（免 Key） |
+
+**限制：** 城市来自**本机出口 IP 粗定位**（代理/VPN 会偏到出口城市，非 GPS）；单次请求超时 5s，失败显示「天气: 暂不可用」。
+
 
 ---
 
@@ -1224,6 +1268,7 @@ main.py
     └── viewmodels/main_vm.py
         ├── models/video_model.py
         ├── core/app_logic.py      (GPU 检测)
+        ├── core/weather_service.py (IP 定位 + Open-Meteo 天气)
         └── core/media_bridge.py   (subprocess → media_cli / FFmpeg；含 interpolate_video 补帧)
 ```
 
@@ -1242,6 +1287,7 @@ main.py
 | 手动切片 | ✅ | SlicePage 起止时间添加/删除/清空；不依赖 Vosk |
 | 视频补帧 | ✅ | EnhancePage：FFmpeg minterpolate；默认快速 blend，可选精细 MCI；默认试 15 秒 |
 | PySide6 多标签 UI | ✅ | 首页/切片/画质增强/去水印/热评滚动；个人中心占位 |
+| Studio 视觉主题 | ✅ | `ui/theme.py` 炭黑+琥珀；顶栏胶囊；§3.3.1 |
 | 网易云热评滚动 | ✅ | `HotCommentsPage` + 外部爬虫脚本协议；默认演示数据 |
 | 首页本地播放器 | ✅ | FFmpeg 视频 + Qt 音乐；OpenGL 显示；**点击画面暂停/继续** |
 | 外挂字幕 | ✅ | SRT/VTT/简易 ASS；同名自动加载；`GlVideoWidget` 底部叠加 |
@@ -1250,6 +1296,7 @@ main.py
 | OpenGL 视频显示 | ✅ | `GlVideoWidget` 替换 QLabel；首页/热评页播放器共用 |
 | MVVM 双向绑定 | ✅ | Signal/Slot |
 | GPU 检测与状态栏 | ✅ | `nvidia-smi`；顶栏 `GPU: 型号` / `CPU 模式`（§3.6） |
+| 状态栏天气 | ✅ | IP 定位城市 + Open-Meteo；`weather_service.py`（§5.11） |
 | FFmpeg GPU 硬解（D3D11VA） | ✅ | 播放器 + `VideoDecoder`/`iterate --hw`；失败回退 CPU |
 | llama.cpp GPU 推理 | ⏳ | `n_gpu_layers` 接口已有，默认 0；需 `GGML_CUDA=ON` |
 | AI 高光识别（演讲/解说） | ✅ | 演讲金句：Vosk+LLM/金句词；无人声模型时人声段兜底 |
@@ -1259,7 +1306,7 @@ main.py
 | OpenCV 趣味滤镜 | ✅ | film / neon / comic / pixel；播放器下拉切换 |
 | OpenCV GPU 滤镜 | ✅ | OpenCL `cv::UMat`（`opencv_filter_device=auto`）；失败回退 CPU |
 | 链接下载 | ✅ | `DownloadPage` + yt-dlp；「仅获取信息」左右分栏 + `url_info_cache`（歌名/片名目录） |
-| 图片 EXIF | ✅ | `ExifPanel` + `third_party/exiftool`；超分/去水印导入图片时展示 |
+| 图片 EXIF | ✅ | 图片右上角悬浮摘要 +「全部」弹窗；`exif_panel.py`（§5.7） |
 | 4K 超分 | ✅ | `EnhancePage` + Real-ESRGAN ONNX / OpenCV 双三次；`upscale` CLI；预览 `image_loader`（OpenCV） |
 | 去水印 | ✅ | `WatermarkPage` 快速(OpenCV)/精修(LaMa)；视频默认快速 + 帧批复用 |
 | 授权/卡密 | ⏳ | network.py 预留 |

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import threading
 
-from PySide6.QtCore import Qt, Signal, Slot, QSize
+from PySide6.QtCore import Qt, Signal, Slot, QSize, QTimer
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout, QGroupBox,
@@ -21,6 +21,7 @@ from ui.enhance_page import EnhancePage
 from ui.hot_comments_page import HotCommentsPage
 from ui.download_page import DownloadPage
 from ui.highlight_timeline import HighlightTimelineWidget
+from ui.theme import app_stylesheet
 from ui.workflow_link import (
     TAB_ENHANCE,
     TAB_WATERMARK,
@@ -35,20 +36,21 @@ class FeatureCard(QFrame):
     def __init__(self, title: str, desc: str, tab_index: int, on_click, parent=None):
         super().__init__(parent)
         self.tab_index = tab_index
+        self.setObjectName("FeatureCard")
         self.setFrameShape(QFrame.StyledPanel)
         self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet(
-            "FeatureCard { background: #2d2d3a; border-radius: 8px; padding: 12px; }"
-            "FeatureCard:hover { background: #3d3d5c; }"
-        )
+        self.setMinimumHeight(96)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(6)
         title_lbl = QLabel(title)
-        title_lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #e0e0ff;")
+        title_lbl.setObjectName("FeatureCardTitle")
         desc_lbl = QLabel(desc)
-        desc_lbl.setStyleSheet("color: #aaa; font-size: 12px;")
+        desc_lbl.setObjectName("FeatureCardDesc")
         desc_lbl.setWordWrap(True)
         layout.addWidget(title_lbl)
         layout.addWidget(desc_lbl)
+        layout.addStretch()
         self.mousePressEvent = lambda e: on_click(tab_index)
 
 
@@ -57,16 +59,20 @@ class HomePage(QWidget):
         super().__init__(parent)
         self._vm = vm
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 8)
+        layout.setSpacing(10)
 
-        title = QLabel("AI 本地音视频处理工具")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #fff; margin: 8px 0;")
+        title = QLabel("MusicEditing")
+        title.setObjectName("HomeTitle")
         layout.addWidget(title)
+        subtitle = QLabel("本地音视频工作室 · 预览 · 切片 · 增强 · 去水印")
+        subtitle.setObjectName("HomeSubtitle")
+        layout.addWidget(subtitle)
 
         splitter = QSplitter(Qt.Vertical)
 
         # 播放器区域
-        player_box = QGroupBox("本地预览（视频 / 音乐）")
-        player_box.setStyleSheet("QGroupBox { font-weight: bold; color: #aaf; }")
+        player_box = QGroupBox("本地预览")
         player_layout = QVBoxLayout(player_box)
         self._player = VideoPlayerWidget()
         player_layout.addWidget(self._player)
@@ -76,11 +82,13 @@ class HomePage(QWidget):
         cards_widget = QWidget()
         cards_layout = QVBoxLayout(cards_widget)
         cards_layout.setContentsMargins(0, 8, 0, 0)
-        hint = QLabel("快捷功能 · 播放器支持视频与音乐，点击画面可暂停/继续")
-        hint.setStyleSheet("color: #888; font-size: 12px;")
+        hint = QLabel("快捷入口 · 点击画面暂停/继续 · 支持视频与音乐")
+        hint.setObjectName("SectionHint")
         cards_layout.addWidget(hint)
 
         grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
         cards = [
             ("智能切片", "自动识别长视频精彩瞬间，一键剪辑导出", 1),
             ("4K 超分", "1080P 升级 4K，画质修复与帧补全", 2),
@@ -150,7 +158,7 @@ class SlicePage(QWidget):
 
         # 视频信息
         self._info_label = QLabel("")
-        self._info_label.setStyleSheet("color: #8cf;")
+        self._info_label.setObjectName("InfoText")
         layout.addWidget(self._info_label)
 
         # 参数配置
@@ -164,7 +172,7 @@ class SlicePage(QWidget):
             "下载模型: scripts\\download_vosk_model.bat"
         )
         self._scene_hint = QLabel("")
-        self._scene_hint.setStyleSheet("color: #9ab; font-size: 12px;")
+        self._scene_hint.setObjectName("MutedText")
         self._scene_hint.setWordWrap(True)
         self._scene_combo.currentTextChanged.connect(self._on_scene_changed)
         params_layout.addWidget(QLabel("场景:"), 0, 0)
@@ -216,7 +224,7 @@ class SlicePage(QWidget):
         self._manual_end.setSingleStep(0.5)
         self._manual_end.setValue(10.0)
         self._manual_range_label = QLabel("0:00 – 0:10")
-        self._manual_range_label.setStyleSheet("color: #8cf;")
+        self._manual_range_label.setObjectName("InfoText")
         self._manual_start.valueChanged.connect(self._on_manual_spin)
         self._manual_end.valueChanged.connect(self._on_manual_spin)
         manual_layout.addWidget(QLabel("开始:"), 0, 0)
@@ -258,7 +266,7 @@ class SlicePage(QWidget):
         # 操作按钮
         btn_row = QHBoxLayout()
         self._btn_analyze = QPushButton("AI 智能分析")
-        self._btn_analyze.setStyleSheet("background: #5b5bd6; color: white; padding: 8px 20px;")
+        self._btn_analyze.setObjectName("primaryButton")
         self._btn_analyze.setToolTip(
             "演讲类需 Vosk 模型；无模型请用「游戏高光」或上方「手动切片」"
         )
@@ -584,10 +592,11 @@ class PlaceholderPage(QWidget):
     def __init__(self, title: str, desc: str, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
         lbl = QLabel(title)
-        lbl.setStyleSheet("font-size: 20px; font-weight: bold; color: #fff;")
+        lbl.setObjectName("HomeTitle")
         desc_lbl = QLabel(desc)
-        desc_lbl.setStyleSheet("color: #aaa;")
+        desc_lbl.setObjectName("HomeSubtitle")
         desc_lbl.setWordWrap(True)
         layout.addWidget(lbl)
         layout.addWidget(desc_lbl)
@@ -595,45 +604,56 @@ class PlaceholderPage(QWidget):
 
 
 class MainWindow(QMainWindow):
+    weatherUpdated = Signal(str)
+
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("AI 本地音视频处理工具")
-        self.setMinimumSize(960, 720)
-        self.setStyleSheet("""
-            QMainWindow, QWidget { background: #1e1e2e; color: #e0e0e0; }
-            QTabWidget::pane { border: 1px solid #444; }
-            QTabBar::tab { background: #2d2d3a; color: #ccc; padding: 8px 16px; }
-            QTabBar::tab:selected { background: #5b5bd6; color: white; }
-            QPushButton { background: #3d3d5c; color: #eee; border-radius: 4px; padding: 6px 14px; }
-            QPushButton:hover { background: #5b5bd6; }
-            QGroupBox { border: 1px solid #555; border-radius: 4px; margin-top: 8px; padding-top: 8px; }
-            QGroupBox::title { color: #aaf; }
-            QProgressBar { border: 1px solid #555; border-radius: 4px; text-align: center; }
-            QProgressBar::chunk { background: #5b5bd6; }
-            QListWidget { background: #2d2d3a; border: 1px solid #555; }
-        """)
+        self.setWindowTitle("MusicEditing · 本地音视频工作室")
+        self.setMinimumSize(1024, 720)
+        self.setStyleSheet(app_stylesheet())
 
         self._vm = MainViewModel()
 
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(14, 12, 14, 10)
+        main_layout.setSpacing(10)
 
-        # 顶部状态栏
-        status_bar = QHBoxLayout()
+        # 顶部状态栏（胶囊条）
+        chrome = QFrame()
+        chrome.setObjectName("TopChrome")
+        status_bar = QHBoxLayout(chrome)
+        status_bar.setContentsMargins(14, 8, 14, 8)
+        status_bar.setSpacing(8)
+
+        brand = QLabel("MusicEditing")
+        brand.setObjectName("ChromeBrand")
         self._gpu_label = QLabel()
+        self._gpu_label.setObjectName("ChromePill")
         self._auth_label = QLabel()
+        self._auth_label.setObjectName("ChromePill")
+        self._weather_label = QLabel("天气: …")
+        self._weather_label.setObjectName("ChromeWeather")
+        self._weather_label.setToolTip("按本机公网 IP 定位本地城市，经 Open-Meteo 显示天气")
         self._version_label = QLabel(f"v{self._vm.version}")
+        self._version_label.setObjectName("ChromeVersion")
+
+        status_bar.addWidget(brand)
+        status_bar.addSpacing(8)
         status_bar.addWidget(self._gpu_label)
         status_bar.addWidget(self._auth_label)
+        status_bar.addWidget(self._weather_label)
         status_bar.addStretch()
         status_bar.addWidget(self._version_label)
-        main_layout.addLayout(status_bar)
+        main_layout.addWidget(chrome)
 
-        self._vm.gpuNameChanged.connect(lambda n: self._gpu_label.setText(f"GPU: {n}"))
-        self._vm.authTypeChanged.connect(lambda a: self._auth_label.setText(f"授权: {a}"))
-        self._gpu_label.setText(f"GPU: {self._vm.gpu_name}")
-        self._auth_label.setText(f"授权: {self._vm.auth_type}")
+        self._vm.gpuNameChanged.connect(lambda n: self._gpu_label.setText(f"GPU  {n}"))
+        self._vm.authTypeChanged.connect(lambda a: self._auth_label.setText(f"授权  {a}"))
+        self.weatherUpdated.connect(self._weather_label.setText)
+        self._gpu_label.setText(f"GPU  {self._vm.gpu_name}")
+        self._auth_label.setText(f"授权  {self._vm.auth_type}")
+        self._start_weather_refresh()
 
         # 标签页
         self._tabs = QTabWidget()
@@ -651,14 +671,14 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._download_page, "链接下载")
         self._tabs.addTab(PlaceholderPage("个人中心",
             "卡密兑换、版本更新、关于软件。"), "个人中心")
-        main_layout.addWidget(self._tabs)
+        main_layout.addWidget(self._tabs, 1)
 
         self._vm.downloadFinished.connect(self._on_download_to_home)
         self._download_page.previewPlayRequested.connect(self._on_preview_play)
 
         # 底部状态
         self._status_label = QLabel(self._vm.status_message)
-        self._status_label.setStyleSheet("color: #888; padding: 4px;")
+        self._status_label.setObjectName("FooterStatus")
         self._vm.statusMessageChanged.connect(self._status_label.setText)
         main_layout.addWidget(self._status_label)
 
@@ -670,6 +690,27 @@ class MainWindow(QMainWindow):
                 self, "硬件提示",
                 "当前为 CPU 模式，处理速度较慢。\n支持 NVIDIA 显卡硬件加速（CUDA）。"
             )
+
+    def _start_weather_refresh(self):
+        """后台拉取天气，不阻塞 UI；每 30 分钟刷新。"""
+        self._weather_timer = QTimer(self)
+        self._weather_timer.setInterval(30 * 60 * 1000)
+        self._weather_timer.timeout.connect(self._refresh_weather)
+        self._weather_timer.start()
+        self._refresh_weather()
+
+    def _refresh_weather(self):
+        def worker():
+            try:
+                from core.weather_service import fetch_local_weather, format_status_text, format_status_error
+                info = fetch_local_weather(timeout=5.0)
+                text = format_status_text(info)
+            except Exception as e:
+                from core.weather_service import format_status_error
+                text = format_status_error(e)
+            self.weatherUpdated.emit(text)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _switch_tab(self, index: int):
         self._tabs.setCurrentIndex(index)

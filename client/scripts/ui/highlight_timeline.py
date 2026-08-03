@@ -27,7 +27,7 @@ class HighlightTimelineWidget(QWidget):
         self.setMaximumHeight(140)
         self.setMouseTracking(True)
         self.setToolTip("高光时间轴（点击片段或缩略图可选中）")
-        self.setStyleSheet("background: #1a1a28; border-radius: 6px;")
+        self.setStyleSheet("background: #080A0E; border-radius: 10px;")
 
     def set_duration(self, duration_sec: float) -> None:
         self._duration = max(0.0, float(duration_sec or 0.0))

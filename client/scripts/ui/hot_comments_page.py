@@ -135,7 +135,7 @@ class HotCommentsPage(QWidget):
             "可在 app.conf 配置 netease_api_base 或 netease_hot_comments_script。"
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #888; font-size: 12px;")
+        hint.setObjectName("MutedText")
         root.addWidget(hint)
 
         row = QHBoxLayout()
@@ -145,14 +145,14 @@ class HotCommentsPage(QWidget):
         )
         self._input.returnPressed.connect(self._on_confirm)
         self._btn = QPushButton("确定")
-        self._btn.setStyleSheet("background: #5b5bd6; color: white; padding: 8px 18px;")
+        self._btn.setObjectName("primaryButton")
         self._btn.clicked.connect(self._on_confirm)
         row.addWidget(self._input, 1)
         row.addWidget(self._btn)
         root.addLayout(row)
 
         self._status = QLabel("")
-        self._status.setStyleSheet("color: #8cf;")
+        self._status.setObjectName("InfoText")
         root.addWidget(self._status)
 
         # 播放器 + 热评滚动叠层

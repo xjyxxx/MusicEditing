@@ -18,66 +18,34 @@ from PySide6.QtWidgets import (
 )
 
 from core.image_loader import load_preview, probe_size
-from ui.exif_panel import ExifPanel
+from ui.exif_panel import ExifPanel, attach_exif_overlay
+from ui.theme import BG, PLAYER_BG, TEXT_MUTED, enhance_page_stylesheet
 from ui.workflow_link import TAB_WATERMARK, ask_video_handoff
 from viewmodels.main_vm import MainViewModel
 
-_STYLE = """
-QLabel#HintLabel {
-    color: #9a9ab0; font-size: 12px; padding: 8px 10px;
-    background: #252536; border: 1px solid #3a3a50; border-radius: 6px;
-}
-QLabel#MetaBadge {
-    color: #b8e0ff; font-size: 13px; font-weight: 600; padding: 6px 10px;
-    background: #1a2a3a; border: 1px solid #3a5a7a; border-radius: 6px;
-}
-QLabel#SideTitle {
-    color: #c8c8ff; font-size: 13px; font-weight: 700;
-    padding: 4px 0;
-}
-QPushButton#PrimaryBtn {
-    background: #5b5bd6; color: white; padding: 10px 20px;
-    border-radius: 6px; font-weight: 600;
-}
-QPushButton#PrimaryBtn:hover { background: #6c6ce0; }
-QPushButton#PrimaryBtn:disabled { background: #3a3a55; color: #888; }
-QPushButton#GhostBtn {
-    background: #2d2d42; color: #ddd; padding: 8px 14px;
-    border-radius: 6px; border: 1px solid #4a4a66;
-}
-QPushButton#GhostBtn:hover { background: #3d3d58; }
-QPushButton#GhostBtn:disabled { color: #666; border-color: #333; }
-QPushButton#PresetBtn {
-    background: #2a2a3c; color: #ccc; padding: 4px 10px;
-    border-radius: 4px; border: 1px solid #454560;
-}
-QPushButton#PresetBtn:hover { background: #4a4a80; color: white; }
-QGroupBox {
-    border: 1px solid #44445a; border-radius: 8px;
-    margin-top: 10px; padding-top: 12px; font-weight: 600; color: #b0b0e0;
-}
-QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #aaf; }
-QProgressBar {
-    border: 1px solid #555; border-radius: 4px; text-align: center;
-    min-height: 18px; background: #1a1a28;
-}
-QProgressBar::chunk { background: #5b5bd6; border-radius: 3px; }
-QFrame#CompareBox {
-    background: #0e0e16;
-    border: 1px solid #3a3a50;
-    border-radius: 8px;
-}
-QFrame#CenterLine {
-    background: #666688;
-    max-width: 1px;
-    min-width: 1px;
-    border: none;
-}
-QGraphicsView {
-    background: #0e0e16;
-    border: none;
-}
-"""
+_STYLE = enhance_page_stylesheet()
+
+
+def _paint_scroll_dark(scroll: QScrollArea, body: QWidget) -> None:
+    """强制滚动区/视口深色，避免 Fusion 默认白底。"""
+    from PySide6.QtGui import QPalette
+
+    body.setObjectName("EnhanceScrollBody")
+    body.setAttribute(Qt.WA_StyledBackground, True)
+    scroll.setObjectName("EnhanceScroll")
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QFrame.NoFrame)
+    scroll.setWidget(body)
+    bg = QColor(BG)
+    for w in (scroll, scroll.viewport(), body):
+        w.setAutoFillBackground(True)
+        pal = w.palette()
+        pal.setColor(QPalette.Window, bg)
+        pal.setColor(QPalette.Base, bg)
+        pal.setColor(QPalette.Button, bg)
+        w.setPalette(pal)
+    scroll.viewport().setStyleSheet(f"background: {BG};")
+    body.setStyleSheet(f"background: {BG}; color: #E8EDF5;")
 
 
 class ZoomImageView(QGraphicsView):
@@ -93,7 +61,8 @@ class ZoomImageView(QGraphicsView):
         self._peer: ZoomImageView | None = None
         self._syncing = False
         # 不透明底色 + 全量刷新：避免缩小时旧像素残影（透明底/OpenGL 视口易拖影）
-        self.setBackgroundBrush(QColor(14, 14, 22))
+        self.setBackgroundBrush(QColor(8, 10, 14))
+        self.setStyleSheet(f"background: {PLAYER_BG}; border: none;")
         self.setCacheMode(QGraphicsView.CacheNone)
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
         self.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
@@ -118,7 +87,8 @@ class ZoomImageView(QGraphicsView):
         self._load_backend = ""
         self.resetTransform()
         t = self._scene.addText(text)
-        t.setDefaultTextColor(Qt.gray)
+        t.setDefaultTextColor(QColor(TEXT_MUTED))
+        self._scene.setBackgroundBrush(QColor(8, 10, 14))
         self._scene.setSceneRect(QRectF(0, 0, 400, 300))
         self.centerOn(t)
 
@@ -271,7 +241,7 @@ class SideBySideCompare(QWidget):
             zoom_row.addWidget(b)
         zoom_row.addStretch()
         tip = QLabel("滚轮：缩放当前侧  ·  Ctrl+滚轮：两侧同步  ·  拖拽平移")
-        tip.setStyleSheet("color:#888; font-size:11px;")
+        tip.setObjectName("MutedText")
         zoom_row.addWidget(tip)
         outer.addLayout(zoom_row)
 
@@ -316,6 +286,8 @@ class EnhancePage(QWidget):
         self._result_path = ""
         self._src_image_path = ""
         self._busy = False
+        self.setObjectName("EnhancePage")
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet(_STYLE)
 
         root = QVBoxLayout(self)
@@ -330,6 +302,7 @@ class EnhancePage(QWidget):
         root.addWidget(hint)
 
         self._tabs = QTabWidget()
+        self._tabs.setObjectName("EnhanceInnerTabs")
         self._tabs.addTab(self._build_image_tab(), "图片超分")
         self._tabs.addTab(self._build_video_tab(), "视频超分")
         self._tabs.addTab(self._build_interp_tab(), "视频补帧")
@@ -341,7 +314,7 @@ class EnhancePage(QWidget):
         root.addWidget(self._progress)
 
         self._status = QLabel("就绪")
-        self._status.setStyleSheet("color:#8cf;")
+        self._status.setObjectName("InfoText")
         root.addWidget(self._status)
 
         vm.enhanceProgress.connect(self._on_progress)
@@ -415,7 +388,7 @@ class EnhancePage(QWidget):
 
         top = QHBoxLayout()
         self._img_path_label = QLabel("未选择图片")
-        self._img_path_label.setStyleSheet("color:#ccc;")
+        self._img_path_label.setObjectName("MutedText")
         btn_import = QPushButton("导入图片")
         btn_import.setObjectName("GhostBtn")
         btn_import.clicked.connect(self._on_import_image)
@@ -428,10 +401,8 @@ class EnhancePage(QWidget):
         layout.addWidget(self._img_meta)
 
         self._img_compare = SideBySideCompare()
-        layout.addWidget(self._img_compare, 1)
-
         self._img_exif = ExifPanel(lambda: self._vm.bridge)
-        layout.addWidget(self._img_exif)
+        layout.addWidget(attach_exif_overlay(self._img_compare, self._img_exif), 1)
 
         layout.addWidget(self._build_mode_panel("img", default_ai=True))
 
@@ -458,14 +429,12 @@ class EnhancePage(QWidget):
         page = QWidget()
         outer = QVBoxLayout(page)
         outer.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
         body = QWidget()
         layout = QVBoxLayout(body)
 
         top = QHBoxLayout()
         self._vid_path_label = QLabel("未选择视频")
+        self._vid_path_label.setObjectName("PathLabel")
         btn_import = QPushButton("导入视频")
         btn_import.setObjectName("GhostBtn")
         btn_import.clicked.connect(self._on_import_video)
@@ -486,6 +455,7 @@ class EnhancePage(QWidget):
         preview_row.addWidget(QLabel("预览时刻"))
         self._preview_slider = QSlider(Qt.Horizontal)
         self._preview_time_label = QLabel("0.0s")
+        self._preview_time_label.setObjectName("PathLabel")
         btn_prev = QPushButton("刷新左侧预览")
         btn_prev.setObjectName("GhostBtn")
         btn_prev.clicked.connect(self._refresh_video_preview)
@@ -505,12 +475,14 @@ class EnhancePage(QWidget):
         start_row.addWidget(QLabel("起点"))
         self._start_slider = QSlider(Qt.Horizontal)
         self._start_label = QLabel("0.0s")
+        self._start_label.setObjectName("PathLabel")
         start_row.addWidget(self._start_slider, 1)
         start_row.addWidget(self._start_label)
         end_row = QHBoxLayout()
         end_row.addWidget(QLabel("终点"))
         self._end_slider = QSlider(Qt.Horizontal)
         self._end_label = QLabel("2.0s")
+        self._end_label.setObjectName("PathLabel")
         end_row.addWidget(self._end_slider, 1)
         end_row.addWidget(self._end_label)
         rc.addLayout(start_row)
@@ -553,7 +525,8 @@ class EnhancePage(QWidget):
         actions.addStretch()
         layout.addLayout(actions)
 
-        scroll.setWidget(body)
+        scroll = QScrollArea()
+        _paint_scroll_dark(scroll, body)
         outer.addWidget(scroll)
         return page
 
@@ -562,9 +535,6 @@ class EnhancePage(QWidget):
         page = QWidget()
         outer = QVBoxLayout(page)
         outer.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
         body = QWidget()
         layout = QVBoxLayout(body)
 
@@ -578,6 +548,7 @@ class EnhancePage(QWidget):
         layout.addWidget(tip)
 
         self._interp_path_label = QLabel("未选择视频（请导入或「用当前视频」）")
+        self._interp_path_label.setObjectName("PathLabel")
         layout.addWidget(self._interp_path_label)
 
         row = QHBoxLayout()
@@ -674,7 +645,8 @@ class EnhancePage(QWidget):
         layout.addLayout(actions)
         layout.addStretch()
 
-        scroll.setWidget(body)
+        scroll = QScrollArea()
+        _paint_scroll_dark(scroll, body)
         outer.addWidget(scroll)
         return page
 

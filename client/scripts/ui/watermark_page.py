@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.image_loader import load_preview
-from ui.exif_panel import ExifPanel
+from ui.exif_panel import ExifPanel, attach_exif_overlay
 from ui.region_selector import RegionSelectorWidget
 from ui.workflow_link import TAB_ENHANCE, ask_video_handoff
 from viewmodels.main_vm import MainViewModel
@@ -35,7 +35,7 @@ class WatermarkPage(QWidget):
             "同一段视频只启动一次 media_cli，帧间复用后端。"
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #888; font-size: 12px;")
+        hint.setObjectName("MutedText")
         root.addWidget(hint)
 
         self._tabs = QTabWidget()
@@ -48,7 +48,7 @@ class WatermarkPage(QWidget):
         root.addWidget(self._progress)
 
         self._status = QLabel("")
-        self._status.setStyleSheet("color: #8cf;")
+        self._status.setObjectName("InfoText")
         root.addWidget(self._status)
 
         vm.watermarkProgress.connect(self._on_progress)
@@ -69,10 +69,8 @@ class WatermarkPage(QWidget):
         layout.addLayout(row)
 
         self._img_selector = RegionSelectorWidget()
-        layout.addWidget(self._img_selector, 1)
-
         self._img_exif = ExifPanel(lambda: self._vm.bridge)
-        layout.addWidget(self._img_exif)
+        layout.addWidget(attach_exif_overlay(self._img_selector, self._img_exif), 1)
 
         side = QHBoxLayout()
         self._img_region_list = QListWidget()
@@ -95,7 +93,7 @@ class WatermarkPage(QWidget):
         btn_clear = QPushButton("清除区域")
         btn_clear.clicked.connect(self._img_selector.clear_regions)
         btn_run = QPushButton("开始去水印")
-        btn_run.setStyleSheet("background: #5b5bd6; color: white; padding: 8px 16px;")
+        btn_run.setObjectName("primaryButton")
         btn_run.clicked.connect(self._on_run_image)
         btn_col.addWidget(btn_clear)
         btn_col.addWidget(btn_run)
@@ -124,7 +122,7 @@ class WatermarkPage(QWidget):
         layout.addLayout(row)
 
         self._vid_info = QLabel("")
-        self._vid_info.setStyleSheet("color: #8cf;")
+        self._vid_info.setObjectName("InfoText")
         layout.addWidget(self._vid_info)
 
         preview_row = QHBoxLayout()
@@ -178,7 +176,7 @@ class WatermarkPage(QWidget):
         btn_clear = QPushButton("清除区域")
         btn_clear.clicked.connect(self._vid_selector.clear_regions)
         btn_run = QPushButton("开始视频去水印")
-        btn_run.setStyleSheet("background: #5b5bd6; color: white; padding: 8px 16px;")
+        btn_run.setObjectName("primaryButton")
         btn_run.clicked.connect(self._on_run_video)
         self._btn_send_enhance = QPushButton("送去超分")
         self._btn_send_enhance.setEnabled(False)

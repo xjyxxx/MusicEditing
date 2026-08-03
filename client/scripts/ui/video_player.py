@@ -128,18 +128,12 @@ class VideoPlayerWidget(QWidget):
         QSurfaceFormat.setDefaultFormat(_default_surface_format())
 
         self._title = QLabel("未加载 · 支持视频 / 音乐")
-
-        self._title.setStyleSheet("color: #ccc; font-size: 13px;")
-
-
+        self._title.setObjectName("MutedText")
 
         self._display = GlVideoWidget()
         self._display.set_placeholder("请打开本地视频或音乐\n点击画面可暂停 / 继续")
 
-
-
         self._btn_open = QPushButton("打开文件")
-
         self._btn_play = QPushButton("播放")
 
         self._btn_pause = QPushButton("暂停")
@@ -159,7 +153,8 @@ class VideoPlayerWidget(QWidget):
 
         self._time_label = QLabel("00:00 / 00:00")
 
-        self._time_label.setStyleSheet("color: #888; min-width: 110px;")
+        self._time_label.setObjectName("MutedText")
+        self._time_label.setMinimumWidth(110)
 
 
 

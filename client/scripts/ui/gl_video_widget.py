@@ -59,7 +59,7 @@ class GlVideoWidget(QOpenGLWidget):
         super().__init__(parent)
         self.setFormat(_default_surface_format())
         self.setMinimumHeight(240)
-        self.setStyleSheet("background: #0a0a12; border-radius: 6px;")
+        self.setStyleSheet("background: #080A0E; border-radius: 10px;")
         self.setCursor(Qt.PointingHandCursor)
 
         self._placeholder = "请打开本地视频或音乐"
