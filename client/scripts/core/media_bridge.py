@@ -1929,5 +1929,102 @@ class MediaBridge:
             on_progress=on_progress,
         )
 
+    def make_short_cover(
+        self,
+        video_path: str,
+        output_png: str,
+        title: str,
+        *,
+        duration_sec: float = 0.0,
+        subtitle: str = "",
+        count: int = 12,
+        start_sec: float = 0.0,
+        end_sec: float = 0.0,
+        width: int = 1080,
+        height: int = 1920,
+        on_progress: Optional[Callable[[float, str], None]] = None,
+    ):
+        """最清晰帧 + 大字标题封面 PNG。"""
+        from core.cover_factory import make_short_cover
+
+        dur = float(duration_sec or 0.0)
+        if dur <= 0:
+            try:
+                dur = self.probe_duration(video_path)
+            except Exception:
+                dur = 60.0
+        return make_short_cover(
+            self,
+            video_path,
+            dur,
+            output_png,
+            title,
+            subtitle=subtitle,
+            count=count,
+            start_sec=start_sec,
+            end_sec=end_sec,
+            width=width,
+            height=height,
+            on_progress=on_progress,
+        )
+
+    def apply_audio_fx(
+        self,
+        input_path: str,
+        output_path: str,
+        params,
+        *,
+        on_progress: Optional[Callable[[float, str], None]] = None,
+    ) -> str:
+        """音频趣味效果（asetrate / atempo / areverse / apulsator / aecho）。"""
+        from core.audio_fx import apply_audio_fx
+
+        return apply_audio_fx(
+            input_path, output_path, params, on_progress=on_progress,
+        )
+
+    def mix_bgm(
+        self,
+        video_path: str,
+        bgm_path: str,
+        output_path: str,
+        *,
+        mode: str = "overlay",
+        bgm_volume: float = 0.35,
+        voice_volume: float = 1.0,
+        loop_bgm: bool = True,
+        on_progress: Optional[Callable[[float, str], None]] = None,
+    ) -> str:
+        """成片 + BGM 混音（FFmpeg）。"""
+        from core.bgm_mix import BgmMixParams, mix_bgm
+
+        return mix_bgm(
+            video_path,
+            bgm_path,
+            output_path,
+            BgmMixParams(
+                mode=mode,
+                bgm_volume=bgm_volume,
+                voice_volume=voice_volume,
+                loop_bgm=loop_bgm,
+            ),
+            on_progress=on_progress,
+        )
+
+    def separate_demucs(
+        self,
+        input_path: str,
+        output_dir: str,
+        *,
+        model: str = "htdemucs",
+        on_progress: Optional[Callable[[float, str], None]] = None,
+    ):
+        """可选 Demucs 分轨。"""
+        from core.demucs_sep import separate_stems
+
+        return separate_stems(
+            input_path, output_dir, model=model, on_progress=on_progress,
+        )
+
     def shutdown(self):
         pass

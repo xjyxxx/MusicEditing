@@ -24,6 +24,10 @@ class TaskType(IntEnum):
     DOWNLOAD = 4
     INTERPOLATE = 5
     COLOR_GRADE = 6
+    COVER = 7
+    AUDIO_FX = 8
+    BGM_MIX = 9
+    DEMUCS = 10
 
 
 @dataclass

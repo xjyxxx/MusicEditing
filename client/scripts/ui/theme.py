@@ -93,7 +93,70 @@ QLabel#FooterStatus {{
     background: transparent;
 }}
 
-/* ── Tabs ── */
+/* ── 菜单栏（主功能导航）── */
+QMenuBar {{
+    background: {BG};
+    color: {TEXT};
+    border: none;
+    padding: 2px 6px 0 6px;
+    font-family: {FONT_UI};
+    font-size: 13px;
+}}
+QMenuBar::item {{
+    background: transparent;
+    color: {TEXT_MUTED};
+    padding: 6px 12px;
+    border-radius: 6px;
+    margin: 2px 2px;
+}}
+QMenuBar::item:selected {{
+    background: {SURFACE_2};
+    color: {TEXT};
+}}
+QMenuBar::item:pressed {{
+    background: {ELEVATED};
+    color: {ACCENT};
+}}
+QMenu {{
+    background: {SURFACE};
+    color: {TEXT};
+    border: 1px solid {BORDER_STRONG};
+    border-radius: 8px;
+    padding: 6px;
+}}
+QMenu::item {{
+    padding: 8px 28px 8px 16px;
+    border-radius: 6px;
+}}
+QMenu::item:selected {{
+    background: {ELEVATED};
+    color: {TEXT};
+}}
+QMenu::item:checked {{
+    color: {ACCENT};
+    font-weight: 600;
+}}
+QMenu::separator {{
+    height: 1px;
+    background: {BORDER};
+    margin: 4px 8px;
+}}
+QLabel#ChromePage {{
+    background: {ACCENT};
+    color: {ACCENT_ON};
+    border: 1px solid {ACCENT};
+    border-radius: 999px;
+    padding: 4px 12px;
+    font-size: 12px;
+    font-weight: 600;
+}}
+QStackedWidget#MainStack {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 12px;
+}}
+
+/* ── 页内 Tabs（增强/去水印等）── */
 QTabWidget::pane {{
     background: {SURFACE};
     border: 1px solid {BORDER};

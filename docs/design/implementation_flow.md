@@ -15,7 +15,7 @@
 | [§2 构建与启动](#2-构建与启动流程) | x64 / Win32、启动退出 |
 | [§3 MVVM](#3-mvvm-分层实现) | Model / VM / View、播放器、OpenCV、去水印/超分、GPU |
 | [§4 C++ 引擎](#4-c-媒体引擎实现流程) | VideoDecoder、C API、CLI 协议 |
-| [§5 业务链路](#5-业务功能链路) | 5.1 切片 · 5.8 字幕 · 5.12 波形响度 · 5.13 调色 · … |
+| [§5 业务链路](#5-业务功能链路) | 5.1 切片 · 5.8 字幕 · 5.12 波形响度 · 5.13 调色 · 5.14 封面 · 5.15 音频趣味 · 5.16 BGM/Demucs · … |
 | [§6 模块依赖](#6-模块间依赖关系) | CMake / Python 树 |
 | [§7 状态表](#7-已实现-vs-待实现) | ✅ / ⏳ |
 | [§8 llama.cpp](#8-llamacpp-集成说明) | 目录与 CMake |
@@ -158,16 +158,21 @@ MainWindow.shutdown()
 
 ### 3.3 View 层 (`client/scripts/ui/main_window.py`)
 
-| 页面 | 类 | 状态 |
-|------|-----|------|
-| 首页 | `HomePage` + `VideoPlayerWidget` | 本地预览 + 功能卡片 |
-| 智能切片 | `SlicePage` + `HighlightTimelineWidget` | 分析 / 手动 / 成片 / **竖屏短视频** |
-| 画质增强 | `EnhancePage` + `ExifPanel` | 图片超分 · 视频超分 · **视频补帧**；内页 Scroll 深色底 |
-| 去水印 | `WatermarkPage` + `RegionSelectorWidget` + `ExifPanel` | 图片/视频去水印 + EXIF |
-| 热评滚动 | `HotCommentsPage` | 歌曲链接/ID → 热评滚动 |
-| 链接下载 | `DownloadPage` | yt-dlp 下载 → 可送首页播放 |
-| 全流程队列 | `PipelineQueuePage` | 切片成片→超分→去水印；批量无人值守（§5.9.1） |
-| 个人中心 | `PlaceholderPage` | 占位（授权待接入） |
+**导航：** 顶部 `QMenuBar`（文件 / 核心 / 工作流 / 趣味 / 帮助）→ `MainWindow._goto_page` → `QStackedWidget`。顶栏胶囊显示当前页名。页面索引见 `ui/workflow_link.py`（`TAB_*` / `MENU_GROUPS` / `PAGE_TITLES`），`open_with_video` 接力仍用同一套索引。
+
+| 页面 | 类 | 菜单分组 | 状态 |
+|------|-----|----------|------|
+| 首页 | `HomePage` + `VideoPlayerWidget` | 核心 | 本地预览 |
+| 智能切片 | `SlicePage` + `HighlightTimelineWidget` | 核心 | 分析 / 手动 / 成片 / 竖屏短视频 |
+| 画质增强 | `EnhancePage` + `ExifPanel` | 核心 | 超分 / 补帧 / 调色 |
+| 去水印 | `WatermarkPage` + `RegionSelectorWidget` + `ExifPanel` | 核心 | 图片/视频去水印 + EXIF |
+| 全流程队列 | `PipelineQueuePage` | 工作流 | 切片→超分→去水印（§5.9.1） |
+| 链接下载 | `DownloadPage` | 工作流 | yt-dlp → 可送首页播放 |
+| BGM 混音 | `BgmPage` | 工作流 | FFmpeg 叠 BGM；Demucs 可选分轨（§5.16） |
+| 热评滚动 | `HotCommentsPage` | 趣味 | 网易云热评叠加 |
+| 封面工厂 | `CoverPage` | 趣味 | 最清晰帧 + 标题 PNG（§5.14） |
+| 音频趣味 | `AudioFunPage` | 趣味 | 变调/变速/倒放/8D/混响（§5.15） |
+| 个人中心 | `PlaceholderPage` | 帮助 | 占位（授权待接入） |
 
 播放器组件：`client/scripts/ui/video_player.py`（`GlVideoWidget` OpenGL + `PlayerBackend` → `media_player.exe`）
 
@@ -185,7 +190,7 @@ MainWindow.shutdown()
 | `SIGNAL` | `#3DB8A8` | 信息文字、GroupBox 标题 |
 | 字体 | YaHei UI / Segoe UI Semibold | 中文桌面可读 |
 
-顶栏为圆角 `TopChrome`：品牌名 + GPU/授权/天气胶囊 + 版本号。主按钮用 `objectName="primaryButton"`。
+顶栏为圆角 `TopChrome`：品牌名 + 当前页胶囊 + GPU/授权/天气 + 版本号。主功能入口为菜单栏。主按钮用 `objectName="primaryButton"`。
 
 ### 3.4 首页播放器交互（统一 FFmpeg 播放器）
 
@@ -1417,6 +1422,83 @@ EnhancePage「一键调色」
 **限制：** 调色矩阵为风格化近似，非专业电影 LUT 包；`lut3d` 失败时回退 `colorbalance`/`eq`。
 
 
+### 5.14 封面 / 缩略图工厂
+
+在已有 `media_cli thumbnail` / `MediaBridge.extract_thumbnail` 之上：均匀抽样多帧 → OpenCV Laplacian 方差选最清晰帧 → Qt 绘制大字标题 PNG（默认 9:16）。
+
+```
+CoverPage「生成封面」
+  → MainViewModel.start_cover_factory
+      → MediaBridge.make_short_cover
+          → cover_factory.pick_sharpest_frame（多次 extract_thumbnail）
+          → cover_factory.render_cover_png（QPainter + 微软雅黑）
+  → coverFinished → 预览 PNG
+```
+
+| 资源 | 路径 |
+|------|------|
+| Python | `core/cover_factory.py` |
+| UI | `ui/cover_page.py`（Tab「封面工厂」） |
+| VM | `MainViewModel.start_cover_factory` |
+| 依赖 | `extract_thumbnail`（PPM）+ OpenCV + PySide6 |
+
+**限制：** 锐度启发式（非语义「好看」）；中文字体依赖系统「Microsoft YaHei UI」。
+
+
+### 5.15 音频趣味页
+
+纯 FFmpeg 滤镜链：变调 `asetrate`+`aresample`、变速 `atempo`、倒放 `areverse`、伪 8D `apulsator`、简单混响 `aecho`。可作用于音频文件或视频音轨（默认视频轨 copy）。
+
+```
+AudioFunPage「导出效果」
+  → MainViewModel.start_audio_fx
+      → MediaBridge.apply_audio_fx
+          → core.audio_fx.apply_audio_fx（subprocess ffmpeg -af …）
+  → audioFxFinished
+```
+
+| 资源 | 路径 |
+|------|------|
+| Python | `core/audio_fx.py` |
+| UI | `ui/audio_fun_page.py`（Tab「音频趣味」） |
+| VM | `MainViewModel.start_audio_fx` |
+
+**限制：** 变调为采样率法（非专业移调器）；8D 为左右脉冲伪环绕；非实时预览。
+
+
+### 5.16 BGM 混音 / 人声分离（Demucs 可选）
+
+下载页拿歌 → 本页混到成片；进阶分轨用仓库内 Demucs 源码（可选装 PyTorch）。
+
+```
+BgmPage「BGM 混音」
+  → MainViewModel.start_bgm_mix
+      → MediaBridge.mix_bgm → core.bgm_mix（FFmpeg amix / 替换音轨）
+
+BgmPage「人声分离」
+  → MainViewModel.start_demucs_separate
+      → MediaBridge.separate_demucs → core.demucs_sep
+          → third_party/demucs（Separator API）
+  未安装 torch/demucs 时 UI 灰显并提示 scripts\setup_demucs.bat
+```
+
+| 资源 | 路径 |
+|------|------|
+| 混音 | `core/bgm_mix.py`（仅 FFmpeg，默认可打包） |
+| 分轨 | `core/demucs_sep.py` + `third_party/demucs`（MIT，~0.3MB 源码） |
+| 安装 | `scripts/setup_demucs.bat`（可选；PyTorch + 权重另算） |
+| UI | `ui/bgm_page.py`；菜单「工作流 → BGM 混音」 |
+| 权重缓存 | `.cache/demucs/`（gitignore；可随包拷贝到其它电脑离线用） |
+
+**打包给其它电脑：**
+
+1. **必带：** 仓库 + `third_party/ffmpeg` → 混音可用。  
+2. **可选分轨：** 再带 `third_party/demucs`，在目标机跑 `setup_demucs.bat`；或把已装的 venv + `.cache/demucs` 一并拷贝。  
+3. **不要**依赖 `E:\FFmpegxuexi\demucs-main` 绝对路径。
+
+**限制：** Demucs 依赖 PyTorch（体积大）；CPU 分轨慢；模型首次下载需网络（或预置缓存）。
+
+
 ---
 
 ## 6. 模块间依赖关系
@@ -1451,6 +1533,13 @@ main.py
     ├── ui/enhance_page.py / watermark_page.py
     │   ├── ui/exif_panel.py       (ExifTool 元数据面板)
     │   └── core/image_loader.py   (OpenCV 解码 / 可选 CUDA 缩放 / Qt 回退)
+    ├── ui/cover_page.py           (封面工厂)
+    │   └── core/cover_factory.py  (最清晰帧 + 标题 PNG)
+    ├── ui/audio_fun_page.py       (音频趣味)
+    │   └── core/audio_fx.py       (asetrate/atempo/areverse/apulsator/aecho)
+    ├── ui/bgm_page.py             (BGM 混音 / 人声分离)
+    │   ├── core/bgm_mix.py        (FFmpeg 混音)
+    │   └── core/demucs_sep.py     (可选 Demucs → third_party/demucs)
     └── viewmodels/main_vm.py
         ├── models/video_model.py
         ├── core/app_logic.py      (GPU 检测)
@@ -1471,13 +1560,17 @@ main.py
 | FFmpeg 视频打开/探测 | ✅ | VideoDecoder + probe |
 | 视频帧遍历 | ✅ | iterateFrames + CLI |
 | 缩略图提取 | ✅ | `media_cli thumbnail` + `MediaBridge.extract_thumbnail` + 磁盘小图缓存 |
+| 封面/缩略图工厂 | ✅ | 最清晰帧 + 大字标题 PNG；`CoverPage`（§5.14） |
+| 音频趣味页 | ✅ | 变调/变速/倒放/8D/混响；`AudioFunPage`（§5.15） |
+| BGM 混音 | ✅ | FFmpeg 叠/替换/压低原声；`BgmPage`（§5.16） |
+| Demucs 人声分离 | ✅ 可选 | `third_party/demucs` + `setup_demucs.bat`；未装不影响混音 |
 | 高光时间轴（缩略图） | ✅ | `HighlightTimelineWidget` 色块+胶片条；列表带图标；见 §5.1.1 |
 | 三大功能串联 | ✅ | `open_with_video` + 完成弹窗/「送去」；批量全流程队列见下 |
 | 批量全流程队列 | ✅ | `PipelineQueuePage`：切片成片→超分→去水印；暂停/跳过/取消（§5.9.1） |
 | 切片/导入异步 | ✅ | `import_video` / `start_slice_analysis` 后台线程；UI 收 Signal |
 | 手动切片 | ✅ | SlicePage 起止时间添加/删除/清空；不依赖 Vosk |
 | 视频补帧 | ✅ | EnhancePage：FFmpeg minterpolate；默认快速 blend，可选精细 MCI；默认试 15 秒 |
-| PySide6 多标签 UI | ✅ | 首页/切片/画质增强/去水印/热评滚动；个人中心占位 |
+| PySide6 菜单导航 UI | ✅ | MenuBar + QStackedWidget；核心/工作流/趣味/帮助分组（§3.3） |
 | Studio 视觉主题 | ✅ | `ui/theme.py` 炭黑+琥珀；顶栏胶囊；§3.3.1 |
 | 网易云热评滚动 | ✅ | `HotCommentsPage` + 外部爬虫脚本协议；默认演示数据 |
 | 首页本地播放器 | ✅ | FFmpeg 视频 + Qt 音乐；OpenGL 显示；**点击画面暂停/继续** |

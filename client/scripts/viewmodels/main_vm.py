@@ -78,6 +78,22 @@ class MainViewModel(QObject):
 
     colorGradeFinished = Signal(int, str)
 
+    coverProgress = Signal(int, float, str)
+
+    coverFinished = Signal(int, str, object)  # task_id, path, CoverResult|None
+
+    audioFxProgress = Signal(int, float, str)
+
+    audioFxFinished = Signal(int, str)
+
+    bgmMixProgress = Signal(int, float, str)
+
+    bgmMixFinished = Signal(int, str)
+
+    demucsProgress = Signal(int, float, str)
+
+    demucsFinished = Signal(int, str)
+
     exportFinished = Signal(str)
 
     silenceFinished = Signal(str)
@@ -1779,6 +1795,224 @@ class MainViewModel(QObject):
                 self.taskStateChanged.emit(task_id, TaskState.COMPLETED)
                 self.colorGradeFinished.emit(task_id, out or output_path)
                 self._status_message = f"调色完成: {os.path.basename(out or output_path)}"
+                self.statusMessageChanged.emit(self._status_message)
+            except Exception as e:
+                task.state = TaskState.FAILED
+                self.taskStateChanged.emit(task_id, TaskState.FAILED)
+                self.errorOccurred.emit(str(e))
+
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+
+    def start_cover_factory(
+        self,
+        video_path: str,
+        output_png: str,
+        title: str,
+        *,
+        subtitle: str = "",
+        duration_sec: float = 0.0,
+        count: int = 12,
+        width: int = 1080,
+        height: int = 1920,
+        start_sec: float = 0.0,
+        end_sec: float = 0.0,
+    ):
+        """封面工厂：最清晰帧 + 大字标题 PNG。"""
+        if not self._bridge:
+            self.errorOccurred.emit("媒体引擎未加载")
+            return
+        if not video_path or not os.path.isfile(video_path):
+            self.errorOccurred.emit("封面：输入视频无效")
+            return
+        task = TaskModel(
+            task_id=self._next_task_id,
+            task_type=TaskType.COVER,
+            file_path=video_path,
+            state=TaskState.PROCESSING,
+        )
+        self._next_task_id += 1
+        self._state.tasks.append(task)
+        task_id = task.task_id
+        bridge = self._bridge
+
+        def run():
+            try:
+                def report(p: float, msg: str):
+                    task.progress = p
+                    self.coverProgress.emit(task_id, p, msg)
+
+                result = bridge.make_short_cover(
+                    video_path,
+                    output_png,
+                    title,
+                    duration_sec=duration_sec,
+                    subtitle=subtitle,
+                    count=count,
+                    start_sec=start_sec,
+                    end_sec=end_sec,
+                    width=width,
+                    height=height,
+                    on_progress=report,
+                )
+                out = getattr(result, "cover_path", None) or output_png
+                task.state = TaskState.COMPLETED
+                task.progress = 100.0
+                self.taskStateChanged.emit(task_id, TaskState.COMPLETED)
+                self.coverFinished.emit(task_id, out, result)
+                self._status_message = f"封面完成: {os.path.basename(out)}"
+                self.statusMessageChanged.emit(self._status_message)
+            except Exception as e:
+                task.state = TaskState.FAILED
+                self.taskStateChanged.emit(task_id, TaskState.FAILED)
+                self.errorOccurred.emit(str(e))
+
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+
+    def start_audio_fx(
+        self,
+        input_path: str,
+        output_path: str,
+        params,
+    ):
+        """音频趣味效果（变调/变速/倒放/8D/混响）。"""
+        if not self._bridge:
+            self.errorOccurred.emit("媒体引擎未加载")
+            return
+        if not input_path or not os.path.isfile(input_path):
+            self.errorOccurred.emit("音频效果：输入文件无效")
+            return
+        task = TaskModel(
+            task_id=self._next_task_id,
+            task_type=TaskType.AUDIO_FX,
+            file_path=input_path,
+            state=TaskState.PROCESSING,
+        )
+        self._next_task_id += 1
+        self._state.tasks.append(task)
+        task_id = task.task_id
+        bridge = self._bridge
+
+        def run():
+            try:
+                def report(p: float, msg: str):
+                    task.progress = p
+                    self.audioFxProgress.emit(task_id, p, msg)
+
+                out = bridge.apply_audio_fx(
+                    input_path, output_path, params, on_progress=report,
+                )
+                task.state = TaskState.COMPLETED
+                task.progress = 100.0
+                self.taskStateChanged.emit(task_id, TaskState.COMPLETED)
+                self.audioFxFinished.emit(task_id, out or output_path)
+                self._status_message = f"音频效果完成: {os.path.basename(out or output_path)}"
+                self.statusMessageChanged.emit(self._status_message)
+            except Exception as e:
+                task.state = TaskState.FAILED
+                self.taskStateChanged.emit(task_id, TaskState.FAILED)
+                self.errorOccurred.emit(str(e))
+
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+
+    def start_bgm_mix(
+        self,
+        video_path: str,
+        bgm_path: str,
+        output_path: str,
+        *,
+        mode: str = "overlay",
+        bgm_volume: float = 0.35,
+        voice_volume: float = 1.0,
+        loop_bgm: bool = True,
+    ):
+        """成片 + BGM 混音（FFmpeg）。"""
+        if not self._bridge:
+            self.errorOccurred.emit("媒体引擎未加载")
+            return
+        if not video_path or not os.path.isfile(video_path):
+            self.errorOccurred.emit("混音：视频无效")
+            return
+        if not bgm_path or not os.path.isfile(bgm_path):
+            self.errorOccurred.emit("混音：BGM 无效")
+            return
+        task = TaskModel(
+            task_id=self._next_task_id,
+            task_type=TaskType.BGM_MIX,
+            file_path=video_path,
+            state=TaskState.PROCESSING,
+        )
+        self._next_task_id += 1
+        self._state.tasks.append(task)
+        task_id = task.task_id
+        bridge = self._bridge
+
+        def run():
+            try:
+                def report(p: float, msg: str):
+                    task.progress = p
+                    self.bgmMixProgress.emit(task_id, p, msg)
+
+                out = bridge.mix_bgm(
+                    video_path,
+                    bgm_path,
+                    output_path,
+                    mode=mode,
+                    bgm_volume=bgm_volume,
+                    voice_volume=voice_volume,
+                    loop_bgm=loop_bgm,
+                    on_progress=report,
+                )
+                task.state = TaskState.COMPLETED
+                task.progress = 100.0
+                self.taskStateChanged.emit(task_id, TaskState.COMPLETED)
+                self.bgmMixFinished.emit(task_id, out or output_path)
+                self._status_message = f"BGM 混音完成: {os.path.basename(out or output_path)}"
+                self.statusMessageChanged.emit(self._status_message)
+            except Exception as e:
+                task.state = TaskState.FAILED
+                self.taskStateChanged.emit(task_id, TaskState.FAILED)
+                self.errorOccurred.emit(str(e))
+
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+
+    def start_demucs_separate(self, input_path: str, output_dir: str):
+        """可选 Demucs 人声分离。"""
+        if not self._bridge:
+            self.errorOccurred.emit("媒体引擎未加载")
+            return
+        if not input_path or not os.path.isfile(input_path):
+            self.errorOccurred.emit("分轨：输入无效")
+            return
+        task = TaskModel(
+            task_id=self._next_task_id,
+            task_type=TaskType.DEMUCS,
+            file_path=input_path,
+            state=TaskState.PROCESSING,
+        )
+        self._next_task_id += 1
+        self._state.tasks.append(task)
+        task_id = task.task_id
+        bridge = self._bridge
+
+        def run():
+            try:
+                def report(p: float, msg: str):
+                    task.progress = p
+                    self.demucsProgress.emit(task_id, p, msg)
+
+                result = bridge.separate_demucs(
+                    input_path, output_dir, on_progress=report,
+                )
+                out = getattr(result, "output_dir", None) or output_dir
+                task.state = TaskState.COMPLETED
+                task.progress = 100.0
+                self.taskStateChanged.emit(task_id, TaskState.COMPLETED)
+                self.demucsFinished.emit(task_id, out)
+                self._status_message = f"人声分离完成: {out}"
                 self.statusMessageChanged.emit(self._status_message)
             except Exception as e:
                 task.state = TaskState.FAILED

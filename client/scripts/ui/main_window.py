@@ -6,11 +6,11 @@ import os
 import threading
 
 from PySide6.QtCore import Qt, Signal, Slot, QEvent, QSize, QTimer
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
-    QProgressBar, QPushButton, QSlider, QComboBox, QSplitter, QTabWidget,
+    QProgressBar, QPushButton, QSlider, QComboBox, QStackedWidget,
     QVBoxLayout, QWidget,
 )
 
@@ -21,43 +21,26 @@ from ui.enhance_page import EnhancePage
 from ui.hot_comments_page import HotCommentsPage
 from ui.download_page import DownloadPage
 from ui.pipeline_queue_page import PipelineQueuePage
+from ui.cover_page import CoverPage
+from ui.audio_fun_page import AudioFunPage
+from ui.bgm_page import BgmPage
 from ui.highlight_timeline import HighlightTimelineWidget
 from ui.theme import app_stylesheet
 from ui.workflow_link import (
+    MENU_GROUPS,
+    PAGE_TITLES,
+    TAB_AUDIO_FUN,
+    TAB_COVER,
     TAB_ENHANCE,
-    TAB_PIPELINE,
+    TAB_HOME,
     TAB_WATERMARK,
     ask_video_handoff,
 )
 from viewmodels.main_vm import MainViewModel
 
 
-class FeatureCard(QFrame):
-    """首页功能快捷卡片"""
-
-    def __init__(self, title: str, desc: str, tab_index: int, on_click, parent=None):
-        super().__init__(parent)
-        self.tab_index = tab_index
-        self.setObjectName("FeatureCard")
-        self.setFrameShape(QFrame.StyledPanel)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(96)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(6)
-        title_lbl = QLabel(title)
-        title_lbl.setObjectName("FeatureCardTitle")
-        desc_lbl = QLabel(desc)
-        desc_lbl.setObjectName("FeatureCardDesc")
-        desc_lbl.setWordWrap(True)
-        layout.addWidget(title_lbl)
-        layout.addWidget(desc_lbl)
-        layout.addStretch()
-        self.mousePressEvent = lambda e: on_click(tab_index)
-
-
 class HomePage(QWidget):
-    def __init__(self, vm: MainViewModel, switch_tab, parent=None):
+    def __init__(self, vm: MainViewModel, parent=None):
         super().__init__(parent)
         self._vm = vm
         layout = QVBoxLayout(self)
@@ -67,46 +50,15 @@ class HomePage(QWidget):
         title = QLabel("MusicEditing")
         title.setObjectName("HomeTitle")
         layout.addWidget(title)
-        subtitle = QLabel("本地音视频工作室 · 预览 · 切片 · 增强 · 去水印")
+        subtitle = QLabel("本地音视频打开 · 预览 · 点击画面暂停/继续")
         subtitle.setObjectName("HomeSubtitle")
         layout.addWidget(subtitle)
 
-        splitter = QSplitter(Qt.Vertical)
-
-        # 播放器区域
         player_box = QGroupBox("本地预览")
         player_layout = QVBoxLayout(player_box)
         self._player = VideoPlayerWidget()
         player_layout.addWidget(self._player)
-        splitter.addWidget(player_box)
-
-        # 功能快捷入口
-        cards_widget = QWidget()
-        cards_layout = QVBoxLayout(cards_widget)
-        cards_layout.setContentsMargins(0, 8, 0, 0)
-        hint = QLabel("快捷入口 · 点击画面暂停/继续 · 支持视频与音乐")
-        hint.setObjectName("SectionHint")
-        cards_layout.addWidget(hint)
-
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(12)
-        cards = [
-            ("智能切片", "自动识别长视频精彩瞬间，一键剪辑导出", 1),
-            ("4K 超分", "1080P 升级 4K，画质修复与帧补全", 2),
-            ("一键去水印", "复杂水印、边角水印智能去除", 3),
-            ("热评滚动", "网易云热评叠加播放器滚动显示", 4),
-            ("链接下载", "粘贴网页链接，下载视频或音频", 5),
-            ("全流程队列", "切片→超分→去水印，批量无人值守", TAB_PIPELINE),
-        ]
-        for i, (t, d, idx) in enumerate(cards):
-            grid.addWidget(FeatureCard(t, d, idx, switch_tab), i // 3, i % 3)
-        cards_layout.addLayout(grid)
-        splitter.addWidget(cards_widget)
-
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
-        layout.addWidget(splitter, 1)
+        layout.addWidget(player_box, 1)
 
         # 打开视频时同步导入到 ViewModel（供其他模块使用）
         self._player.fileOpened.connect(vm.import_video)
@@ -134,6 +86,10 @@ class HomePage(QWidget):
     def apply_opencv_filter(self, mode: str) -> bool:
         """应用首页播放器滤镜（今日氛围等）。"""
         return self._player.set_filter_mode(mode)
+
+    def prompt_open_media(self):
+        """菜单「打开文件」：弹出播放器文件对话框。"""
+        self._player._on_open()  # noqa: SLF001
 
 
 class SlicePage(QWidget):
@@ -733,8 +689,13 @@ class MainWindow(QMainWindow):
         self._version_label = QLabel(f"v{self._vm.version}")
         self._version_label.setObjectName("ChromeVersion")
 
+        self._page_label = QLabel(PAGE_TITLES[TAB_HOME])
+        self._page_label.setObjectName("ChromePage")
+        self._page_label.setToolTip("当前功能页（由菜单切换）")
+
         status_bar.addWidget(brand)
         status_bar.addSpacing(8)
+        status_bar.addWidget(self._page_label)
         status_bar.addWidget(self._gpu_label)
         status_bar.addWidget(self._auth_label)
         status_bar.addWidget(self._weather_label)
@@ -748,25 +709,43 @@ class MainWindow(QMainWindow):
         self._gpu_label.setText(f"GPU  {self._vm.gpu_name}")
         self._auth_label.setText(f"授权  {self._vm.auth_type}")
 
-        # 标签页
-        self._tabs = QTabWidget()
-        self._home_page = HomePage(self._vm, self._switch_tab)
-        self._tabs.addTab(self._home_page, "首页")
+        # 功能页：堆叠容器 + 菜单导航（不再平铺大量 Tab）
+        self._stack = QStackedWidget()
+        self._stack.setObjectName("MainStack")
+        self._home_page = HomePage(self._vm)
         self._slice_page = SlicePage(self._vm, handoff=self.open_with_video)
-        self._tabs.addTab(self._slice_page, "智能切片")
         self._enhance_page = EnhancePage(self._vm, handoff=self.open_with_video)
-        self._tabs.addTab(self._enhance_page, "画质增强")
         self._watermark_page = WatermarkPage(self._vm, handoff=self.open_with_video)
-        self._tabs.addTab(self._watermark_page, "去水印")
         self._hot_comments_page = HotCommentsPage(self._vm)
-        self._tabs.addTab(self._hot_comments_page, "热评滚动")
         self._download_page = DownloadPage(self._vm)
-        self._tabs.addTab(self._download_page, "链接下载")
         self._pipeline_page = PipelineQueuePage(self._vm)
-        self._tabs.addTab(self._pipeline_page, "全流程队列")
-        self._tabs.addTab(PlaceholderPage("个人中心",
-            "卡密兑换、版本更新、关于软件。"), "个人中心")
-        main_layout.addWidget(self._tabs, 1)
+        self._cover_page = CoverPage(self._vm)
+        self._audio_fun_page = AudioFunPage(self._vm)
+        self._bgm_page = BgmPage(self._vm)
+        self._profile_page = PlaceholderPage(
+            "个人中心", "卡密兑换、版本更新、关于软件。",
+        )
+        for page in (
+            self._home_page,
+            self._slice_page,
+            self._enhance_page,
+            self._watermark_page,
+            self._hot_comments_page,
+            self._download_page,
+            self._pipeline_page,
+            self._cover_page,
+            self._audio_fun_page,
+            self._bgm_page,
+            self._profile_page,
+        ):
+            self._stack.addWidget(page)
+        main_layout.addWidget(self._stack, 1)
+
+        self._nav_group = QActionGroup(self)
+        self._nav_group.setExclusive(True)
+        self._nav_actions: dict[int, QAction] = {}
+        self._build_menus()
+        self._goto_page(TAB_HOME)
 
         self._vm.downloadFinished.connect(self._on_download_to_home)
         self._download_page.previewPlayRequested.connect(self._on_preview_play)
@@ -854,11 +833,76 @@ class MainWindow(QMainWindow):
                 return True
         return super().eventFilter(obj, event)
 
+    def _build_menus(self):
+        """菜单栏导航：文件 / 核心 / 工作流 / 趣味 / 帮助。"""
+        bar = self.menuBar()
+        bar.setNativeMenuBar(False)
+
+        file_menu = bar.addMenu("文件(&F)")
+        act_open = QAction("打开媒体到首页…", self)
+        act_open.setShortcut(QKeySequence.Open)
+        act_open.triggered.connect(self._on_menu_open_media)
+        file_menu.addAction(act_open)
+        file_menu.addSeparator()
+        act_quit = QAction("退出", self)
+        act_quit.setShortcut(QKeySequence("Ctrl+Q"))
+        act_quit.triggered.connect(self.close)
+        file_menu.addAction(act_quit)
+
+        help_menu = None
+        for menu_title, items in MENU_GROUPS:
+            menu = bar.addMenu(menu_title)
+            if menu_title == "帮助":
+                help_menu = menu
+            for label, page_index in items:
+                act = QAction(label, self)
+                act.setCheckable(True)
+                act.setData(page_index)
+                act.triggered.connect(
+                    lambda _checked=False, idx=page_index: self._goto_page(idx)
+                )
+                self._nav_group.addAction(act)
+                self._nav_actions[page_index] = act
+                menu.addAction(act)
+
+        if help_menu is not None:
+            help_menu.addSeparator()
+            act_about = QAction("关于 MusicEditing", self)
+            act_about.triggered.connect(self._on_about)
+            help_menu.addAction(act_about)
+
+    def _goto_page(self, index: int):
+        """切换功能页（菜单 / 接力 / 下载完成共用）。"""
+        if index < 0 or index >= self._stack.count():
+            return
+        self._stack.setCurrentIndex(index)
+        title = PAGE_TITLES.get(index, f"页面 {index}")
+        self._page_label.setText(title)
+        act = self._nav_actions.get(index)
+        if act is not None and not act.isChecked():
+            act.setChecked(True)
+        self.setWindowTitle(f"MusicEditing · {title}")
+
+    @Slot()
+    def _on_menu_open_media(self):
+        self._goto_page(TAB_HOME)
+        self._home_page.prompt_open_media()
+
+    @Slot()
+    def _on_about(self):
+        QMessageBox.about(
+            self,
+            "关于 MusicEditing",
+            f"MusicEditing {self._vm.version}\n"
+            "本地音视频打开 · 预览 · 切片 · 增强 · 去水印\n\n"
+            "功能入口在顶部菜单：核心 / 工作流 / 趣味 / 帮助。",
+        )
+
     def _on_weather_clicked(self):
         mood = self._weather_mood
         if mood is None:
             return
-        self._tabs.setCurrentIndex(0)
+        self._goto_page(TAB_HOME)
         ok = self._home_page.apply_opencv_filter(mood.filter_mode)
         if ok:
             self._status_label.setText(
@@ -869,27 +913,28 @@ class MainWindow(QMainWindow):
                 f"今日氛围 · 无法应用「{mood.label}」滤镜（播放器未就绪或模式不可用）"
             )
 
-    def _switch_tab(self, index: int):
-        self._tabs.setCurrentIndex(index)
-
     def open_with_video(self, path: str, tab_index: int) -> None:
-        """切 Tab + 异步 import_video（probe 在后台，不卡主线程）。"""
+        """切功能页 + 异步 import_video（probe 在后台，不卡主线程）。"""
         if not path or not os.path.isfile(path):
             QMessageBox.warning(self, "提示", f"文件不存在：\n{path}")
             return
         # 先切页，再后台探测；videoLoaded 到达后各页刷新
-        self._tabs.setCurrentIndex(tab_index)
+        self._goto_page(tab_index)
         if tab_index == TAB_ENHANCE:
             self._enhance_page.focus_video_tab()
         elif tab_index == TAB_WATERMARK:
             self._watermark_page.focus_video_tab()
+        elif tab_index == TAB_COVER:
+            self._cover_page.set_video(path)
+        elif tab_index == TAB_AUDIO_FUN:
+            self._audio_fun_page.set_media(path)
         self._vm.import_video(path)
 
     @Slot(str)
     def _on_download_to_home(self, path: str):
         """下载/预览完成后切到首页（文件由 HomePage.downloadFinished 加载）。"""
         if path and os.path.isfile(path):
-            self._tabs.setCurrentIndex(0)
+            self._goto_page(TAB_HOME)
 
     @Slot(str)
     def _on_preview_play(self, path: str):
@@ -897,7 +942,7 @@ class MainWindow(QMainWindow):
         if not path or not os.path.isfile(path):
             return
         self._home_page._player.open_file(path, auto_play=True)
-        self._tabs.setCurrentIndex(0)
+        self._goto_page(TAB_HOME)
 
     def shutdown(self):
         """退出前释放播放器与子进程"""
