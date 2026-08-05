@@ -7,11 +7,14 @@ import subprocess
 import sys
 import tempfile
 import glob
+import logging
 import shutil
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
+
+_log = logging.getLogger("MusicEditing")
 
 
 def _find_cli() -> Path:
@@ -52,6 +55,103 @@ def _find_ffmpeg() -> Path:
     raise FileNotFoundError("未找到 ffmpeg.exe")
 
 
+def _find_ffprobe(ffmpeg: Optional[Path] = None) -> Path:
+    ff = ffmpeg or _find_ffmpeg()
+    cand = ff.parent / ("ffprobe.exe" if sys.platform == "win32" else "ffprobe")
+    if cand.exists():
+        return cand
+    found = shutil.which("ffprobe") or shutil.which("ffprobe.exe")
+    if found:
+        return Path(found)
+    raise FileNotFoundError("未找到 ffprobe")
+
+
+def _file_has_audio_stream(path: str) -> bool:
+    """用 ffprobe 判断文件是否含音轨。"""
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        probe = _find_ffprobe()
+        proc = subprocess.run(
+            [
+                str(probe), "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=codec_type",
+                "-of", "csv=p=0",
+                path,
+            ],
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            timeout=30,
+        )
+        out = (proc.stdout or "").strip().lower()
+        return "audio" in out
+    except Exception:
+        ext = os.path.splitext(path)[1].lower()
+        return ext in {".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".opus"}
+
+
+def _file_has_video_stream(path: str) -> bool:
+    """用 ffprobe 判断文件是否含视频流。"""
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        probe = _find_ffprobe()
+        proc = subprocess.run(
+            [
+                str(probe), "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_type",
+                "-of", "csv=p=0",
+                path,
+            ],
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            timeout=30,
+        )
+        out = (proc.stdout or "").strip().lower()
+        return "video" in out
+    except Exception:
+        ext = os.path.splitext(path)[1].lower()
+        return ext in {".mp4", ".mkv", ".webm", ".mov", ".avi"}
+
+
+def _yt_dlp_retry_args() -> List[str]:
+    """缓解 bilivideo SSL EOF / 断流。"""
+    return [
+        "--retries", "12",
+        "--fragment-retries", "12",
+        "--socket-timeout", "30",
+        "--retry-sleep", "linear=1::2",
+    ]
+
+
+def _ffmpeg_mux_av(video_path: str, audio_path: str, out_path: str) -> str:
+    """画面+音轨 copy 合并为 MP4。"""
+    ffmpeg = _find_ffmpeg()
+    proc = subprocess.run(
+        [
+            str(ffmpeg), "-y",
+            "-i", video_path,
+            "-i", audio_path,
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c", "copy",
+            "-shortest",
+            out_path,
+        ],
+        capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+        timeout=300,
+    )
+    if proc.returncode != 0 or not os.path.isfile(out_path):
+        err = (proc.stderr or proc.stdout or "")[-500:]
+        raise RuntimeError(f"ffmpeg 音画合并失败：{err}")
+    if not _file_has_audio_stream(out_path):
+        raise RuntimeError("ffmpeg 合并后仍无音轨")
+    return out_path
+
+
 def _find_yt_dlp() -> Path:
     """查找 yt-dlp（优先 third_party，便于打包）。"""
     root = Path(__file__).resolve().parent.parent.parent.parent
@@ -71,6 +171,119 @@ def _find_yt_dlp() -> Path:
         "未找到 yt-dlp.exe。请运行 scripts\\download_yt_dlp.bat "
         "下载到 third_party\\yt-dlp\\"
     )
+
+
+def normalize_webpage_url(url: str) -> str:
+    """规范化分享页链接，便于 yt-dlp 识别（如抖音精选 modal_id、B 站 BV）。"""
+    import re
+    from urllib.parse import urlparse, urlunparse
+
+    u = (url or "").strip()
+    if not u:
+        return u
+    low = u.lower()
+    if "douyin.com" in low or "iesdouyin.com" in low:
+        m = re.search(r"[?&]modal_id=(\d+)", u, re.I)
+        if m:
+            return f"https://www.douyin.com/video/{m.group(1)}"
+        m = re.search(r"douyin\.com/(?:share/)?video/(\d+)", u, re.I)
+        if m:
+            return f"https://www.douyin.com/video/{m.group(1)}"
+        m = re.search(r"iesdouyin\.com/share/video/(\d+)", u, re.I)
+        if m:
+            return f"https://www.douyin.com/video/{m.group(1)}"
+    if "bilibili.com" in low or "b23.tv" in low:
+        m = re.search(r"(BV[\w]+)", u, re.I)
+        if m:
+            return f"https://www.bilibili.com/video/{m.group(1)}"
+        m = re.search(r"[?&]aid=(\d+)", u, re.I)
+        if m:
+            return f"https://www.bilibili.com/video/av{m.group(1)}"
+        # 去掉追踪参数
+        try:
+            p = urlparse(u)
+            return urlunparse((p.scheme, p.netloc, p.path, "", "", ""))
+        except Exception:
+            pass
+    return u
+
+
+def _is_cookie_browser_read_error(err: str) -> bool:
+    low = (err or "").lower()
+    return (
+        "failed to decrypt with dpapi" in low
+        or "could not copy chrome cookie database" in low
+        or "could not copy cookie database" in low
+        or "could not find" in low and "cookies" in low
+        or "unsupported browser" in low
+    )
+
+
+def _needs_fresh_cookies(err: str) -> bool:
+    low = (err or "").lower()
+    return "fresh cookies" in low or (
+        "cookies are needed" in low or "cookie" in low and "needed" in low
+    )
+
+
+def _friendly_yt_dlp_error(url: str, err: str) -> str:
+    text = (err or "").strip()
+    low = text.lower()
+    is_douyin = "douyin" in (url or "").lower() or "douyin" in low
+    if "unsupported url" in low and is_douyin:
+        return (
+            "抖音链接格式不被支持。精选页请带 modal_id，"
+            "或改用 https://www.douyin.com/video/<作品ID>。\n"
+            f"原始错误：{text[-400:]}"
+        )
+    if "does not look like a netscape format cookies file" in low:
+        return (
+            "所选文件不是 Netscape cookies.txt（常见误选：app.conf）。\n"
+            "请在「热评与下载」点「清除」，再用浏览器扩展导出 cookies.txt 后重新「Cookie…」选择。\n"
+            f"原始错误：{text[-400:]}"
+        )
+    if is_douyin and (
+        "failed to decrypt with dpapi" in low
+        or _needs_fresh_cookies(text)
+        or ("could not copy" in low and "cookie" in low)
+    ):
+        tip_url = ""
+        if url and "/video/" in url:
+            tip_url = f"链接已识别为：{url}\n"
+        return (
+            f"{tip_url}"
+            "抖音获取失败：需要可用的浏览器 Cookie（链接本身通常没问题）。\n"
+            "请任选其一：\n"
+            "1) 在「热评与下载」页点「Cookie…」选择导出的 Netscape cookies.txt；\n"
+            "2) 完全退出 Chrome/Edge 后重试（新版 Chrome 常仍失败）；\n"
+            "3) 手动在 app.conf 填 yt_dlp_cookies_file=绝对路径。\n"
+            f"原始错误：{text[-400:]}"
+        )
+    if "failed to decrypt with dpapi" in low:
+        return (
+            "无法解密浏览器 Cookie（Windows DPAPI）。"
+            "请在「热评与下载」页用「Cookie…」选择导出的 cookies.txt；"
+            "或完全退出 Chrome/Edge 后重试。\n"
+            f"原始错误：{text[-400:]}"
+        )
+    if "could not copy chrome cookie database" in low or (
+        "could not copy" in low and "cookie" in low
+    ):
+        return (
+            "无法复制浏览器 Cookie 数据库（浏览器正在占用）。"
+            "请完全退出 Chrome/Edge 后重试，"
+            "或配置 yt_dlp_cookies_file=cookies.txt。\n"
+            f"原始错误：{text[-400:]}"
+        )
+    if _needs_fresh_cookies(text) or (
+        "cookie" in low and is_douyin
+    ):
+        return (
+            "站点需要可用 Cookie（未必登录）。"
+            "请关闭浏览器后重试，或设置 yt_dlp_cookies_file。\n"
+            f"原始错误：{text[-400:]}"
+        )
+    return text[-800:] if text else "链接探测/下载失败"
 
 
 def _find_exiftool() -> Path:
@@ -240,9 +453,75 @@ class MediaBridge:
         self.set_prefer_hw_decode(True)
         self.set_watermark_backend("lama")
         self.set_upscale_backend("realesrgan")
+        self._yt_cookies_from_browser = ""
+        self._yt_cookies_file = ""
+        # url -> (monotonic_ts, UrlMediaInfo)；短时缓存减少重复 yt-dlp -J
+        self._probe_cache: dict[str, tuple[float, "UrlMediaInfo"]] = {}
+        self._probe_cache_ttl_sec = 120.0
 
         ver = self._run(["version"]).strip()
         self._ffmpeg_version = ver or "unknown"
+
+    def set_yt_dlp_cookies_from_browser(self, browser: str) -> None:
+        """yt-dlp --cookies-from-browser（可逗号分隔多个，如 chrome,edge）。"""
+        self._yt_cookies_from_browser = (browser or "").strip()
+
+    def set_yt_dlp_cookies_file(self, path: str) -> None:
+        """yt-dlp --cookies <Netscape cookies.txt>；优先于 from-browser。"""
+        self._yt_cookies_file = (path or "").strip()
+
+    def _yt_cookies_file_args(self) -> List[str]:
+        f = (self._yt_cookies_file or "").strip()
+        if not f or not os.path.isfile(f):
+            return []
+        # 误把 app.conf 等当成 Cookie 时直接忽略，避免 yt-dlp 报奇怪错
+        try:
+            from core.app_logic import looks_like_netscape_cookies
+            ok, _ = looks_like_netscape_cookies(f)
+            if not ok:
+                _log.warning("忽略无效 Cookie 文件 path=%s", f)
+                return []
+        except Exception:
+            pass
+        return ["--cookies", f]
+
+    def _yt_browser_candidates(self) -> List[str]:
+        """解析配置中的浏览器列表，并在失败时补充 edge/chrome/firefox。"""
+        import re
+        raw = (self._yt_cookies_from_browser or "").strip()
+        if not raw:
+            return []
+        primary = [p.strip() for p in re.split(r"[,;|+]", raw) if p.strip()]
+        extras = ["edge", "chrome", "firefox"]
+        out: List[str] = []
+        seen = set()
+        for b in primary + extras:
+            key = b.split(":", 1)[0].strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(b)
+        return out
+
+    def _yt_cookie_args(
+        self,
+        *,
+        use_browser: bool = True,
+        browser: Optional[str] = None,
+    ) -> List[str]:
+        """cookies 文件优先；否则 --cookies-from-browser <browser>。"""
+        file_args = self._yt_cookies_file_args()
+        if file_args:
+            return file_args
+        if not use_browser:
+            return []
+        b = (browser or "").strip()
+        if not b:
+            cands = self._yt_browser_candidates()
+            b = cands[0] if cands else ""
+        if b:
+            return ["--cookies-from-browser", b]
+        return []
 
     def set_prefer_cuda(self, enabled: bool) -> None:
         """LaMa ONNX CUDA EP 开关（默认关闭，项目不再捆绑 cuda_runtime）。"""
@@ -1138,33 +1417,115 @@ class MediaBridge:
         """用 yt-dlp -J 探测网页媒体元数据（不下载）。
 
         list_entries=True 时允许播放列表，并用 --flat-playlist 拉条目名称列表。
+        Cookie：优先 cookies 文件；from-browser 若失败则依次尝试其它浏览器，最后无 Cookie。
         """
-        url = (url or "").strip()
+        url = normalize_webpage_url((url or "").strip())
         if not url:
             raise ValueError("请输入链接")
-        yt = _find_yt_dlp()
-        cmd = [
-            str(yt),
-            "-J",
-            "--no-warnings",
-            "--socket-timeout", "30",
-        ]
-        if list_entries:
-            cmd.append("--flat-playlist")
-        else:
-            cmd.append("--no-playlist")
-        cmd.append(url)
-        result = subprocess.run(
-            cmd, capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            env=self._env, timeout=timeout,
+        import time as _time
+        cache_key = (
+            f"{url}|e={int(bool(list_entries))}|"
+            f"cf={self._yt_cookies_file}|cb={self._yt_cookies_from_browser}"
         )
-        if result.returncode != 0:
-            err = (result.stderr or result.stdout or "").strip()
-            raise RuntimeError(err[-800:] if err else "链接探测失败")
+        hit = self._probe_cache.get(cache_key)
+        if hit and (_time.monotonic() - hit[0]) < self._probe_cache_ttl_sec:
+            return hit[1]
+
+        def _remember(info: UrlMediaInfo) -> UrlMediaInfo:
+            self._probe_cache[cache_key] = (_time.monotonic(), info)
+            if len(self._probe_cache) > 64:
+                oldest = sorted(self._probe_cache.items(), key=lambda kv: kv[1][0])[:16]
+                for k, _ in oldest:
+                    self._probe_cache.pop(k, None)
+            return info
+
+        yt = _find_yt_dlp()
+
+        def _run_probe(*, browser: Optional[str] = None, use_browser: bool = True) -> subprocess.CompletedProcess:
+            cmd = [
+                str(yt),
+                "-J",
+                "--no-warnings",
+                "--socket-timeout", "30",
+            ]
+            cmd.extend(self._yt_cookie_args(use_browser=use_browser, browser=browser))
+            if list_entries:
+                cmd.append("--flat-playlist")
+            else:
+                cmd.append("--no-playlist")
+            cmd.append(url)
+            return subprocess.run(
+                cmd, capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+                env=self._env, timeout=timeout,
+            )
+
         import json
-        data = json.loads(result.stdout)
-        return self._parse_url_media_info(url, data)
+
+        # 1) cookies 文件优先，一次即可
+        if self._yt_cookies_file_args():
+            result = _run_probe(use_browser=False)
+            if result.returncode == 0:
+                return _remember(self._parse_url_media_info(url, json.loads(result.stdout)))
+            err = (result.stderr or result.stdout or "").strip()
+            _log.warning("yt-dlp probe 失败 url=%s err=%s", url, err[-1200:])
+            raise RuntimeError(_friendly_yt_dlp_error(url, err))
+
+        # 2) B 站：先无 Cookie（普通画质足够）；浏览器 Cookie 在 Win 上常 DPAPI 失败
+        low_url = (url or "").lower()
+        is_bili = "bilibili.com" in low_url or "b23.tv" in low_url
+        if is_bili:
+            result = _run_probe(use_browser=False)
+            if result.returncode == 0:
+                return _remember(self._parse_url_media_info(url, json.loads(result.stdout)))
+            _log.warning(
+                "B 站无 Cookie 探测失败，再试浏览器 Cookie url=%s err=%s",
+                url, ((result.stderr or result.stdout or "").strip())[-600:],
+            )
+
+        # 3) 依次尝试配置的浏览器（chrome → edge → firefox…）
+        errors: List[str] = []
+        browsers = self._yt_browser_candidates()
+        for b in browsers:
+            result = _run_probe(browser=b, use_browser=True)
+            if result.returncode == 0:
+                if b != (browsers[0] if browsers else ""):
+                    _log.info("Cookie 浏览器回退成功 browser=%s url=%s", b, url)
+                return _remember(self._parse_url_media_info(url, json.loads(result.stdout)))
+            err = (result.stderr or result.stdout or "").strip()
+            _log.warning(
+                "yt-dlp probe 失败 browser=%s url=%s err=%s",
+                b, url, err[-800:],
+            )
+            errors.append(f"[{b}] {err[-500:]}")
+            # 非 Cookie 类错误（如 Unsupported URL）不必再换浏览器
+            if not (
+                _is_cookie_browser_read_error(err)
+                or _needs_fresh_cookies(err)
+                or "douyin" in (url or "").lower()
+            ):
+                raise RuntimeError(_friendly_yt_dlp_error(url, err))
+
+        # 4) 无 Cookie 最后一试（非 B 站；B 站已在步骤 2 试过）
+        if browsers and not is_bili:
+            _log.info("Cookie 浏览器均失败，无 Cookie 回退再探测一次")
+            result = _run_probe(use_browser=False)
+            if result.returncode == 0:
+                return _remember(self._parse_url_media_info(url, json.loads(result.stdout)))
+            err = (result.stderr or result.stdout or "").strip()
+            _log.warning("无 Cookie 回退仍失败 url=%s err=%s", url, err[-1200:])
+            errors.append(f"[no-cookie] {err[-500:]}")
+            raise RuntimeError(_friendly_yt_dlp_error(url, err or "\n".join(errors)))
+
+        if is_bili and errors:
+            raise RuntimeError(_friendly_yt_dlp_error(url, "\n".join(errors)))
+
+        result = _run_probe(use_browser=False)
+        if result.returncode == 0:
+            return _remember(self._parse_url_media_info(url, json.loads(result.stdout)))
+        err = (result.stderr or result.stdout or "").strip()
+        _log.warning("yt-dlp probe 失败 url=%s err=%s", url, err[-1200:])
+        raise RuntimeError(_friendly_yt_dlp_error(url, err))
 
     @staticmethod
     def _parse_url_media_info(url: str, data: dict) -> UrlMediaInfo:
@@ -1245,6 +1606,8 @@ class MediaBridge:
                     has_video=has_video,
                     has_audio=has_audio,
                 ))
+            # B 站等 DASH：画面/音轨分列 → 前置「音画合并」项，下载时自动 +bestaudio
+            items = MediaBridge._prefer_av_merged_items(items, page_url)
 
         title = str(
             entry.get("title")
@@ -1280,6 +1643,9 @@ class MediaBridge:
                 f"疑似试听片段：元数据时长 {duration:.0f}s，"
                 f"文件仅约 {filesize // 1024}KB"
             )
+        if any((getattr(it, "name", "") or "").startswith("音画合并") for it in items):
+            if not preview_hint:
+                preview_hint = "已提供「音画合并」选项（画面+音轨）；下载时自动合并"
 
         return UrlMediaInfo(
             url=url,
@@ -1300,24 +1666,104 @@ class MediaBridge:
             items=items,
         )
 
+    @staticmethod
+    def _prefer_av_merged_items(
+        items: List[UrlListItem], page_url: str,
+    ) -> List[UrlListItem]:
+        """DASH 分轨时生成「音画合并」选项，并弱化仅画面列表。"""
+        if not items:
+            return items
+        entries = [it for it in items if getattr(it, "kind", "") == "entry"]
+        formats = [it for it in items if getattr(it, "kind", "") == "format"]
+        if not formats:
+            return items
+
+        video_only = [
+            it for it in formats
+            if getattr(it, "has_video", False) and not getattr(it, "has_audio", False)
+        ]
+        audio_only = [
+            it for it in formats
+            if getattr(it, "has_audio", False) and not getattr(it, "has_video", False)
+        ]
+        muxed = [
+            it for it in formats
+            if getattr(it, "has_video", False) and getattr(it, "has_audio", False)
+        ]
+        if not video_only or not audio_only:
+            return items
+
+        def _res_score(it: UrlListItem) -> int:
+            text = f"{getattr(it, 'detail', '')} {getattr(it, 'name', '')}"
+            import re
+            m = re.search(r"(4320|2160|1440|1080|720|480|360|240|144)p?", text, re.I)
+            if m:
+                return int(m.group(1))
+            m = re.search(r"(\d{3,4})\s*[x×]\s*(\d{3,4})", text)
+            if m:
+                return max(int(m.group(1)), int(m.group(2)))
+            return 0
+
+        merged: List[UrlListItem] = [
+            UrlListItem(
+                name="音画合并 · 最佳（自动选画质+音轨）",
+                detail="bv*+ba/b",
+                url=page_url,
+                kind="default",
+                format_id="",
+                page_url=page_url,
+                ext="mp4",
+                has_video=True,
+                has_audio=True,
+            )
+        ]
+        seen_scores = set()
+        for it in sorted(video_only, key=_res_score, reverse=True):
+            score = _res_score(it)
+            # 同分辨率只保留一条
+            key = score or getattr(it, "format_id", "")
+            if key in seen_scores:
+                continue
+            seen_scores.add(key)
+            label = getattr(it, "detail", "") or f"id={it.format_id}"
+            merged.append(UrlListItem(
+                name=f"音画合并 · {label}",
+                detail=f"{it.format_id}+bestaudio",
+                url=page_url,
+                kind="format",
+                format_id=getattr(it, "format_id", "") or "",
+                page_url=page_url,
+                ext="mp4",
+                has_video=True,
+                has_audio=True,
+            ))
+            if len(merged) >= 8:
+                break
+
+        # 附带少量仅音频，方便只要声音的场景；不再列出「仅画面」
+        audio_tail = audio_only[:4]
+        return entries + merged + muxed + audio_tail
+
     def download_url(
         self,
         url: str,
         output_dir: str,
         *,
         audio_only: bool = False,
+        format_id: str = "",
         on_progress: Optional[Callable[[float, str], None]] = None,
         timeout: int = 0,
     ) -> str:
         """
         从网页链接下载视频或音频。
         audio_only=True 时提取为 mp3（需 ffmpeg）。
+        format_id 非空时按指定格式（DASH 仅画面会尝试合并音轨）。
         返回最终文件路径。
         """
         import re
         import time as _time
 
-        url = (url or "").strip()
+        url = normalize_webpage_url((url or "").strip())
         if not url:
             raise ValueError("请输入链接")
         yt = _find_yt_dlp()
@@ -1326,74 +1772,292 @@ class MediaBridge:
 
         stamp = int(_time.time())
         out_tmpl = os.path.join(output_dir, f"dl_{stamp}_%(id)s.%(ext)s")
-        cmd = [
-            str(yt),
-            "--no-playlist",
-            "--newline",
-            "--no-warnings",
-            "--ffmpeg-location", str(ffmpeg.parent),
-            "-o", out_tmpl,
-        ]
-        if audio_only:
-            cmd.extend(["-x", "--audio-format", "mp3", "--audio-quality", "0"])
-        else:
-            cmd.extend([
-                "-f", "bv*+ba/b",
-                "--merge-output-format", "mp4",
-            ])
-        cmd.append(url)
 
         def report(p: float, msg: str):
             if on_progress:
                 on_progress(p, msg)
 
-        report(1.0, "开始下载…")
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=self._env,
-        )
-        pct_re = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
-        assert proc.stdout is not None
-        last_msg = ""
-        try:
-            for line in proc.stdout:
-                text = line.strip()
-                if not text:
-                    continue
-                last_msg = text
-                m = pct_re.search(text)
-                if m:
-                    pct = min(99.0, float(m.group(1)))
-                    report(pct, text[:120])
-                elif "[ExtractAudio]" in text or "[Merger]" in text:
-                    report(92.0, text[:120])
+        def _build_cmd(
+            *,
+            browser: Optional[str] = None,
+            use_browser: bool = True,
+            force_auto_av: bool = False,
+            format_override: str = "",
+            extra: Optional[list] = None,
+        ) -> list:
+            c = [
+                str(yt),
+                "--no-playlist",
+                "--newline",
+                "--no-warnings",
+                "--ffmpeg-location", str(ffmpeg.parent),
+                "-o", out_tmpl,
+            ]
+            c.extend(_yt_dlp_retry_args())
+            c.extend(self._yt_cookie_args(use_browser=use_browser, browser=browser))
+            fid = (format_id or "").strip()
+            fmt = (format_override or "").strip()
+            if fmt:
+                c.extend(["-f", fmt])
+                if extra:
+                    c.extend(extra)
+            elif audio_only and not force_auto_av:
+                if fid:
+                    c.extend(["-f", fid, "-x", "--audio-format", "mp3", "--audio-quality", "0"])
                 else:
-                    report(max(2.0, min(90.0, 40.0)), text[:120])
-        finally:
-            code = proc.wait(timeout=timeout if timeout > 0 else None)
+                    c.extend(["-x", "--audio-format", "mp3", "--audio-quality", "0"])
+            elif force_auto_av or not fid:
+                # 音画：禁止回退到仅画面；优先 AVC 再 AV1，降低合片/播放兼容问题
+                c.extend([
+                    "-f", "bv*[vcodec^=avc1]+ba/bv*+ba/b",
+                    "--merge-output-format", "mp4",
+                ])
+            else:
+                # 指定画质 id 时强制 +bestaudio；勿把 /{fid} 放进回退链（否则合并失败会只剩无声音画）
+                c.extend([
+                    "-f", f"{fid}+bestaudio/{fid}+ba/bv*+ba/b",
+                    "--merge-output-format", "mp4",
+                ])
+            c.append(url)
+            return c
+
+        def _run_download(
+            *,
+            browser: Optional[str] = None,
+            use_browser: bool = True,
+            force_auto_av: bool = False,
+            format_override: str = "",
+            extra: Optional[list] = None,
+        ) -> tuple[int, str]:
+            cmd = _build_cmd(
+                browser=browser,
+                use_browser=use_browser,
+                force_auto_av=force_auto_av,
+                format_override=format_override,
+                extra=extra,
+            )
+            report(1.0, "开始下载…")
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=self._env,
+            )
+            pct_re = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
+            assert proc.stdout is not None
+            last = ""
+            try:
+                for line in proc.stdout:
+                    text = line.strip()
+                    if not text:
+                        continue
+                    last = text
+                    m = pct_re.search(text)
+                    if m:
+                        pct = min(99.0, float(m.group(1)))
+                        report(pct, text[:120])
+                    elif "[ExtractAudio]" in text or "[Merger]" in text:
+                        report(92.0, text[:120])
+                    else:
+                        report(max(2.0, min(90.0, 40.0)), text[:120])
+            finally:
+                code = proc.wait(timeout=timeout if timeout > 0 else None)
+            return code, last
+
+        def _collect_files(prefix: str) -> list:
+            return [
+                os.path.join(output_dir, n)
+                for n in os.listdir(output_dir)
+                if n.startswith(prefix) and os.path.isfile(os.path.join(output_dir, n))
+            ]
+
+        def _is_bilibili() -> bool:
+            low = (url or "").lower()
+            return "bilibili.com" in low or "b23.tv" in low
+
+        def _try_separate_av_mux(video_hint: str = "") -> Optional[str]:
+            """音轨合片失败时：分轨下画面/音轨再 ffmpeg 合并（抗 SSL 中断）。"""
+            nonlocal out_tmpl
+            import time as _t
+            report(96.0, "分轨补下音轨并合并…")
+            video_src = video_hint if (
+                video_hint
+                and os.path.isfile(video_hint)
+                and _file_has_video_stream(video_hint)
+                and not _file_has_audio_stream(video_hint)
+            ) else ""
+
+            if not video_src:
+                stamp_v = int(_t.time())
+                out_tmpl = os.path.join(output_dir, f"dl_{stamp_v}_v.%(ext)s")
+                _code_v, msg_v = _run_download(
+                    use_browser=False,
+                    format_override="bv*[vcodec^=avc1]/bv*/bestvideo",
+                    extra=["--merge-output-format", "mp4"],
+                )
+                vids = _collect_files(f"dl_{stamp_v}_v")
+                if not vids:
+                    _log.warning("分轨画面下载失败: %s", (msg_v or "")[-400:])
+                    return None
+                vids.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+                video_src = vids[0]
+
+            stamp_a = int(_t.time())
+            out_tmpl = os.path.join(output_dir, f"dl_{stamp_a}_a.%(ext)s")
+            _code_a, msg_a = _run_download(
+                use_browser=False,
+                format_override="ba/bestaudio",
+            )
+            auds = _collect_files(f"dl_{stamp_a}_a")
+            if not auds:
+                _log.warning("分轨音轨下载失败: %s", (msg_a or "")[-400:])
+                return None
+            auds.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+            audio_src = auds[0]
+
+            merged = os.path.join(
+                output_dir, f"dl_{int(_t.time())}_merged.mp4",
+            )
+            try:
+                _ffmpeg_mux_av(video_src, audio_src, merged)
+            except Exception as e:
+                _log.warning("分轨 ffmpeg 合并失败: %s", e)
+                return None
+            try:
+                if os.path.isfile(audio_src):
+                    os.remove(audio_src)
+            except OSError:
+                pass
+            if video_src != video_hint:
+                try:
+                    if os.path.isfile(video_src):
+                        os.remove(video_src)
+                except OSError:
+                    pass
+            return merged
+
+        files: list = []
+        last_msg = ""
+        code = 1
+        # B 站：无 cookies 文件时先无 Cookie 拉（普通画质音画通常可用）；
+        # Windows 上 chrome/edge cookies-from-browser 常 DPAPI/锁库，白耗时间。
+        prefer_nocookie_first = _is_bilibili() and not self._yt_cookies_file_args()
+        if self._yt_cookies_file_args():
+            code, last_msg = _run_download(use_browser=False)
+            files = _collect_files(f"dl_{stamp}_")
+        elif prefer_nocookie_first:
+            code, last_msg = _run_download(use_browser=False)
+            files = _collect_files(f"dl_{stamp}_")
+            if not files:
+                browsers = self._yt_browser_candidates()
+                for b in browsers:
+                    stamp = int(_time.time())
+                    out_tmpl = os.path.join(output_dir, f"dl_{stamp}_%(id)s.%(ext)s")
+                    code, last_msg = _run_download(browser=b, use_browser=True)
+                    files = _collect_files(f"dl_{stamp}_")
+                    if files:
+                        _log.info("B 站无 Cookie 失败后，浏览器 Cookie 成功 browser=%s", b)
+                        break
+                    if not (
+                        _is_cookie_browser_read_error(last_msg)
+                        or _needs_fresh_cookies(last_msg)
+                    ):
+                        break
+                    _log.warning(
+                        "下载 Cookie 失败 browser=%s，尝试下一个: %s",
+                        b, last_msg[-400:],
+                    )
+        else:
+            browsers = self._yt_browser_candidates()
+            for b in (browsers or [None]):
+                code, last_msg = _run_download(
+                    browser=b, use_browser=bool(b),
+                )
+                files = _collect_files(f"dl_{stamp}_")
+                if files:
+                    if b and browsers and b != browsers[0]:
+                        _log.info("下载 Cookie 浏览器回退成功 browser=%s", b)
+                    break
+                if not b:
+                    break
+                if not (
+                    _is_cookie_browser_read_error(last_msg)
+                    or _needs_fresh_cookies(last_msg)
+                    or "douyin" in (url or "").lower()
+                ):
+                    break
+                _log.warning(
+                    "下载 Cookie 失败 browser=%s，尝试下一个: %s",
+                    b, last_msg[-400:],
+                )
+                stamp = int(_time.time())
+                out_tmpl = os.path.join(output_dir, f"dl_{stamp}_%(id)s.%(ext)s")
+
+            if not files and browsers:
+                _log.warning("下载 Cookie 浏览器均失败，无 Cookie 回退: %s", last_msg[-600:])
+                stamp = int(_time.time())
+                out_tmpl = os.path.join(output_dir, f"dl_{stamp}_%(id)s.%(ext)s")
+                code, last_msg = _run_download(use_browser=False)
+                files = _collect_files(f"dl_{stamp}_")
 
         prefix = f"dl_{stamp}_"
-        files = [
-            os.path.join(output_dir, n)
-            for n in os.listdir(output_dir)
-            if n.startswith(prefix) and os.path.isfile(os.path.join(output_dir, n))
-        ]
         if not files:
-            hint = last_msg[-400:] if last_msg else f"exit {code}"
+            files = _collect_files(prefix)
+            hint = _friendly_yt_dlp_error(url, last_msg)
+            _log.warning("yt-dlp 下载失败 url=%s err=%s", url, (last_msg or "")[-1200:])
             raise RuntimeError(f"下载失败或未找到输出文件：{hint}")
         files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
         final = files[0]
         if code != 0 and not os.path.isfile(final):
-            raise RuntimeError(f"下载失败（exit {code}）")
+            _log.warning("yt-dlp 下载 exit=%s url=%s err=%s", code, url, (last_msg or "")[-1200:])
+            raise RuntimeError(
+                f"下载失败（exit {code}）：{_friendly_yt_dlp_error(url, last_msg)}"
+            )
+
+        # 音画下载却无音轨：自动合片重试 → 分轨下载再 ffmpeg 合并
+        if (
+            not audio_only
+            and os.path.isfile(final)
+            and not _file_has_audio_stream(final)
+        ):
+            _log.warning(
+                "下载结果无音轨，重试音画合并 format=bv*+ba/b path=%s",
+                final,
+            )
+            video_keep = final if _file_has_video_stream(final) else ""
+            last2 = last_msg
+            stamp = int(_time.time())
+            out_tmpl = os.path.join(output_dir, f"dl_{stamp}_%(id)s.%(ext)s")
+            report(95.0, "检测到无音轨，正在重新合并音画…")
+            code2, last2 = _run_download(use_browser=False, force_auto_av=True)
+            files2 = _collect_files(f"dl_{stamp}_")
+            if files2:
+                files2.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+                cand = files2[0]
+                if _file_has_audio_stream(cand):
+                    final = cand
+                    video_keep = ""
+                else:
+                    video_keep = cand if _file_has_video_stream(cand) else video_keep
+
+            if not _file_has_audio_stream(final):
+                muxed = _try_separate_av_mux(video_keep or final)
+                if muxed:
+                    final = muxed
+
+            if not _file_has_audio_stream(final):
+                detail = (last2 or last_msg or "").strip()
+                raise RuntimeError(
+                    "音画合并失败：成片仍无音轨（常见于音轨 SSL 中断）。\n"
+                    "可稍后重试；若要大会员高画质，请配置 yt_dlp_cookies_file。\n"
+                    f"原始信息：{detail[-400:]}"
+                )
 
         report(100.0, f"完成: {os.path.basename(final)}")
         return final
-
     def fetch_for_preview(
         self,
         item_kind: str,
@@ -1464,19 +2128,20 @@ class MediaBridge:
                 "--ffmpeg-location", str(ffmpeg.parent),
                 "-o", out_tmpl,
             ]
+            cmd.extend(self._yt_cookie_args())
             if video_only:
-                # DASH 仅画面 → 合并最佳音轨
+                # DASH 仅画面 → 合并最佳音轨；禁止回退到仅 {format_id}
                 report(8.0, "合并音轨中（DASH 仅画面）…")
                 cmd.extend([
-                    "-f", f"{format_id}+bestaudio/{format_id}",
+                    "-f", f"{format_id}+bestaudio/{format_id}+ba/bv*+ba/b",
                     "--merge-output-format", "mp4",
                 ])
             elif audio_only:
                 cmd.extend(["-f", format_id])
             else:
-                # 未知是否分离：优先尝试带音频的组合
+                # 未知是否分离：优先带音频；勿回退仅画面
                 cmd.extend([
-                    "-f", f"{format_id}+bestaudio/{format_id}/bestaudio/best",
+                    "-f", f"{format_id}+bestaudio/{format_id}+ba/bv*+ba/b",
                     "--merge-output-format", "mp4",
                 ])
             cmd.append(target)
@@ -1491,8 +2156,15 @@ class MediaBridge:
             if not files:
                 raise RuntimeError(proc.stderr[-400:] if proc.stderr else "预览拉取失败")
             files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+            final = files[0]
+            if not audio_only and not _file_has_audio_stream(final):
+                # 与 download_url 一致：无音轨则走自动音画合并
+                report(90.0, "预览无音轨，改用音画合并…")
+                return self.download_url(
+                    target, tmp_dir, audio_only=False, on_progress=on_progress,
+                )
             report(100.0, "就绪")
-            return files[0]
+            return final
 
         # 3) 歌单条目：默认下音画合并（B 站等），失败再试仅音频
         report(8.0, "正在拉取音画合并预览…")

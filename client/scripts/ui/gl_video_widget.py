@@ -67,6 +67,7 @@ class GlVideoWidget(QOpenGLWidget):
         self._tex_w = 0
         self._tex_h = 0
         self._pending_image: QImage | None = None
+        self._pending_keep: bytes | None = None
         self._paused_overlay = False
         self._subtitle_text = ""
 
@@ -99,6 +100,7 @@ class GlVideoWidget(QOpenGLWidget):
     def clear_frame(self) -> None:
         self._has_frame = False
         self._pending_image = None
+        self._pending_keep = None
         self.update()
 
     def set_rgb_frame(self, rgb: bytes | bytearray, width: int, height: int) -> None:
@@ -107,17 +109,21 @@ class GlVideoWidget(QOpenGLWidget):
         need = width * height * 3
         if len(rgb) < need:
             return
-        img = QImage(bytes(rgb[:need]), width, height, width * 3, QImage.Format_RGB888)
-        # OpenGL 纹理原点在左下，QImage 在左上
-        self._pending_image = img.copy().mirrored(False, True)
+        # 单次拷贝保留缓冲；垂直翻转改由 UV（避免 mirrored+copy）
+        keep = bytes(rgb[:need]) if not isinstance(rgb, (bytes, bytearray)) else bytes(rgb[:need])
+        img = QImage(keep, width, height, width * 3, QImage.Format_RGB888)
+        self._pending_keep = keep
+        self._pending_image = img
         self._has_frame = True
         self.update()
 
     def set_qimage(self, image: QImage) -> None:
         if image.isNull():
             return
+        # 与视频帧一致：不做 mirrored，由绘制 UV 翻转
         img = image.convertToFormat(QImage.Format_RGB888)
-        self._pending_image = img.copy().mirrored(False, True)
+        self._pending_keep = None
+        self._pending_image = img.copy() if img.isNull() is False else img
         self._has_frame = True
         self.update()
 
@@ -181,6 +187,7 @@ class GlVideoWidget(QOpenGLWidget):
         if self._pending_image is not None:
             self._upload_texture(self._pending_image)
             self._pending_image = None
+            self._pending_keep = None
 
         drew_frame = bool(
             self._gl_ready and self._has_frame and self._texture and self._program
@@ -289,11 +296,12 @@ class GlVideoWidget(QOpenGLWidget):
             sx = 1.0
             sy = widget_aspect / tex_aspect
 
+        # QImage 顶→底；OpenGL 纹理底→顶：用 V 翻转 UV，避免每帧 mirrored
         verts = [
-            -sx, -sy, 0.0, 0.0,
-             sx, -sy, 1.0, 0.0,
-            -sx,  sy, 0.0, 1.0,
-             sx,  sy, 1.0, 1.0,
+            -sx, -sy, 0.0, 1.0,
+             sx, -sy, 1.0, 1.0,
+            -sx,  sy, 0.0, 0.0,
+             sx,  sy, 1.0, 0.0,
         ]
         raw = array.array("f", verts).tobytes()
         self._vao.bind()

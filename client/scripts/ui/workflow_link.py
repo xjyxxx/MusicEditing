@@ -14,21 +14,20 @@ TAB_HOME = 0
 TAB_SLICE = 1
 TAB_ENHANCE = 2
 TAB_WATERMARK = 3
-TAB_HOT_COMMENTS = 4
-TAB_DOWNLOAD = 5
-TAB_PIPELINE = 6
-TAB_COVER = 7
-TAB_AUDIO_FUN = 8
-TAB_BGM = 9
-TAB_PROFILE = 10
+TAB_DOWNLOAD = 4
+TAB_HOT_COMMENTS = 4  # 与下载同页（内嵌「热评弹幕」子 Tab）
+TAB_PIPELINE = 5
+TAB_COVER = 6
+TAB_AUDIO_FUN = 7
+TAB_BGM = 8
+TAB_PROFILE = 9
 
 PAGE_TITLES: dict[int, str] = {
     TAB_HOME: "首页",
     TAB_SLICE: "智能切片",
     TAB_ENHANCE: "画质增强",
     TAB_WATERMARK: "去水印",
-    TAB_HOT_COMMENTS: "热评滚动",
-    TAB_DOWNLOAD: "链接下载",
+    TAB_DOWNLOAD: "下载与热评",
     TAB_PIPELINE: "全流程队列",
     TAB_COVER: "封面工厂",
     TAB_AUDIO_FUN: "音频趣味",
@@ -37,6 +36,7 @@ PAGE_TITLES: dict[int, str] = {
 }
 
 # 菜单：(菜单标题, [(动作文案, page_index), ...])
+# 趣味「热评弹幕」与工作流「下载与热评」同页；MainWindow 对前者会 focus_hot_tab。
 MENU_GROUPS: Sequence[Tuple[str, Sequence[Tuple[str, int]]]] = (
     (
         "核心",
@@ -51,14 +51,14 @@ MENU_GROUPS: Sequence[Tuple[str, Sequence[Tuple[str, int]]]] = (
         "工作流",
         (
             ("全流程队列", TAB_PIPELINE),
-            ("链接下载", TAB_DOWNLOAD),
+            ("下载与热评", TAB_DOWNLOAD),
             ("BGM 混音", TAB_BGM),
         ),
     ),
     (
         "趣味",
         (
-            ("热评滚动", TAB_HOT_COMMENTS),
+            ("热评弹幕", TAB_HOT_COMMENTS),
             ("封面工厂", TAB_COVER),
             ("音频趣味", TAB_AUDIO_FUN),
         ),

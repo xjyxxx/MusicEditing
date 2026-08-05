@@ -24,17 +24,46 @@ std::string toLower(std::string s) {
 }
 
 #ifdef MUSIC_HAS_OPENCV
-/// RGB 3x3 颜色矩阵（行主序：out = M * in），值域仍在 0–255
-void applyColorMatrix(cv::Mat& frame, const float m[9], float addR = 0.f, float addG = 0.f, float addB = 0.f) {
+/// RGB 3x3 颜色矩阵 + 偏置 + 软对比（一次 transform + convertTo，避免 split/merge）
+void applyColorMatrix(
+    cv::Mat& frame,
+    const float m[9],
+    float addR = 0.f,
+    float addG = 0.f,
+    float addB = 0.f,
+    float contrast = 1.f,
+    float lift = 0.f)
+{
+    const cv::Matx33f M(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]);
     cv::Mat f32;
     frame.convertTo(f32, CV_32FC3);
-    std::vector<cv::Mat> ch;
-    cv::split(f32, ch);
-    cv::Mat r = ch[0] * m[0] + ch[1] * m[1] + ch[2] * m[2] + addR;
-    cv::Mat g = ch[0] * m[3] + ch[1] * m[4] + ch[2] * m[5] + addG;
-    cv::Mat b = ch[0] * m[6] + ch[1] * m[7] + ch[2] * m[8] + addB;
-    cv::merge(std::vector<cv::Mat>{r, g, b}, f32);
-    f32.convertTo(frame, CV_8UC3);
+    cv::transform(f32, f32, M);
+    if (addR != 0.f || addG != 0.f || addB != 0.f) {
+        f32 += cv::Scalar(addR, addG, addB);
+    }
+    // out = (x - 128) * contrast + 128 + lift  ≡  x * contrast + 128*(1-contrast) + lift
+    f32.convertTo(frame, CV_8UC3, contrast, 128.f * (1.f - contrast) + lift);
+}
+
+/// UMat 版（OpenCL 设备上跑 transform）
+bool applyColorMatrixU(
+    cv::UMat& frame,
+    const float m[9],
+    float addR,
+    float addG,
+    float addB,
+    float contrast,
+    float lift)
+{
+    const cv::Matx33f M(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]);
+    cv::UMat f32;
+    frame.convertTo(f32, CV_32FC3);
+    cv::transform(f32, f32, M);
+    if (addR != 0.f || addG != 0.f || addB != 0.f) {
+        cv::add(f32, cv::Scalar(addR, addG, addB), f32);
+    }
+    f32.convertTo(frame, CV_8UC3, contrast, 128.f * (1.f - contrast) + lift);
+    return true;
 }
 
 void applySoftContrast(cv::Mat& frame, float contrast, float lift) {
@@ -312,8 +341,7 @@ bool FrameProcessor::processCpu(uint8_t* rgb, int width, int height, int step) {
             0.04f, 1.04f, 0.00f,
             0.00f, 0.02f, 0.88f,
         };
-        applyColorMatrix(frame, m, 6.f, 2.f, -4.f);
-        applySoftContrast(frame, 1.06f, 2.f);
+        applyColorMatrix(frame, m, 6.f, 2.f, -4.f, 1.06f, 2.f);
         break;
     }
     case FrameFilterMode::Cool: {
@@ -323,8 +351,7 @@ bool FrameProcessor::processCpu(uint8_t* rgb, int width, int height, int step) {
             0.02f, 1.02f, 0.06f,
             0.04f, 0.08f, 1.14f,
         };
-        applyColorMatrix(frame, m, -4.f, 0.f, 8.f);
-        applySoftContrast(frame, 1.04f, -2.f);
+        applyColorMatrix(frame, m, -4.f, 0.f, 8.f, 1.04f, -2.f);
         break;
     }
     case FrameFilterMode::Vintage: {
@@ -334,8 +361,7 @@ bool FrameProcessor::processCpu(uint8_t* rgb, int width, int height, int step) {
             0.35f, 0.55f, 0.18f,
             0.20f, 0.35f, 0.22f,
         };
-        applyColorMatrix(frame, m, 12.f, 8.f, 4.f);
-        applySoftContrast(frame, 0.88f, 10.f);
+        applyColorMatrix(frame, m, 12.f, 8.f, 4.f, 0.88f, 10.f);
         break;
     }
     default:
@@ -382,11 +408,33 @@ bool FrameProcessor::processOpenCL(uint8_t* rgb, int width, int height, int step
     case FrameFilterMode::Film:
         // UMat 不支持 Mat 式通道线性组合；胶片调色+暗角整段走 CPU
         return false;
-    case FrameFilterMode::Warm:
-    case FrameFilterMode::Cool:
-    case FrameFilterMode::Vintage:
-        // LUT 风格矩阵走 CPU（与 Film 相同策略）
-        return false;
+    case FrameFilterMode::Warm: {
+        static const float m[9] = {
+            1.12f, 0.06f, 0.02f,
+            0.04f, 1.04f, 0.00f,
+            0.00f, 0.02f, 0.88f,
+        };
+        applyColorMatrixU(uframe, m, 6.f, 2.f, -4.f, 1.06f, 2.f);
+        break;
+    }
+    case FrameFilterMode::Cool: {
+        static const float m[9] = {
+            0.90f, 0.02f, 0.04f,
+            0.02f, 1.02f, 0.06f,
+            0.04f, 0.08f, 1.14f,
+        };
+        applyColorMatrixU(uframe, m, -4.f, 0.f, 8.f, 1.04f, -2.f);
+        break;
+    }
+    case FrameFilterMode::Vintage: {
+        static const float m[9] = {
+            0.55f, 0.65f, 0.20f,
+            0.35f, 0.55f, 0.18f,
+            0.20f, 0.35f, 0.22f,
+        };
+        applyColorMatrixU(uframe, m, 12.f, 8.f, 4.f, 0.88f, 10.f);
+        break;
+    }
     case FrameFilterMode::Neon: {
         cv::UMat gray, edges, glow, dark;
         cv::cvtColor(uframe, gray, cv::COLOR_RGB2GRAY);

@@ -545,3 +545,285 @@ QSlider::sub-page:horizontal {{
     border-radius: 3px;
 }}
 """
+
+
+def hot_comments_stylesheet() -> str:
+    """热评 / 下载三合一页局部样式（夜色歌单 + 琥珀 CTA）。"""
+    return f"""
+HotCommentsPage, QWidget#HotPage {{
+    background: {BG};
+    color: {TEXT};
+}}
+QScrollArea#HotScroll {{
+    background: transparent;
+    border: none;
+}}
+QScrollArea#HotScroll > QWidget > QWidget {{
+    background: transparent;
+}}
+
+QLabel#HotHint {{
+    color: {TEXT_MUTED};
+    font-size: 12px;
+    padding: 8px 12px;
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+        stop:0 {SURFACE_2}, stop:1 #1A1820);
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+}}
+
+QFrame#HotFetchPanel, QFrame#HotResultPanel {{
+    background: transparent;
+    border: none;
+}}
+
+QFrame#HotSongBar {{
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
+        stop:0 #1A2230, stop:0.55 {SURFACE}, stop:1 #1C1812);
+    border: 1px solid {BORDER};
+    border-radius: 14px;
+}}
+QLabel#HotSongTitle {{
+    color: {TEXT};
+    font-family: {FONT_UI};
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+}}
+QLabel#HotSongMeta {{
+    color: {TEXT_MUTED};
+    font-size: 12px;
+}}
+QLabel#HotPathMuted {{
+    color: {TEXT_DIM};
+    font-size: 11px;
+}}
+
+QPushButton#HotChip {{
+    background: {SIGNAL_SOFT};
+    color: #B8EDE4;
+    border: 1px solid #3A6A64;
+    border-radius: 999px;
+    padding: 6px 16px;
+    font-size: 12px;
+    font-weight: 600;
+}}
+QPushButton#HotChip:hover {{
+    background: #355E5A;
+    color: {TEXT};
+}}
+
+QFrame#HotFetchRow {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 12px;
+}}
+QLineEdit#HotUrlEdit {{
+    background: {ELEVATED};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 6px 12px;
+    color: {TEXT};
+    selection-background-color: {ACCENT};
+}}
+QLineEdit#HotUrlEdit:focus {{
+    border: 1px solid {ACCENT};
+}}
+
+QPushButton#HotGhostBtn {{
+    background: {SURFACE_2};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 6px 12px;
+    font-size: 12px;
+}}
+QPushButton#HotGhostBtn:hover {{
+    border-color: {ACCENT};
+    background: {ELEVATED};
+}}
+QPushButton#HotGhostBtn:disabled {{
+    color: {TEXT_DIM};
+    border-color: {BORDER};
+}}
+
+QFrame#HotSegment {{
+    background: {SURFACE_2};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+}}
+QRadioButton#HotSegmentBtn {{
+    spacing: 6px;
+    padding: 6px 14px;
+    color: {TEXT_MUTED};
+    background: transparent;
+    border-radius: 8px;
+}}
+QRadioButton#HotSegmentBtn::indicator {{
+    width: 0;
+    height: 0;
+}}
+QRadioButton#HotSegmentBtn:checked {{
+    color: {ACCENT_ON};
+    background: {ACCENT};
+    font-weight: 600;
+}}
+QRadioButton#HotSegmentBtn:hover:!checked {{
+    color: {TEXT};
+    background: {ELEVATED};
+}}
+
+QLabel#HotStatus {{
+    color: {SIGNAL};
+    font-size: 12px;
+    padding: 2px 2px;
+}}
+QLabel#HotStatus[tone="warn"] {{
+    color: {ACCENT};
+}}
+QLabel#HotStatus[tone="ok"] {{
+    color: #8FD4D0;
+}}
+QLabel#HotStatus[tone="danger"] {{
+    color: {DANGER};
+}}
+
+QProgressBar#HotProgress {{
+    background: {SURFACE_2};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    text-align: center;
+    color: {TEXT};
+    min-height: 14px;
+}}
+QProgressBar#HotProgress::chunk {{
+    background: {ACCENT};
+    border-radius: 5px;
+}}
+
+QFrame#HotMediaCard {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 14px;
+}}
+QLabel#HotKindBadge {{
+    background: {SURFACE_2};
+    color: {TEXT_MUTED};
+    border: 1px solid {BORDER};
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 700;
+}}
+QLabel#HotKindBadge[kind="audio"] {{
+    background: {SIGNAL_SOFT};
+    color: #B8EDE4;
+    border-color: #3A6A64;
+}}
+QLabel#HotKindBadge[kind="video"] {{
+    background: #3A2E1A;
+    color: {ACCENT};
+    border-color: #6A4E28;
+}}
+QLabel#HotMediaName {{
+    color: {TEXT};
+    font-family: {FONT_UI};
+    font-size: 15px;
+    font-weight: 700;
+}}
+QLabel#HotMediaPath {{
+    color: {TEXT_DIM};
+    font-size: 11px;
+}}
+
+QLabel#HotSectionTitle {{
+    color: {TEXT};
+    font-family: {FONT_UI};
+    font-size: 14px;
+    font-weight: 700;
+}}
+QLabel#HotCountBadge {{
+    background: {SIGNAL_SOFT};
+    color: #B8EDE4;
+    border: 1px solid #3A6A64;
+    border-radius: 999px;
+    padding: 2px 10px;
+    font-size: 11px;
+    font-weight: 600;
+}}
+
+QListWidget#HotCommentList {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 14px;
+    padding: 8px;
+    outline: none;
+}}
+QListWidget#HotMediaList {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 12px;
+    padding: 4px;
+    outline: none;
+}}
+QListWidget#HotMediaList::item {{
+    padding: 6px 8px;
+    border-radius: 6px;
+}}
+QListWidget#HotMediaList::item:selected {{
+    background: {ELEVATED};
+    color: {TEXT};
+}}
+QListWidget#HotCommentList::item {{
+    background: transparent;
+    border: none;
+    border-radius: 10px;
+    padding: 0;
+    margin: 2px 0;
+}}
+QListWidget#HotCommentList::item:hover {{
+    background: transparent;
+}}
+QListWidget#HotCommentList::item:selected {{
+    background: transparent;
+}}
+QFrame#HotCommentRow {{
+    background: {SURFACE_2};
+    border: 1px solid {BORDER};
+    border-left: 3px solid {BORDER};
+    border-radius: 10px;
+}}
+QListWidget#HotCommentList::item:selected QFrame#HotCommentRow,
+QListWidget#HotCommentList::item:hover QFrame#HotCommentRow {{
+    border-left: 3px solid {ACCENT};
+    background: {ELEVATED};
+}}
+QLabel#HotCommentNick {{
+    color: {ACCENT};
+    font-size: 12px;
+    font-weight: 700;
+}}
+QLabel#HotCommentLike {{
+    color: {TEXT_MUTED};
+    font-size: 11px;
+}}
+QLabel#HotCommentBody {{
+    color: {TEXT};
+    font-size: 13px;
+}}
+
+QGroupBox#HotAdvanced {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 12px;
+    margin-top: 10px;
+    padding-top: 8px;
+    font-size: 12px;
+    color: {TEXT_MUTED};
+}}
+QGroupBox#HotAdvanced::title {{
+    subcontrol-origin: margin;
+    left: 12px;
+    padding: 0 6px;
+    color: {SIGNAL};
+}}
+"""

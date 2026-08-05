@@ -6,6 +6,7 @@ https://github.com/ObjTube/NeteaseMusic-qingtian-comment）：
 
 默认：直连 music.163.com 公开评论 API（无需 Node 中间层）。
 可选：NeteaseCloudMusicApi 兼容地址、或外部脚本。
+返回 FetchResult（来源 / 歌名 / 缓存）。
 """
 
 from __future__ import annotations
@@ -15,10 +16,11 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
@@ -36,6 +38,28 @@ class HotComment:
         return text
 
 
+@dataclass
+class FetchResult:
+    """热评拉取结果（含来源与可选歌名）。"""
+
+    comments: List[HotComment] = field(default_factory=list)
+    song_id: str = ""
+    song_name: str = ""
+    source: str = ""  # live | script | api | demo | cache
+    message: str = ""
+
+    @property
+    def source_label(self) -> str:
+        return {
+            "live": "网易云直连",
+            "script": "自定义脚本",
+            "api": "NCM API",
+            "demo": "演示数据",
+            "cache": "本地缓存",
+            "bilibili": "B站弹幕",
+        }.get(self.source, self.source or "未知")
+
+
 _SONG_ID_RE = re.compile(
     r"(?:song\?id=|/song/|/song\?|/#/song\?id=)(\d+)",
     re.IGNORECASE,
@@ -46,6 +70,22 @@ _DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+
+_SOURCE_LIVE = "live"
+_SOURCE_SCRIPT = "script"
+_SOURCE_API = "api"
+_SOURCE_DEMO = "demo"
+_SOURCE_CACHE = "cache"
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parent.parent.parent.parent
+
+
+def cache_dir() -> Path:
+    d = _project_root() / ".cache" / "hot_comments"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def parse_song_id(text: str) -> Optional[str]:
@@ -96,16 +136,12 @@ def _item_to_comment(item) -> Optional[HotComment]:
 
 def _normalize_items(raw) -> List[HotComment]:
     if isinstance(raw, dict):
-        # 合并 hot + comments（API / 脚本均可）
         merged = []
         for key in ("hotComments", "comments", "data"):
             part = raw.get(key)
             if isinstance(part, list):
                 merged.extend(part)
-        if merged:
-            raw = merged
-        else:
-            raw = []
+        raw = merged if merged else []
     if not isinstance(raw, list):
         return []
     out: List[HotComment] = []
@@ -141,8 +177,90 @@ def _http_get_json(url: str, timeout: int = 20) -> dict:
     return data
 
 
+def _fetch_song_name(song_id: str, timeout: int = 8) -> str:
+    """尽力取歌名；失败返回空串。"""
+    try:
+        url = f"https://music.163.com/api/song/detail/?ids=[{song_id}]"
+        data = _http_get_json(url, timeout=timeout)
+        songs = data.get("songs") or []
+        if songs and isinstance(songs[0], dict):
+            name = str(songs[0].get("name") or "").strip()
+            if name:
+                return name
+    except Exception:
+        pass
+    try:
+        # 备用：页面 og:title 太重，用 song/detail v2 风格
+        url = (
+            "https://music.163.com/api/v3/song/detail"
+            f"?c=%5B%7B%22id%22%3A{song_id}%7D%5D"
+        )
+        data = _http_get_json(url, timeout=timeout)
+        songs = data.get("songs") or []
+        if songs and isinstance(songs[0], dict):
+            return str(songs[0].get("name") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _cache_path(song_id: str) -> Path:
+    return cache_dir() / f"{song_id}.json"
+
+
+def _save_cache(result: FetchResult) -> None:
+    if not result.song_id or not result.comments:
+        return
+    if result.source == _SOURCE_DEMO:
+        return
+    payload = {
+        "song_id": result.song_id,
+        "song_name": result.song_name,
+        "source": result.source,
+        "saved_at": time.time(),
+        "comments": [asdict(c) for c in result.comments],
+    }
+    try:
+        _cache_path(result.song_id).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def _load_cache(song_id: str, limit: int) -> Optional[FetchResult]:
+    path = _cache_path(song_id)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    raw = data.get("comments") or []
+    comments: List[HotComment] = []
+    for item in raw:
+        if isinstance(item, dict):
+            c = HotComment(
+                content=str(item.get("content") or ""),
+                liked_count=int(item.get("liked_count") or 0),
+                nickname=str(item.get("nickname") or ""),
+            )
+            if c.content.strip():
+                comments.append(c)
+    if not comments:
+        return None
+    return FetchResult(
+        comments=comments[:limit],
+        song_id=song_id,
+        song_name=str(data.get("song_name") or ""),
+        source=_SOURCE_CACHE,
+        message="已用本地缓存",
+    )
+
+
 def _fetch_via_music163(song_id: str, limit: int, timeout: int) -> List[HotComment]:
-    """直连网易云评论 API（与社区展示站同类数据源思路）。"""
+    """直连网易云评论 API。"""
     page_size = min(100, max(limit, 20))
     url = (
         f"https://music.163.com/api/v1/resource/comments/R_SO_4_{song_id}"
@@ -158,7 +276,6 @@ def _fetch_via_music163(song_id: str, limit: int, timeout: int) -> List[HotComme
     comments = [_item_to_comment(x) for x in (data.get("comments") or [])]
     comments = [c for c in comments if c]
 
-    # 热评优先，不足再用最新评论按点赞补齐到 limit
     seen = {c.content for c in hot}
     merged = list(hot)
     for c in sorted(comments, key=lambda x: x.liked_count, reverse=True):
@@ -169,7 +286,6 @@ def _fetch_via_music163(song_id: str, limit: int, timeout: int) -> List[HotComme
         if len(merged) >= limit:
             break
 
-    # 若仍不足，翻页 offset 再取
     offset = page_size
     while len(merged) < limit and offset < 500:
         more_url = (
@@ -200,7 +316,6 @@ def _fetch_via_music163(song_id: str, limit: int, timeout: int) -> List[HotComme
 
 
 def _fetch_via_ncm_api(api_base: str, song_id: str, limit: int, timeout: int) -> List[HotComment]:
-    """兼容 Binaryify/NeteaseCloudMusicApi：/comment/music?id=&limit="""
     base = api_base.rstrip("/")
     qs = urllib.parse.urlencode({"id": song_id, "limit": str(limit)})
     url = f"{base}/comment/music?{qs}"
@@ -256,6 +371,8 @@ def _demo_comments(song_id: str, limit: int) -> List[HotComment]:
         HotComment("开口跪，单曲循环到天亮。", 8888, "听众B"),
         HotComment("评论区比歌词还催泪。", 7777, "听众C"),
         HotComment("多年以后再听，依然会想起某个人。", 6666, "听众D"),
+        HotComment("耳机一戴，整个世界都安静了。", 5555, "听众E"),
+        HotComment("高赞说得对，每句都是故事。", 4444, "听众F"),
     ]
     out: List[HotComment] = []
     i = 0
@@ -263,7 +380,7 @@ def _demo_comments(song_id: str, limit: int) -> List[HotComment]:
         base = samples[i % len(samples)]
         out.append(HotComment(
             content=f"[演示·{song_id}] {base.content}",
-            liked_count=base.liked_count - i,
+            liked_count=max(0, base.liked_count - i * 11),
             nickname=base.nickname,
         ))
         i += 1
@@ -278,8 +395,12 @@ def fetch_hot_comments(
     limit: int = 100,
     allow_demo: bool = True,
     timeout: int = 30,
-) -> List[HotComment]:
-    """获取热评（最多 limit 条）。优先级：自定义脚本 → NCM API → 直连 music.163 → 演示。"""
+    use_cache: bool = True,
+) -> FetchResult:
+    """
+    获取热评（最多 limit 条）。
+    优先级：自定义脚本 → NCM API → 直连 music.163 → 缓存 → 演示。
+    """
     song_id = parse_song_id(song_input)
     if not song_id:
         raise ValueError("请输入网易云歌曲链接或数字歌曲 ID")
@@ -287,32 +408,84 @@ def fetch_hot_comments(
     limit = max(1, min(int(limit), 100))
     script = (script_path or "").strip().strip('"')
     api = (api_base or "").strip().rstrip("/")
-
     errors: List[str] = []
+
+    def _pack(comments: List[HotComment], source: str, message: str = "") -> FetchResult:
+        name = ""
+        if source != _SOURCE_DEMO:
+            name = _fetch_song_name(song_id, timeout=min(8, timeout))
+        result = FetchResult(
+            comments=comments,
+            song_id=song_id,
+            song_name=name,
+            source=source,
+            message=message or f"已加载 {len(comments)} 条 · 来源：{FetchResult(source=source).source_label}",
+        )
+        # 修正 message 用真实 label
+        result.message = message or (
+            f"已加载 {len(comments)} 条 · 来源：{result.source_label}"
+            + (f" · {name}" if name else "")
+        )
+        if source not in (_SOURCE_DEMO, _SOURCE_CACHE):
+            _save_cache(result)
+        return result
 
     if script:
         try:
-            return _fetch_via_script(script, song_id, limit, timeout)
+            comments = _fetch_via_script(script, song_id, limit, timeout)
+            if comments:
+                return _pack(comments, _SOURCE_SCRIPT)
+            errors.append("脚本: empty")
         except Exception as e:
             errors.append(f"脚本: {e}")
 
     if api:
         try:
-            return _fetch_via_ncm_api(api, song_id, limit, timeout)
+            comments = _fetch_via_ncm_api(api, song_id, limit, timeout)
+            if comments:
+                return _pack(comments, _SOURCE_API)
+            errors.append("NCM-API: empty")
         except Exception as e:
             errors.append(f"NCM-API: {e}")
 
     try:
         comments = _fetch_via_music163(song_id, limit, timeout)
         if comments:
-            return comments
+            return _pack(comments, _SOURCE_LIVE)
         errors.append("直连接口返回空列表")
     except urllib.error.HTTPError as e:
         errors.append(f"直连 HTTP {e.code}")
     except Exception as e:
         errors.append(f"直连: {e}")
 
-    if allow_demo:
-        return _demo_comments(song_id, limit)
+    if use_cache:
+        cached = _load_cache(song_id, limit)
+        if cached:
+            if not cached.song_name:
+                cached.song_name = _fetch_song_name(song_id, timeout=min(5, timeout))
+            cached.message = (
+                f"已加载 {len(cached.comments)} 条 · 来源：本地缓存"
+                + (f" · {cached.song_name}" if cached.song_name else "")
+                + "（网络失败回退）"
+            )
+            return cached
 
-    raise RuntimeError("获取热评失败：" + " | ".join(errors) if errors else "未知错误")
+    if allow_demo:
+        comments = _demo_comments(song_id, min(limit, 24))
+        return FetchResult(
+            comments=comments,
+            song_id=song_id,
+            song_name="",
+            source=_SOURCE_DEMO,
+            message=(
+                f"已加载 {len(comments)} 条演示热评（网络不可用，可稍后重试）"
+                + ((" · " + " | ".join(errors[:2])) if errors else "")
+            ),
+        )
+
+    kind = "network"
+    if any("空" in e for e in errors):
+        kind = "empty"
+    raise RuntimeError(
+        f"获取热评失败 [{kind}]：" + (" | ".join(errors) if errors else "未知错误")
+    )

@@ -8,7 +8,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, Qt, Slot
+from PySide6.QtCore import QRectF, Qt, QThread, QTimer, Signal, Slot, QObject
 from PySide6.QtGui import QColor, QPainter, QWheelEvent
 from PySide6.QtWidgets import (
     QButtonGroup, QComboBox, QFileDialog, QFrame, QGraphicsPixmapItem, QGraphicsScene,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.image_loader import load_preview, probe_size
+from ui.elided_label import ElidedPathLabel
 from ui.exif_panel import ExifPanel, attach_exif_overlay
 from ui.theme import BG, PLAYER_BG, TEXT_MUTED, enhance_page_stylesheet
 from ui.workflow_link import TAB_WATERMARK, ask_video_handoff
@@ -26,10 +27,34 @@ from viewmodels.main_vm import MainViewModel
 _STYLE = enhance_page_stylesheet()
 
 
+class _FramePreviewWorker(QObject):
+    finished = Signal(str, float)  # png_path, t
+    failed = Signal(str)
+
+    def __init__(self, bridge, video_path: str, t: float, out_png: str):
+        super().__init__()
+        self._bridge = bridge
+        self._video_path = video_path
+        self._t = t
+        self._out_png = out_png
+
+    @Slot()
+    def run(self):
+        try:
+            self._bridge.extract_video_frame(self._video_path, self._t, self._out_png)
+            self.finished.emit(self._out_png, self._t)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
 def _paint_scroll_dark(scroll: QScrollArea, body: QWidget) -> None:
-    """强制滚动区/视口深色，避免 Fusion 默认白底。"""
+    """强制滚动区/视口深色，避免 Fusion 默认白底；禁止内容按长文本横向撑开。"""
     from PySide6.QtGui import QPalette
 
+    body.setMinimumWidth(0)
+    body.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+    scroll.setMinimumWidth(0)
+    scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
     body.setObjectName("EnhanceScrollBody")
     body.setAttribute(Qt.WA_StyledBackground, True)
     scroll.setObjectName("EnhanceScroll")
@@ -286,9 +311,18 @@ class EnhancePage(QWidget):
         self._result_path = ""
         self._src_image_path = ""
         self._busy = False
+        self._preview_thread: QThread | None = None
+        self._preview_worker: _FramePreviewWorker | None = None
+        self._preview_debounce = QTimer(self)
+        self._preview_debounce.setSingleShot(True)
+        self._preview_debounce.setInterval(280)
+        self._preview_debounce.timeout.connect(self._refresh_video_preview)
         self.setObjectName("EnhancePage")
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet(_STYLE)
+        # 允许在窄窗口内收缩，避免子控件 sizeHint 把整窗撑开
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         root = QVBoxLayout(self)
         root.setSpacing(8)
@@ -300,10 +334,13 @@ class EnhancePage(QWidget):
         )
         hint.setObjectName("HintLabel")
         hint.setWordWrap(True)
+        hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         root.addWidget(hint)
 
         self._tabs = QTabWidget()
         self._tabs.setObjectName("EnhanceInnerTabs")
+        self._tabs.setMinimumWidth(0)
+        self._tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._tabs.addTab(self._build_image_tab(), "图片超分")
         self._tabs.addTab(self._build_video_tab(), "视频超分")
         self._tabs.addTab(self._build_interp_tab(), "视频补帧")
@@ -315,8 +352,7 @@ class EnhancePage(QWidget):
         self._progress.setVisible(False)
         root.addWidget(self._progress)
 
-        self._status = QLabel("就绪")
-        self._status.setObjectName("InfoText")
+        self._status = ElidedPathLabel("就绪", object_name="InfoText")
         root.addWidget(self._status)
 
         vm.enhanceProgress.connect(self._on_progress)
@@ -391,8 +427,7 @@ class EnhancePage(QWidget):
         layout.setSpacing(8)
 
         top = QHBoxLayout()
-        self._img_path_label = QLabel("未选择图片")
-        self._img_path_label.setObjectName("MutedText")
+        self._img_path_label = ElidedPathLabel("未选择图片", object_name="MutedText")
         btn_import = QPushButton("导入图片")
         btn_import.setObjectName("GhostBtn")
         btn_import.clicked.connect(self._on_import_image)
@@ -437,8 +472,7 @@ class EnhancePage(QWidget):
         layout = QVBoxLayout(body)
 
         top = QHBoxLayout()
-        self._vid_path_label = QLabel("未选择视频")
-        self._vid_path_label.setObjectName("PathLabel")
+        self._vid_path_label = ElidedPathLabel("未选择视频")
         btn_import = QPushButton("导入视频")
         btn_import.setObjectName("GhostBtn")
         btn_import.clicked.connect(self._on_import_video)
@@ -551,8 +585,9 @@ class EnhancePage(QWidget):
         tip.setWordWrap(True)
         layout.addWidget(tip)
 
-        self._interp_path_label = QLabel("未选择视频（请导入或「用当前视频」）")
-        self._interp_path_label.setObjectName("PathLabel")
+        self._interp_path_label = ElidedPathLabel(
+            "未选择视频（请导入或「用当前视频」）"
+        )
         layout.addWidget(self._interp_path_label)
 
         row = QHBoxLayout()
@@ -672,8 +707,7 @@ class EnhancePage(QWidget):
         layout.addWidget(tip)
 
         top = QHBoxLayout()
-        self._grade_path_label = QLabel("未选择文件")
-        self._grade_path_label.setObjectName("PathLabel")
+        self._grade_path_label = ElidedPathLabel("未选择文件")
         btn_img = QPushButton("导入图片")
         btn_img.setObjectName("GhostBtn")
         btn_img.clicked.connect(self._on_grade_import_image)
@@ -958,6 +992,8 @@ class EnhancePage(QWidget):
     @Slot()
     def _on_preview_slider(self):
         self._preview_time_label.setText(f"{self._preview_slider.value() / 1000.0:.1f}s")
+        # 拖动只改时间标签；松手/停顿后再抽帧，避免卡主线程
+        self._preview_debounce.start()
 
     @Slot()
     def _on_range_changed(self):
@@ -982,17 +1018,50 @@ class EnhancePage(QWidget):
         video = self._vm.get_app_state().current_video
         if not video or not self._vm.bridge:
             return
+        if self._preview_thread and self._preview_thread.isRunning():
+            return
         t = self._preview_slider.value() / 1000.0
         try:
             if self._preview_png and os.path.isfile(self._preview_png):
-                os.remove(self._preview_png)
-            fd, self._preview_png = tempfile.mkstemp(suffix=".png", prefix="sr_prev_")
+                try:
+                    os.remove(self._preview_png)
+                except OSError:
+                    pass
+            fd, out_png = tempfile.mkstemp(suffix=".png", prefix="sr_prev_")
             os.close(fd)
-            self._vm.bridge.extract_video_frame(video.file_path, t, self._preview_png)
-            if self._vid_compare.set_original(self._preview_png):
-                self._status.setText(f"左侧预览 @ {t:.1f}s")
+            self._preview_png = out_png
+            self._status.setText(f"预览抽取中 @ {t:.1f}s…")
+            th = QThread(self)
+            worker = _FramePreviewWorker(self._vm.bridge, video.file_path, t, out_png)
+            worker.moveToThread(th)
+            th.started.connect(worker.run)
+            worker.finished.connect(self._on_preview_frame_ready)
+            worker.failed.connect(self._on_preview_frame_failed)
+            worker.finished.connect(th.quit)
+            worker.failed.connect(th.quit)
+            th.finished.connect(worker.deleteLater)
+            th.finished.connect(th.deleteLater)
+            th.finished.connect(self._clear_preview_thread)
+            self._preview_thread = th
+            self._preview_worker = worker
+            th.start()
         except Exception as e:
             self._show_error(f"预览失败: {e}")
+
+    @Slot(str, float)
+    def _on_preview_frame_ready(self, png: str, t: float):
+        if png and os.path.isfile(png):
+            if self._vid_compare.set_original(png):
+                self._status.setText(f"左侧预览 @ {t:.1f}s")
+
+    @Slot(str)
+    def _on_preview_frame_failed(self, msg: str):
+        self._show_error(f"预览失败: {msg}")
+
+    @Slot()
+    def _clear_preview_thread(self):
+        self._preview_thread = None
+        self._preview_worker = None
 
     def _default_out_path(self, src: str, scale: int, ext: str) -> str:
         p = Path(src)
@@ -1130,7 +1199,7 @@ class EnhancePage(QWidget):
 
     @Slot()
     def _on_grade_preview(self):
-        """本地 OpenCV 预览（图片或缩略帧）。"""
+        """本地 OpenCV 预览（图片或缩略帧；缩边 + JPEG 临时文件加快刷新）。"""
         src = self._grade_src_path
         if not src or not os.path.isfile(src):
             QMessageBox.information(self, "提示", "请先导入图片或视频。")
@@ -1149,16 +1218,20 @@ class EnhancePage(QWidget):
             else:
                 t = self._grade_start.value() / 1000.0
                 thumb = self._vm.bridge.extract_thumbnail(
-                    src, t, max_width=960, use_cache=False,
+                    src, t, max_width=720, use_cache=True,
                 )
-                img = cv2.imread(thumb, cv2.IMREAD_COLOR)
+                # PPM / 中文路径
+                data = np.fromfile(thumb, dtype=np.uint8)
+                img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+                if img is None:
+                    img = cv2.imread(thumb, cv2.IMREAD_COLOR)
                 self._grade_compare.set_original(thumb)
             if img is None:
                 raise RuntimeError("解码失败")
-            out = apply_grade_opencv_bgr(img, preset)
-            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            out = apply_grade_opencv_bgr(img, preset, max_side=960)
+            tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
             tmp.close()
-            ok, buf = cv2.imencode(".png", out)
+            ok, buf = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
             if not ok:
                 raise RuntimeError("编码预览失败")
             buf.tofile(tmp.name)

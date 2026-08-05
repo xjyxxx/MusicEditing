@@ -30,6 +30,10 @@ venv/
 
 # 日志与临时文件
 docs/log_*.txt
+docs/_tmp_*/
+docs/*cookies*.txt
+*cookies*.txt
+!client/resources/config/**
 *.log
 *.part
 frame.rgb

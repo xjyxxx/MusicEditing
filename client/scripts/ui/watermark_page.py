@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import tempfile
 
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot, QObject
 from PySide6.QtWidgets import (
     QButtonGroup, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QListWidget,
     QMessageBox, QProgressBar, QPushButton, QRadioButton, QSlider, QTabWidget,
@@ -19,6 +19,26 @@ from ui.workflow_link import TAB_ENHANCE, ask_video_handoff
 from viewmodels.main_vm import MainViewModel
 
 
+class _FramePreviewWorker(QObject):
+    finished = Signal(str, float)
+    failed = Signal(str)
+
+    def __init__(self, bridge, video_path: str, t: float, out_png: str):
+        super().__init__()
+        self._bridge = bridge
+        self._video_path = video_path
+        self._t = t
+        self._out_png = out_png
+
+    @Slot()
+    def run(self):
+        try:
+            self._bridge.extract_video_frame(self._video_path, self._t, self._out_png)
+            self.finished.emit(self._out_png, self._t)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
 class WatermarkPage(QWidget):
     def __init__(self, vm: MainViewModel, handoff=None, parent=None):
         super().__init__(parent)
@@ -26,6 +46,11 @@ class WatermarkPage(QWidget):
         self._handoff = handoff
         self._preview_png: str = ""
         self._last_result_path: str = ""
+        self._preview_thread: QThread | None = None
+        self._preview_debounce = QTimer(self)
+        self._preview_debounce.setSingleShot(True)
+        self._preview_debounce.setInterval(280)
+        self._preview_debounce.timeout.connect(self._refresh_video_preview)
 
         root = QVBoxLayout(self)
 
@@ -295,6 +320,7 @@ class WatermarkPage(QWidget):
             return
         t = self._preview_slider.value() / 1000.0
         self._preview_time_label.setText(f"{t:.1f}s")
+        self._preview_debounce.start()
 
     @Slot()
     def _on_range_changed(self):
@@ -317,20 +343,54 @@ class WatermarkPage(QWidget):
         video = self._vm.get_app_state().current_video
         if not video or not self._vm.bridge:
             return
+        if self._preview_thread and self._preview_thread.isRunning():
+            return
         t = self._preview_slider.value() / 1000.0
         try:
             if self._preview_png and os.path.isfile(self._preview_png):
-                os.remove(self._preview_png)
-            fd, self._preview_png = tempfile.mkstemp(suffix=".png", prefix="wm_prev_")
+                try:
+                    os.remove(self._preview_png)
+                except OSError:
+                    pass
+            fd, out_png = tempfile.mkstemp(suffix=".png", prefix="wm_prev_")
             os.close(fd)
-            self._vm.bridge.extract_video_frame(video.file_path, t, self._preview_png)
-            preview = load_preview(self._preview_png, max_side=4096)
-            if not preview.ok:
+            self._preview_png = out_png
+            self._status.setText(f"预览抽取中 @ {t:.1f}s…")
+            th = QThread(self)
+            worker = _FramePreviewWorker(self._vm.bridge, video.file_path, t, out_png)
+            worker.moveToThread(th)
+            th.started.connect(worker.run)
+            worker.finished.connect(self._on_preview_frame_ready)
+            worker.failed.connect(self._on_preview_frame_failed)
+            worker.finished.connect(th.quit)
+            worker.failed.connect(th.quit)
+            th.finished.connect(worker.deleteLater)
+            th.finished.connect(th.deleteLater)
+            th.finished.connect(lambda: setattr(self, "_preview_thread", None))
+            self._preview_thread = th
+            th.start()
+        except Exception as e:
+            self._status.setText(f"预览失败: {e}")
+
+    @Slot(str, float)
+    def _on_preview_frame_ready(self, png: str, t: float):
+        video = self._vm.get_app_state().current_video
+        try:
+            preview = load_preview(png, max_side=4096) if png and os.path.isfile(png) else None
+            if preview is None or not getattr(preview, "ok", True):
                 raise RuntimeError("预览帧无效")
-            self._vid_selector.load_pixmap(preview.pixmap, (video.width, video.height))
-            self._status.setText(f"预览帧 @ {t:.1f}s  ·  解码 {preview.backend}")
+            wh = (video.width, video.height) if video else None
+            self._vid_selector.load_pixmap(preview.pixmap, wh)
+            backend = getattr(preview, "backend", "")
+            self._status.setText(
+                f"预览帧 @ {t:.1f}s" + (f"  ·  解码 {backend}" if backend else "")
+            )
         except Exception as e:
             self._show_error(f"预览失败: {e}")
+
+    @Slot(str)
+    def _on_preview_frame_failed(self, msg: str):
+        self._show_error(f"预览失败: {msg}")
 
     @Slot()
     def _on_run_image(self):

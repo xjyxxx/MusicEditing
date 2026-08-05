@@ -63,29 +63,92 @@ class WeatherInfo:
 
 @dataclass(frozen=True)
 class WeatherMood:
-    """今日氛围：天气 → 播放器 OpenCV 滤镜推荐（趣味彩蛋）。"""
+    """今日氛围：天气 → 播放器电影向滤镜（趣味彩蛋，观感要够明显）。"""
 
-    filter_mode: str  # 对应 VideoPlayer 下拉 data：clahe / film / …
-    label: str        # 状态栏短标签：明亮 / 胶片
-    reason: str       # tooltip / 底栏文案
+    filter_mode: str   # VideoPlayer 下拉 data：warm / cool / film / …
+    label: str         # 短标签：暖阳 / 雨幕 / 雪色…
+    reason: str        # tooltip / 底栏
+    glyph: str = ""    # 状态栏符号（不用 emoji 依赖字体时也可用 ·）
+    accent: str = "amber"  # UI 色系：amber / rain / cool / fog / storm
+    cta: str = ""      # 点击号召：点我套用…
 
 
 def recommend_mood(weather_code: int) -> Optional[WeatherMood]:
-    """晴天→明亮(CLAHE)，雨天→胶片；其它天气不推荐。"""
+    """
+    用「看得见」的电影向滤镜，而不是微调 CLAHE。
+    晴→暖调金感；阴/雪→冷调；雾→复古褪色；雨→胶片；雷暴→霓虹（最醒目）。
+    """
     code = int(weather_code)
-    # WMO: 0 晴, 1 晴间多云
+
+    # 晴 / 晴间多云：电影暖调（比 CLAHE 更「好看」也更明显）
     if code in (0, 1):
         return WeatherMood(
-            filter_mode="clahe",
-            label="明亮",
-            reason="晴天适合明亮预览（CLAHE）",
+            filter_mode="warm",
+            label="暖阳",
+            reason="晴天 · 电影暖调，画面偏金橙、对比略抬",
+            glyph="☀",
+            accent="amber",
+            cta="点我套用暖阳滤镜",
         )
-    # 毛毛雨/雨/冻雨(50–69)、阵雨(80–82)、雷暴(≥95)
-    if (50 <= code < 70) or (80 <= code <= 82) or code >= 95:
+    # 多云：略冷一点的通透冷调
+    if code == 2:
+        return WeatherMood(
+            filter_mode="cool",
+            label="天光",
+            reason="多云 · 冷调青蓝，偏清爽通透",
+            glyph="☁",
+            accent="cool",
+            cta="点我套用天光冷调",
+        )
+    # 阴天
+    if code == 3:
+        return WeatherMood(
+            filter_mode="cool",
+            label="阴冷",
+            reason="阴天 · 冷调压暖色，氛围更沉",
+            glyph="☁",
+            accent="cool",
+            cta="点我套用阴冷滤镜",
+        )
+    # 雾
+    if code in (45, 48):
+        return WeatherMood(
+            filter_mode="vintage",
+            label="雾色",
+            reason="有雾 · 复古褪色+抬黑雾感",
+            glyph="〰",
+            accent="fog",
+            cta="点我套用雾色复古",
+        )
+    # 雪
+    if (70 <= code < 80) or code in (85, 86):
+        return WeatherMood(
+            filter_mode="cool",
+            label="雪色",
+            reason="下雪 · 冷调青蓝，偏干净冷感",
+            glyph="❄",
+            accent="cool",
+            cta="点我套用雪色冷调",
+        )
+    # 雷暴：霓虹最醒目
+    if code >= 95:
+        return WeatherMood(
+            filter_mode="neon",
+            label="雷霓",
+            reason="雷雨 · 霓虹描边，戏剧感最强",
+            glyph="⚡",
+            accent="storm",
+            cta="点我套用雷霓滤镜",
+        )
+    # 毛毛雨/雨/冻雨/阵雨
+    if (50 <= code < 70) or (80 <= code <= 82):
         return WeatherMood(
             filter_mode="film",
-            label="胶片",
-            reason="雨天试试胶片滤镜",
+            label="雨幕",
+            reason="下雨 · 胶片颗粒+暗角，像隔着窗看雨",
+            glyph="☂",
+            accent="rain",
+            cta="点我套用雨幕胶片",
         )
     return None
 
@@ -295,10 +358,31 @@ def format_status_text(info: WeatherInfo, *, with_mood: bool = True) -> str:
         return base
     mood = recommend_mood(info.weather_code)
     if mood:
-        return f"{base} · {mood.label}"
+        g = f"{mood.glyph} " if mood.glyph else ""
+        # 明确写出「可点」，比只挂滤镜名更醒目
+        return f"{g}{base} · {mood.label} · 点我"
     return base
 
 
 def format_status_error(err: str | BaseException | None = None) -> str:
     _ = err
     return "天气: 暂不可用"
+
+
+def mood_pill_stylesheet(accent: str) -> str:
+    """顶栏天气胶囊：有氛围推荐时用更醒目的色系（内联 QSS）。"""
+    # (bg, fg, border)
+    palettes = {
+        "amber": ("#3A2E1A", "#F0C080", "#C8883A"),   # 暖阳
+        "rain": ("#1A2838", "#9EC4E8", "#4A7AA8"),    # 雨幕
+        "cool": ("#1A2E32", "#8FD4D0", "#3A8A84"),    # 冷调/雪
+        "fog": ("#2A2830", "#C8B8A8", "#7A6A5A"),     # 雾色复古
+        "storm": ("#2A1A38", "#E0A8FF", "#8A4AC8"),   # 雷霓
+    }
+    bg, fg, bd = palettes.get(accent, palettes["amber"])
+    return (
+        f"QLabel#ChromeWeather {{"
+        f" background: {bg}; color: {fg}; border: 1px solid {bd};"
+        f" border-radius: 999px; padding: 5px 14px; font-size: 12px; font-weight: 600;"
+        f" }}"
+    )

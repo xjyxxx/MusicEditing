@@ -98,7 +98,7 @@ run_ui.bat / python client/scripts/main.py
   ├─ detect_gpu_info() → 状态栏显示 GPU: 型号 或 CPU 模式
   ├─ 后台线程：IP 定位城市 + Open-Meteo → 状态栏天气（§5.11）
   ├─ 无 NVIDIA GPU 时弹窗提示 CPU 模式（见 §3.6）
-  └─ 显示多标签页（首页/切片/增强/去水印/热评/下载等），进入事件循环
+  └─ 显示功能页（首页/切片/增强/去水印/下载与热评等），进入事件循环
 ```
 
 **退出（关闭窗口）：**
@@ -162,14 +162,13 @@ MainWindow.shutdown()
 
 | 页面 | 类 | 菜单分组 | 状态 |
 |------|-----|----------|------|
-| 首页 | `HomePage` + `VideoPlayerWidget` | 核心 | 本地预览 |
+| 首页 | `HomePage` + `VideoPlayerWidget` + `CommentMarquee` | 核心 | 本地预览；可叠热评弹幕 |
 | 智能切片 | `SlicePage` + `HighlightTimelineWidget` | 核心 | 分析 / 手动 / 成片 / 竖屏短视频 |
-| 画质增强 | `EnhancePage` + `ExifPanel` | 核心 | 超分 / 补帧 / 调色 |
+| 画质增强 | `EnhancePage` + `ExifPanel` + `ElidedPathLabel` | 核心 | 超分 / 补帧 / 调色；长路径中间省略不撑布局 |
 | 去水印 | `WatermarkPage` + `RegionSelectorWidget` + `ExifPanel` | 核心 | 图片/视频去水印 + EXIF |
 | 全流程队列 | `PipelineQueuePage` | 工作流 | 切片→超分→去水印（§5.9.1） |
-| 链接下载 | `DownloadPage` | 工作流 | yt-dlp → 可送首页播放 |
+| 下载与热评 | `DownloadPage`（一步获取） | 工作流 | 评论列表 + 唯一媒体 → 首页叠播 |
 | BGM 混音 | `BgmPage` | 工作流 | FFmpeg 叠 BGM；Demucs 可选分轨（§5.16） |
-| 热评滚动 | `HotCommentsPage` | 趣味 | 网易云热评叠加 |
 | 封面工厂 | `CoverPage` | 趣味 | 最清晰帧 + 标题 PNG（§5.14） |
 | 音频趣味 | `AudioFunPage` | 趣味 | 变调/变速/倒放/8D/混响（§5.15） |
 | 个人中心 | `PlaceholderPage` | 帮助 | 占位（授权待接入） |
@@ -199,7 +198,7 @@ MainWindow.shutdown()
 ```
 HomePage
   ├─ VideoPlayerWidget（Python GUI）
-  │    ├─ GlVideoWidget（QOpenGLWidget）显示 RGB 帧；点击画面 → 暂停/继续；暂停时中央显示三角播放图标
+  │    ├─ GlVideoWidget（QOpenGLWidget）显示 RGB 帧；点击画面 → 未加载时打开文件对话框（同「打开文件」），已加载则暂停/继续；暂停时中央显示三角播放图标
   │    ├─ 视频：FFmpeg 解码画面 + Qt QMediaPlayer 音频主时钟
   │    ├─ 音乐：仅 Qt QMediaPlayer（mp3/wav/flac/m4a…），封面占位图
   │    ├─ 「打开文件」同时支持视频与音乐过滤器
@@ -1036,24 +1035,52 @@ SlicePage「游戏高光」→ start_slice_analysis
 
 ### 5.2.1 网易云热评滚动（已落地）
 
-独立 Tab「热评滚动」。参考 B 站展示思路（[BV1vC4y1t7Wi](https://www.bilibili.com/video/BV1vC4y1t7Wi/)）与
-[ObjTube/NeteaseMusic-qingtian-comment](https://github.com/ObjTube/NeteaseMusic-qingtian-comment)：
-取歌曲热评并在播放区叠加滚动；视频生成器 [wyy-videoGen](https://github.com/ObjTube/wyy-videoGen) 供展示参考（本项目不接讯飞合成）。
+与链接下载**三合一**为同一页（菜单「工作流 → 下载与热评」；趣味「热评弹幕」滚到评论结果区）。
+本页**无播放器、无弹幕预览**：一步「获取」产出**评论列表 + 媒体列表**（勾选加入，可点选播放），媒体槽供「送首页播放」在 `HomePage` 叠 `CommentMarquee`。
+
+参考 B 站展示思路（[BV1vC4y1t7Wi](https://www.bilibili.com/video/BV1vC4y1t7Wi/)）与
+[ObjTube/NeteaseMusic-qingtian-comment](https://github.com/ObjTube/NeteaseMusic-qingtian-comment)；
+视频生成器 [wyy-videoGen](https://github.com/ObjTube/wyy-videoGen) 仅作展示参考（本项目本轮不接烧录成片）。
 
 ```
-用户输入歌曲链接或 ID → 回车 /「确定」
+用户输入链接或歌曲 ID /「晴天 186016」试例 →「获取」（不下载）
   │
   ▼
-HotCommentsPage
-  → core.netease_comments.fetch_hot_comments(limit≤100)
-       优先级:
-       1) netease_hot_comments_script（可选自定义脚本）
-       2) netease_api_base（可选本地 NeteaseCloudMusicApi /comment/music）
-       3) 直连 music.163.com /api/v1/resource/comments/R_SO_4_{id}
-          （hotComments 优先，不足用 comments 补齐）
-       4) demo 回退（可选）
-  → CommentMarquee 滚动 + 本页 VideoPlayerWidget
+DownloadPage
+  ├─ 网易云 song_id → 并行 fetch_hot_comments → 评论列表
+  └─ yt-dlp 探测（normalize 抖音 modal_id 等）→ 弹窗勾选 → 加入媒体列表
+  │
+  ▼
+双击/「播放选中」→ 拉取后送首页叠弹幕（写入本地历史）
+「下载到媒体槽」→ 写入唯一媒体槽 → 可再「送首页播放」
+下次打开本页自动载入历史，无需再粘贴链接
+B 站：列表优先「音画合并」（DASH 画面+音轨）；获取时并行拉弹幕 XML
 ```
+
+**UI：** 氛围条（歌名/试例）+ 获取条（输入框 +「获取」，无单独粘贴按钮；分段音视频）+ 保存目录 + **Cookie 文件选择/清除**（写入 `yt_dlp_cookies_file`）+ 媒体卡 + 媒体列表（含历史）+ 评论/弹幕列表；无独立「高级探测」区；页级 `hot_comments_stylesheet()`。弹幕仅首页 `CommentMarquee`（速度/密度/全屏·半屏·四分之一）。
+
+**历史：** 播放/下载成功后经 `url_info_cache` 写入 `~/MusicEditingInfoCache`；启动时载入最近约 40 条；选中时回填链接输入框。
+
+**B 站：** `normalize_webpage_url` 收敛为 `/video/BVxxx`；探测列表由 `_prefer_av_merged_items` 生成「音画合并」项。下载默认**先无 Cookie**（普通画质音画通常可用），再回退浏览器 Cookie；`format` 用 `bv*+ba` 并加重试；若仍无音轨则**分轨下载 + ffmpeg 合并**。大会员高画质需 `yt_dlp_cookies_file`（Windows 上 Chrome DPAPI 常失败）。勾选音画合并时忽略「只要音频」。历史坏缓存（无声 MP4 / 误存 MP3）播放时丢弃重下。`core/bilibili_danmaku.py` 经 cid 拉弹幕 XML。
+
+**首页弹幕控制（`HomePage` + `CommentMarquee`）：**
+
+| 项 | 说明 |
+|----|------|
+| 速度 | 0.40×～2.50×，飞行中即时生效 |
+| 密度 | 0.40×～2.50×，影响生成间隔与同屏数量 |
+| 区域 | 全屏 / 半屏 / 四分之一（自画面顶部向下） |
+
+**评论导出与短视频（`core/comment_export.py`）：**
+
+| API | 状态 | 说明 |
+|-----|------|------|
+| `CommentExportPackage` / `build_export_package` | ✅ | 导出契约：评论 + 歌曲/媒体元数据 |
+| `export_comments_json` / `load_export_package` | ✅ | 完整 JSON，可供二次处理 |
+| `export_comments_ass` | ✅ | 顺序 ASS，可交给竖屏烧录 |
+| `CommentShortVideoRequest` / `render_comment_short_video` | ✅ | 最小管线：ASS + `export_vertical_short`；纯音频则先生成黑底画布。下载页「导出」可选热评短视频 MP4 |
+
+UI「导出评论…」可选 JSON / ASS / 热评短视频 MP4。完整弹幕风滤镜仍可后续增强。
 
 **配置（`app.conf`）：**
 
@@ -1062,8 +1089,12 @@ HotCommentsPage
 | `netease_api_base` | 如 `http://127.0.0.1:3000` |
 | `netease_hot_comments_script` | 自定义脚本绝对路径 |
 | `netease_hot_comments_demo` | 网络失败时是否演示数据 |
+| `yt_dlp_cookies_from_browser` | 如 `chrome` / `edge`；须退出浏览器；失败会无 Cookie 回退 |
+| `yt_dlp_cookies_file` | Netscape cookies.txt 路径（优先于 from-browser） |
 
 试例歌曲（晴天）：`186016` 或 `https://music.163.com/#/song?id=186016`
+
+**缓存：** `.cache/hot_comments/`（gitignore）；网络失败时可读缓存并标注来源。
 
 
 ### 5.3 media_cli 新增命令（§4.3 补充）
@@ -1102,6 +1133,8 @@ View 更新进度与结果预览
 
 **当前限制：** 视频 AI 超分较慢。对比区左原图 / 右超分结果，中间 1px 细线；滚轮缩放当前侧，Ctrl+滚轮两侧同步；拖拽平移。预览经 `image_loader`（OpenCV 解码）；显示为不透明底软件合成，避免缩小时残影。
 
+**长路径：** 各子 Tab 路径行使用 `ui/elided_label.ElidedPathLabel`（`ElideMiddle` + Tooltip 全文），`sizeHint` 不按完整路径回报宽度，避免缓存目录超长文件名把整页/窗口撑向右侧。
+
 ### 5.5 一键高光成片 / 静音剪掉 / 竖屏短视频
 
 ```
@@ -1133,28 +1166,33 @@ SlicePage「竖屏短视频」
 优先走捆绑 `ffmpeg.exe`，无需新 C++ CLI。静音阈值默认 `-35dB`、最短静音 `0.45s`。  
 竖屏字幕依赖 **libass/subtitles** 滤镜；失败时自动降级为无字幕竖屏。裁切不做主体追踪（MVP）。
 
-### 5.6 链接下载（yt-dlp）
+### 5.6 链接下载（yt-dlp）+ 热评三合一
 
 ```
-DownloadPage（内嵌 Tab）
-  ├─ 「下载」：粘贴 URL → 可选探测 → 下视频/音频 → 首页播放器
-  └─ 「仅获取信息」：左右分栏
-        ├─ 左：yt-dlp -J → 名称 + 列表；播放优先读该条目本地缓存
-        └─ 右：媒体缓存列表（**唯一主键 = 页面URL哈希:列表项哈希**）
-              · 同一链接可缓存多条（每种格式/每首歌各一条）
-              · 页面级：info.json（再点获取可命中）
-              · 媒体级：media/{item_key}_{歌名或格式名}[_av].ext
+DownloadPage（单页）
+  ├─ 「获取」：链接/ID → 规范化 → 探测（不下载）→ 弹窗勾选 →「加入列表」
+  │            网易云→热评；B 站→弹幕 XML（cid）
+  ├─ 「媒体列表」：含历史；B 站优先「音画合并」；双击播放；下载到媒体槽
+  └─ 「结果」：媒体槽 + 评论/弹幕 →「送首页播放」（§5.2.1）
 ```
 
 | 资源 | 路径 |
 |------|------|
 | 引擎 | `third_party/yt-dlp/yt-dlp.exe`（`scripts/download_yt_dlp.bat`） |
 | 转码 | 项目已有 FFmpeg |
-| 信息缓存 | `core/url_info_cache.py` → 默认 `~/MusicEditingInfoCache` |
+| 信息/播放历史 | `core/url_info_cache.py` → `~/MusicEditingInfoCache`（启动自动载入列表） |
+| Cookie | 本页「Cookie…」→ `yt_dlp_cookies_file`（优先）或 `yt_dlp_cookies_from_browser` |
 
-探测会解析格式列表或歌单条目；若码率/体积与元数据时长不符，提示「疑似试听片段」。
-列表支持 **双击/播放选中**（有该条目缓存则直接播，否则拉取并按主键落盘）、**删除选中 / 清空**（左列表仅 UI）；右侧列出**每条媒体缓存**，可独立播放/删除；「打开所属链接」载入左侧。
-B 站等 DASH：**仅画面**格式播放时会自动 `format+bestaudio` 合并，避免无声；列表会标注「仅画面 / 仅音频」。
+**抖音 Cookie 导出（必做）：**
+
+1. Edge/Chrome 允许「来自其他应用商店的扩展」后安装 [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)，或用 Cookie Editor 导出 **Netscape** 格式。
+2. 打开 [douyin.com](https://www.douyin.com) 并能刷视频，再点扩展 **Export**。
+3. 用记事本确认文件含多行 `.douyin.com …` 数据（**只有两行 `#` 注释的空文件无效**）。
+4. 本页点「Cookie…」选择该文件（**勿选 `app.conf`**）；写入 `yt_dlp_cookies_file` 后重新「获取」。
+
+**抖音：** `jingxuan?modal_id=` → `/video/<id>`（链接本身通常可用）。**必须**提供有效 Cookie 文件；`cookies-from-browser` 在 Windows 新版 Chrome/Edge 上常因 DPAPI/锁库失败。
+
+「获取」**不会**自动下载；勾选加入列表后点选播放。已播放/下载的条目会留在历史中，下次打开可直接点播。
 
 **注意：** 仅下载自有/授权素材；站点规则变化时更新 yt-dlp 即可。
 
@@ -1180,25 +1218,24 @@ EnhancePage / WatermarkPage 导入图片
 
 对应产品：本地播放显示字幕；实时同传按平台常见手法预留接口。
 
-#### 5.8.1 外挂字幕（播放器叠加）
+**UI 状态：** 播放器上「字幕… / 关字幕 / 实时字幕」**暂不展示**（产品未就绪）；`SubtitleTrack` / `GlVideoWidget.set_subtitle_text` / `live_subtitle` 接口仍保留，恢复时取消 `setVisible(False)` 即可。
+
+#### 5.8.1 外挂字幕（播放器叠加，接口保留）
 
 ```
-打开视频 / 点击「字幕…」
+（UI 隐藏）打开视频 / 调用 load_subtitle 接口
   │
   ▼
 View: VideoPlayerWidget
-  → 自动 find_sidecar_subtitles(同目录同名 .srt/.vtt/.ass)
-     或 QFileDialog 手动选择
-  → SubtitleTrack.from_file / text_at(position_sec)
+  → find_sidecar_subtitles / SubtitleTrack.from_file
   → GlVideoWidget.set_subtitle_text（底部半透明条）
-「关字幕」→ clear
 ```
 
 | 资源 | 路径 |
 |------|------|
 | 解析 | `client/scripts/core/subtitle_track.py`（SRT / VTT / 简易 ASS Dialogue） |
 | 显示 | `client/scripts/ui/gl_video_widget.py` `_draw_subtitle` |
-| 控件 | `client/scripts/ui/video_player.py`「字幕…」「关字幕」 |
+| 控件 | `video_player.py` 按钮已隐藏；自动同名加载暂关 |
 
 **当前限制：** 仅外挂文件，不抽内嵌轨；ASS 只取文本时间轴，不渲染样式/特效。
 
@@ -1207,7 +1244,7 @@ View: VideoPlayerWidget
 对齐 B 站/虎牙/云厂商常见工程手法（**已去掉 Whisper 离线批处理路径**）：
 
 ```
-「实时字幕」
+（UI 隐藏）「实时字幕」接口
   → LiveSubtitleConfig（app.conf live_subtitle_*）
   → create_pipeline()
         StreamingAsrBackend（Pass-1 草稿 partial）
@@ -1228,7 +1265,7 @@ View: VideoPlayerWidget
 |------|------|
 | 包 | `client/scripts/core/live_subtitle/` |
 | 配置 | `app.conf`：`live_subtitle_provider|mode|hotwords|ws_url|…` |
-| UI | `VideoPlayerWidget`「实时字幕」 |
+| UI | `VideoPlayerWidget`「实时字幕」按钮已隐藏；接口仍可调用 |
 
 **接入步骤（扩展）：** 实现 `StreamingAsrBackend` → 在 `providers.build_asr` 注册 → 设置 `live_subtitle_provider` → 从播放器/直播拉流向 `feed_pcm` 喂 16 kHz s16le mono。
 
@@ -1335,7 +1372,8 @@ MainWindow.__init__
           → weatherUpdated.emit(WeatherInfo | None)
               → _on_weather_updated
                     ├─ 文案：如「深圳 小毛毛雨 25°C · 胶片」
-                    ├─ recommend_mood(code)：晴→明亮(clahe) / 雨→胶片(film)
+                    ├─ recommend_mood(code)：晴→暖阳(warm) / 雨→雨幕(film) / 雪→雪色(cool) / 雷→雷霓(neon)…
+                    ├─ 胶囊换色 +「· 点我」+ 边框闪烁
                     └─ 可点天气胶囊 → 切首页 + VideoPlayerWidget.set_filter_mode
 ```
 
@@ -1346,17 +1384,20 @@ MainWindow.__init__
 | 滤镜落地 | `HomePage.apply_opencv_filter` → `VideoPlayerWidget.set_filter_mode` |
 | 天气 API | `https://api.open-meteo.com`（免 Key） |
 
-**今日氛围映射（WMO code）：**
+**今日氛围映射（WMO code）——电影向滤镜，观感更明显：**
 
-| 天气 | code | 推荐标签 | OpenCV 模式 |
-|------|------|----------|-------------|
-| 晴 / 晴间多云 | 0, 1 | 明亮 | `clahe` |
-| 毛毛雨/雨/阵雨/雷暴 | 50–69, 80–82, ≥95 | 胶片 | `film` |
-| 其它 | — | （无推荐） | — |
+| 天气 | code | 标签 | 滤镜 | 观感 |
+|------|------|------|------|------|
+| 晴 / 晴间多云 | 0, 1 | 暖阳 | `warm` | 金橙电影暖调（替代原 CLAHE） |
+| 多云 / 阴 | 2, 3 | 天光/阴冷 | `cool` | 青蓝冷调 |
+| 雾 | 45, 48 | 雾色 | `vintage` | 复古褪色雾感 |
+| 雨 / 阵雨 | 50–69, 80–82 | 雨幕 | `film` | 胶片颗粒+暗角 |
+| 雪 | 70–79, 85–86 | 雪色 | `cool` | 冷调干净感 |
+| 雷暴 | ≥95 | 雷霓 | `neon` | 霓虹描边（最醒目） |
 
-点击天气胶囊：切到首页并把滤镜套到本地预览播放器（需已打开视频才看得见画面变化；纯音乐无视频轨时滤镜下拉仍会切换）。首次拉到可推荐天气时，底栏提示一次「今日氛围…」。
+顶栏胶囊按氛围换色（琥珀/雨蓝/冷青/雾褐/雷紫），文案带「· 点我」，首次出现边框闪烁；点击切首页并套滤镜，底栏明确反馈。
 
-**限制：** 城市来自**本机出口 IP 粗定位**（代理/VPN 会偏到出口城市，非 GPS）；单次请求超时 5s，失败显示「天气: 暂不可用」。不自动改滤镜，需用户点击。
+**限制：** 城市来自**本机出口 IP 粗定位**（代理/VPN 会偏到出口城市，非 GPS）；单次请求超时 5s，失败显示「天气: 暂不可用」。不自动改滤镜，需用户点击；需首页已打开视频才能看见画面变化。
 
 
 
@@ -1420,6 +1461,8 @@ EnhancePage「一键调色」
 | VM | `MainViewModel.start_color_grade` |
 
 **限制：** 调色矩阵为风格化近似，非专业电影 LUT 包；`lut3d` 失败时回退 `colorbalance`/`eq`。
+
+**性能：** 预览用 `cv2.transform` + 缩边；视频导出默认**不整片拷贝**到临时目录（非 ASCII 路径才拷贝）；`lut3d` 用 `trilinear`；Win 优先 `h264_mf`；播放器暖/冷/复古走 `cv::transform`（OpenCL UMat 可用时走 GPU）。
 
 
 ### 5.14 封面 / 缩略图工厂
@@ -1572,18 +1615,20 @@ main.py
 | 视频补帧 | ✅ | EnhancePage：FFmpeg minterpolate；默认快速 blend，可选精细 MCI；默认试 15 秒 |
 | PySide6 菜单导航 UI | ✅ | MenuBar + QStackedWidget；核心/工作流/趣味/帮助分组（§3.3） |
 | Studio 视觉主题 | ✅ | `ui/theme.py` 炭黑+琥珀；顶栏胶囊；§3.3.1 |
-| 网易云热评滚动 | ✅ | `HotCommentsPage` + 外部爬虫脚本协议；默认演示数据 |
-| 首页本地播放器 | ✅ | FFmpeg 视频 + Qt 音乐；OpenGL 显示；**点击画面暂停/继续** |
+| 网易云热评滚动 | ✅ | 三合一；B 站弹幕；首页速度/密度/区域（§5.2.1） |
+| 链接下载 | ✅ | `DownloadPage` + 历史缓存；B 站音画合并；Cookie 文件选择；探测短时缓存（§5.6） |
+| 热评导出 / 短视频成片 | ✅ | JSON+ASS+竖屏热评短视频（ASS 烧录）；§5.2.1 |
+| 首页本地播放器 | ✅ | FFmpeg 视频 + Qt 音乐；OpenGL；**解码后台线程** + UV 翻转减拷贝；点击画面：未加载开文件 / 已加载暂停继续 |
 | 波形/响度可视化 | ✅ | showwavespic + ebur128；播放器下方可点击 seek（§5.12） |
 | 响度高潮切片 | ✅ | 场景「响度高潮」；ebur128 峰值成段（§5.12） |
-| 外挂字幕 | ✅ | SRT/VTT/简易 ASS；同名自动加载；`GlVideoWidget` 底部叠加 |
-| 实时字幕（流式/同传） | ⏳ | `core/live_subtitle` 接口预留（2-pass、WS 分路、云/FunASR 占位）；§5.8.2 |
+| 外挂字幕 | ⏳ | 接口保留（SubtitleTrack/叠加）；播放器按钮暂隐藏（§5.8.1） |
+| 实时字幕（流式/同传） | ⏳ | `core/live_subtitle` 接口预留；UI 暂隐藏（§5.8.2） |
 | OpenCV 帧处理 | ✅ | `FrameProcessor`：CPU + **OpenCL UMat**；标题 `OpenCV:clahe/opencl` |
 | GLEW / OpenGL 第三方 | ✅ | `third_party/opengl`；`media_player` 链 GLEW |
-| OpenGL 视频显示 | ✅ | `GlVideoWidget` 替换 QLabel；首页/热评页播放器共用 |
+| OpenGL 视频显示 | ✅ | `GlVideoWidget` 替换 QLabel；首页播放器 |
 | MVVM 双向绑定 | ✅ | Signal/Slot |
 | GPU 检测与状态栏 | ✅ | `nvidia-smi`；顶栏 `GPU: 型号` / `CPU 模式`（§3.6） |
-| 状态栏天气 | ✅ | IP 定位 + Open-Meteo；晴/雨「今日氛围」推荐滤镜（§5.11） |
+| 状态栏天气 | ✅ | IP 定位 + Open-Meteo；今日氛围用电影向滤镜（暖阳/雨幕/雪色/雷霓…）（§5.11） |
 | FFmpeg GPU 硬解（D3D11VA） | ✅ | 播放器 + `VideoDecoder`/`iterate --hw`；失败回退 CPU |
 | llama.cpp GPU 推理 | ⏳ | `n_gpu_layers` 接口已有，默认 0；需 `GGML_CUDA=ON` |
 | AI 高光识别（演讲/解说） | ✅ | 演讲金句：Vosk+LLM/金句词；无人声模型时人声段兜底 |
@@ -1594,7 +1639,6 @@ main.py
 | OpenCV 趣味滤镜 | ✅ | film / warm / cool / vintage / neon / comic / pixel；播放器下拉 |
 | LUT 一键调色 | ✅ | 增强页 Tab + lut3d 导出；与 FrameProcessor 同预设（§5.13） |
 | OpenCV GPU 滤镜 | ✅ | OpenCL `cv::UMat`（`opencv_filter_device=auto`）；失败回退 CPU |
-| 链接下载 | ✅ | `DownloadPage` + yt-dlp；「仅获取信息」左右分栏 + `url_info_cache`（歌名/片名目录） |
 | 图片 EXIF | ✅ | 图片右上角悬浮摘要 +「全部」弹窗；`exif_panel.py`（§5.7） |
 | 4K 超分 | ✅ | `EnhancePage` + Real-ESRGAN ONNX / OpenCV 双三次；`upscale` CLI；预览 `image_loader`（OpenCV） |
 | 去水印 | ✅ | `WatermarkPage` 快速(OpenCV)/精修(LaMa)；视频默认快速 + 帧批复用 |
@@ -1688,6 +1732,15 @@ x64 构建后 Python 可逐步改为 **ctypes 直接加载** `media_engine.dll`�
 2. 在 `core/live_subtitle/providers.py` 的 `build_asr` 注册，并设 `live_subtitle_provider`
 3. 可选：实现 `TranslationBackend`、填写 `live_subtitle_ws_url` 启用字幕分路
 4. 接通播放器或直播音轨 PCM → `TwoPassSubtitlePipeline.feed_pcm`
+
+### 9.7 接入热评短视频成片
+
+见 **§5.2.1** 导出表。步骤摘要：
+
+1. UI「导出评论」已写出 JSON / ASS（`core/comment_export.py`）
+2. 轻量路径：`export_comments_ass` → `MediaBridge.export_vertical_short(..., subtitle_path=ass)`
+3. 完整弹幕风：实现 `render_comment_short_video`（`style=danmaku|cards`），读 `load_export_package` 或直接吃 `HotComment` 列表
+4. 可选：封面工厂叠歌名 + 最清晰帧
 
 ---
 

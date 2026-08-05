@@ -12,19 +12,24 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent.parent
 
 
-def load_app_config() -> dict[str, str]:
-    """读取 client/resources/config/app.conf"""
+def app_config_path() -> Path:
+    """解析实际使用的 app.conf 路径（与 load_app_config 一致）。"""
     conf_path = _project_root() / "client" / "resources" / "config" / "app.conf"
     alt_paths = [
         _project_root() / "build_x64" / "bin" / "Release" / "resources" / "config" / "app.conf",
         _project_root() / "build" / "bin" / "Release" / "resources" / "config" / "app.conf",
     ]
-    path = conf_path
-    if not path.exists():
-        for alt in alt_paths:
-            if alt.exists():
-                path = alt
-                break
+    if conf_path.exists():
+        return conf_path
+    for alt in alt_paths:
+        if alt.exists():
+            return alt
+    return conf_path
+
+
+def load_app_config() -> dict[str, str]:
+    """读取 client/resources/config/app.conf"""
+    path = app_config_path()
     cfg: dict[str, str] = {}
     if not path.exists():
         return cfg
@@ -36,6 +41,83 @@ def load_app_config() -> dict[str, str]:
             k, v = line.split("=", 1)
             cfg[k.strip()] = v.strip()
     return cfg
+
+
+def update_app_config_value(key: str, value: str) -> Path:
+    """更新 app.conf 中单个键，保留注释与其它行；文件不存在则创建。"""
+    key = (key or "").strip()
+    if not key:
+        raise ValueError("配置键为空")
+    path = app_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    if path.exists():
+        lines = path.read_text(encoding="utf-8").splitlines()
+    new_line = f"{key}={value}"
+    found = False
+    out: list[str] = []
+    for line in lines:
+        raw = line.strip()
+        if raw and not raw.startswith("#") and not raw.startswith(";") and "=" in raw:
+            k, _ = raw.split("=", 1)
+            if k.strip() == key:
+                out.append(new_line)
+                found = True
+                continue
+        out.append(line)
+    if not found:
+        if out and out[-1].strip():
+            out.append("")
+        out.append(new_line)
+    text = "\n".join(out)
+    if text and not text.endswith("\n"):
+        text += "\n"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def looks_like_netscape_cookies(path: str) -> tuple[bool, str]:
+    """粗检是否为 Netscape cookies.txt（避免误选 app.conf / 空文件）。"""
+    p = Path(path or "")
+    if not p.is_file():
+        return False, "文件不存在"
+    # 禁止把本应用配置当成 Cookie
+    try:
+        if p.resolve() == app_config_path().resolve():
+            return False, "不能选择 app.conf；请选择扩展导出的 cookies.txt"
+    except OSError:
+        pass
+    name = p.name.lower()
+    if name in {"app.conf", "app.config", "settings.ini", "config.ini"}:
+        return False, f"「{p.name}」不是 Cookie 文件，请选择 cookies.txt"
+    try:
+        raw = p.read_text(encoding="utf-8", errors="replace")[:65536]
+    except OSError as e:
+        return False, f"无法读取：{e}"
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if not lines:
+        return False, "文件为空"
+    # Netscape 数据行：domain \\t flag \\t path \\t secure \\t expiry \\t name \\t value
+    data_rows = 0
+    douyin_rows = 0
+    for ln in lines:
+        if ln.startswith("#"):
+            continue
+        parts = ln.split("\t")
+        if len(parts) >= 7 and ("." in parts[0] or parts[0].startswith("#HttpOnly_")):
+            data_rows += 1
+            dom = parts[0].lower()
+            if "douyin" in dom or "iesdouyin" in dom:
+                douyin_rows += 1
+    if data_rows < 1:
+        return False, (
+            "Cookie 文件里没有有效条目（只有文件头也算无效）。\n"
+            "请先在浏览器打开 douyin.com，再用扩展 Export 导出后选择该文件。"
+        )
+    # 抖音建议有站点 Cookie；没有也不拦死（可能用于其它站）
+    if douyin_rows == 0 and data_rows > 0:
+        return True, "warn_no_douyin"
+    return True, ""
 
 
 def detect_gpu_info() -> dict:
@@ -123,6 +205,38 @@ class AppLogic:
         self.netease_hot_comments_script = cfg.get("netease_hot_comments_script", "")
         demo = cfg.get("netease_hot_comments_demo", "true").strip().lower()
         self.netease_hot_comments_demo = demo not in ("0", "false", "off", "no")
+        self.yt_dlp_cookies_from_browser = (
+            cfg.get("yt_dlp_cookies_from_browser", "") or ""
+        ).strip()
+        self.yt_dlp_cookies_file = (cfg.get("yt_dlp_cookies_file", "") or "").strip()
+        self._yt_cookies_warn = ""
+        # 启动时清掉误选的配置文件路径，避免一直探测失败
+        if self.yt_dlp_cookies_file:
+            ok, reason = looks_like_netscape_cookies(self.yt_dlp_cookies_file)
+            if not ok:
+                self.yt_dlp_cookies_file = ""
+                try:
+                    update_app_config_value("yt_dlp_cookies_file", "")
+                except Exception:
+                    pass
+            else:
+                self._yt_cookies_warn = reason if reason.startswith("warn_") else ""
+
+    def set_yt_dlp_cookies_file(self, path: str) -> str:
+        """设置 Netscape cookies.txt 路径并写入 app.conf；空串表示清除。"""
+        p = (path or "").strip()
+        if p:
+            if not Path(p).is_file():
+                raise FileNotFoundError(f"Cookie 文件不存在：{p}")
+            ok, reason = looks_like_netscape_cookies(p)
+            if not ok:
+                raise ValueError(reason or "不是有效的 Netscape cookies.txt")
+            self._yt_cookies_warn = reason if reason.startswith("warn_") else ""
+        else:
+            self._yt_cookies_warn = ""
+        self.yt_dlp_cookies_file = p
+        update_app_config_value("yt_dlp_cookies_file", p)
+        return p
 
     def toggle_gpu(self, enabled: bool):
         if enabled and not self.gpu_info["cuda_available"]:

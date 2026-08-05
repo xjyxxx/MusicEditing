@@ -9,8 +9,7 @@ from __future__ import annotations
 import math
 import os
 import time
-
-
+from concurrent.futures import Future, ThreadPoolExecutor
 
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QSurfaceFormat
@@ -113,6 +112,11 @@ class VideoPlayerWidget(QWidget):
         self._frame_interval = 1.0 / 25.0
         self._sync_timer_ms = 33
         self._last_shown_frame_ts = -1.0
+        self._decode_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="me_decode",
+        )
+        self._decode_future: Future | None = None
+        self._decode_token = 0
         self._opencv_filter = load_app_config().get("opencv_filter", "clahe")
         _cfg = load_app_config()
         _pb = _cfg.get("opencv_filter_playback", "off").strip().lower()
@@ -134,7 +138,7 @@ class VideoPlayerWidget(QWidget):
         self._title.setObjectName("MutedText")
 
         self._display = GlVideoWidget()
-        self._display.set_placeholder("请打开本地视频或音乐\n点击画面可暂停 / 继续")
+        self._display.set_placeholder("请打开本地视频或音乐\n点击画面可选文件；播放中点击可暂停 / 继续")
 
         self._btn_open = QPushButton("打开文件")
         self._btn_play = QPushButton("播放")
@@ -152,6 +156,10 @@ class VideoPlayerWidget(QWidget):
             "流式 ASR 两遍管线（草稿→稳态）+ 字幕分路接口\n"
             "当前为预留；见 app.conf live_subtitle_* 与 core/live_subtitle/"
         )
+        # 字幕能力接口保留，UI 暂不展示（产品未就绪）
+        self._btn_sub.setVisible(False)
+        self._btn_clear_sub.setVisible(False)
+        self._btn_live_sub.setVisible(False)
         self._live_pipeline = None
 
         self._waveform = WaveformWidget()
@@ -303,6 +311,11 @@ class VideoPlayerWidget(QWidget):
 
         return self._current_path
 
+    @property
+    def display_widget(self) -> QWidget:
+        """画面控件（供首页弹幕层叠放）。"""
+        return self._display
+
 
 
     @Slot()
@@ -355,7 +368,7 @@ class VideoPlayerWidget(QWidget):
 
     @Slot()
     def _on_display_clicked(self):
-        """点击画面：暂停 / 继续；未加载时打开文件。"""
+        """点击画面：未加载时与「打开文件」相同；已加载则暂停/继续。"""
         if not self._current_path:
             self._on_open()
             return
@@ -460,6 +473,9 @@ class VideoPlayerWidget(QWidget):
         self._clear_subtitles(silent=True)
         self._audio_only = False
         self._filter_combo.setEnabled(True)
+        self._decode_token += 1
+        self._decode_future = None
+        self._last_shown_frame_ts = -1.0
 
         if self._backend:
             self._backend.set_hwaccel(self._hw_decode_preferred)
@@ -523,8 +539,8 @@ class VideoPlayerWidget(QWidget):
                 self._title.setText("  ·  ".join(base))
         self._display.set_paused_overlay(True)
 
-        # 自动加载同目录同名字幕
-        self._try_autoload_sidecar_subtitles(path)
+        # 自动加载同目录同名字幕（UI 隐藏期间不自动叠加，接口仍保留）
+        # self._try_autoload_sidecar_subtitles(path)
 
         self._waveform.set_duration(self._duration_sec)
         self._start_audio_viz(self._current_path)
@@ -783,6 +799,9 @@ class VideoPlayerWidget(QWidget):
             return
         self._position_sec = max(0.0, min(float(position_sec), self._duration_sec))
         self._progress.setValue(int(self._position_sec * 1000))
+        self._decode_token += 1
+        self._decode_future = None
+        self._last_shown_frame_ts = -1.0
         if self._audio_only:
             self._audio.seek(self._position_sec)
             self._update_time_label()
@@ -792,10 +811,18 @@ class VideoPlayerWidget(QWidget):
         if not self._backend:
             return
         try:
+            self._title.setText(self._title.text().split(" · ")[0] + " · Seek…")
             self._backend.seek(self._position_sec)
             if self._has_audio:
                 self._audio.seek(self._position_sec)
-            self._pull_and_show_frame()
+            # Seek 后同步拉一帧，避免黑屏等待
+            frame = self._backend.next_frame(
+                min_ts=max(0.0, self._position_sec - self._frame_interval * 0.5),
+                apply_filter=None,
+            )
+            if frame:
+                ts, rgb, w, h = frame
+                self._show_frame(ts, rgb, w, h)
         except RuntimeError as e:
             self._title.setText(f"Seek 失败: {e}")
             return
@@ -937,7 +964,7 @@ class VideoPlayerWidget(QWidget):
         return True
 
     def _sync_video_to_audio(self) -> bool | None:
-        """每 tick 取下一帧显示；target 对齐 want_idx，避免重复取帧丢弃"""
+        """音频时钟对齐：解码在后台线程，UI 只贴帧。"""
         if not self._backend:
             return False
 
@@ -957,42 +984,60 @@ class VideoPlayerWidget(QWidget):
         if audio_idx <= shown_idx:
             return True
 
+        # 收割后台解码结果
+        fut = self._decode_future
+        if fut is not None:
+            if not fut.done():
+                return True
+            self._decode_future = None
+            try:
+                frame = fut.result()
+            except RuntimeError as e:
+                log.error("同步解码失败: %s", e)
+                self._title.setText(f"解码错误: {e}")
+                self._playing = False
+                self._timer.stop()
+                return None
+            except Exception as e:
+                log.error("同步解码异常: %s", e)
+                return True
+            if frame is None:
+                return None
+            if frame is False:
+                return True
+            ts, rgb, w, h = frame
+            new_idx = self._frame_index(ts)
+            paint_t0 = time.monotonic()
+            self._show_frame(ts, rgb, w, h, update_progress=False)
+            paint_ms = int((time.monotonic() - paint_t0) * 1000)
+            stats = self._backend.last_frame_stats
+            if stats.decode_ms > 25 or paint_ms > 15:
+                log.debug(
+                    "同步 idx=%d/%d ts=%.3f audio=%.3f decode=%dms paint=%dms skipped=%d",
+                    new_idx, audio_idx, ts, audio_sec,
+                    stats.decode_ms, paint_ms, stats.skipped,
+                )
+            shown_idx = self._frame_index(self._last_shown_frame_ts)
+            if audio_idx <= shown_idx:
+                return True
+
+        # 提交下一帧解码（若空闲）
+        if self._decode_future is not None and not self._decode_future.done():
+            return True
+
         want_idx = shown_idx + 1
         if audio_idx - shown_idx > 6:
             want_idx = audio_idx - 1
-
         target_min = max(0.0, want_idx * fi - fi * 0.02)
-        t0 = time.monotonic()
+        token = self._decode_token
+        backend = self._backend
 
-        try:
-            # None：跟随 set_playback_filter；此前写死 False 导致趣味滤镜完全看不见
-            frame = self._backend.next_frame(min_ts=target_min, apply_filter=None)
-        except RuntimeError as e:
-            log.error("同步解码失败: %s", e)
-            self._title.setText(f"解码错误: {e}")
-            self._playing = False
-            self._timer.stop()
-            return None
-        if frame is None:
-            return None
+        def _job():
+            if token != self._decode_token:
+                return False  # 已失效
+            return backend.next_frame(min_ts=target_min, apply_filter=None)
 
-        ts, rgb, w, h = frame
-        new_idx = self._frame_index(ts)
-        if new_idx < want_idx:
-            return True
-
-        stats = self._backend.last_frame_stats
-        ui_ms = int((time.monotonic() - t0) * 1000)
-        paint_t0 = time.monotonic()
-        self._show_frame(ts, rgb, w, h, update_progress=False)
-        paint_ms = int((time.monotonic() - paint_t0) * 1000)
-
-        if stats.decode_ms > 25 or ui_ms > 30 or paint_ms > 15:
-            log.debug(
-                "同步 idx=%d/%d want=%d ts=%.3f audio=%.3f decode=%dms ui=%dms paint=%dms skipped=%d",
-                new_idx, audio_idx, want_idx, ts, audio_sec,
-                stats.decode_ms, ui_ms, paint_ms, stats.skipped,
-            )
+        self._decode_future = self._decode_pool.submit(_job)
         return True
 
     def _show_frame(self, ts: float, rgb: bytes, w: int, h: int, update_progress: bool = True):
@@ -1001,43 +1046,47 @@ class VideoPlayerWidget(QWidget):
             self._position_sec = ts
             self._progress.setValue(int(ts * 1000))
             self._update_time_label()
-
-        need = w * h * 3
-        if self._frame_rgb_buf is None or len(self._frame_rgb_buf) != need:
-            self._frame_rgb_buf = bytearray(need)
-        self._frame_rgb_buf[:] = rgb
-
-        self._display.set_rgb_frame(self._frame_rgb_buf, w, h)
+        # 不再做 bytearray 二次拷贝，直接交给 OpenGL 上传路径
+        self._display.set_rgb_frame(rgb, w, h)
 
     def _pull_and_show_frame(self, apply_filter: bool | None = None) -> bool | None:
-
+        """无音轨或单次拉帧：同样走后台解码，避免卡 UI。"""
         if not self._backend:
-
             return False
 
-        try:
-            min_ts = max(0.0, self._position_sec - self._frame_interval * 0.5)
-            frame = self._backend.next_frame(min_ts=min_ts, apply_filter=apply_filter)
+        fut = self._decode_future
+        if fut is not None and not fut.done():
+            return True
+        if fut is not None and fut.done():
+            self._decode_future = None
+            try:
+                frame = fut.result()
+            except RuntimeError as e:
+                self._title.setText(f"解码错误: {e}")
+                self._playing = False
+                self._timer.stop()
+                return None
+            except Exception:
+                return True
+            if frame is None:
+                return None
+            if frame is False:
+                return True
+            ts, rgb, w, h = frame
+            self._position_sec = ts
+            self._show_frame(ts, rgb, w, h)
+            return True
 
-        except RuntimeError as e:
+        min_ts = max(0.0, self._position_sec - self._frame_interval * 0.5)
+        token = self._decode_token
+        backend = self._backend
 
-            self._title.setText(f"解码错误: {e}")
+        def _job():
+            if token != self._decode_token:
+                return False
+            return backend.next_frame(min_ts=min_ts, apply_filter=apply_filter)
 
-            self._playing = False
-
-            self._timer.stop()
-
-            return None
-
-        if frame is None:
-
-            return None
-
-
-
-        ts, rgb, w, h = frame
-        self._position_sec = ts
-        self._show_frame(ts, rgb, w, h)
+        self._decode_future = self._decode_pool.submit(_job)
         return True
 
 
@@ -1183,6 +1232,14 @@ class VideoPlayerWidget(QWidget):
         self._playing = False
         self._has_audio = False
         self._current_path = ""
+        self._decode_token += 1
+        self._decode_future = None
+        try:
+            self._decode_pool.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            self._decode_pool.shutdown(wait=False)
+        except Exception:
+            pass
         if self._live_pipeline is not None:
             try:
                 self._live_pipeline.stop()

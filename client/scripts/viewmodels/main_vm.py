@@ -157,6 +157,12 @@ class MainViewModel(QObject):
             self._bridge.set_prefer_hw_decode(self._app.prefer_hw_decode)
             # 超分 / LaMa：有 NVIDIA 时尝试 ORT CUDA EP（失败会回退 CPU）
             self._bridge.set_prefer_cuda(self._app.use_gpu)
+            self._bridge.set_yt_dlp_cookies_from_browser(
+                getattr(self._app, "yt_dlp_cookies_from_browser", "") or ""
+            )
+            self._bridge.set_yt_dlp_cookies_file(
+                getattr(self._app, "yt_dlp_cookies_file", "") or ""
+            )
 
             self._status_message = f"引擎就绪 (FFmpeg {self._bridge.ffmpeg_version})"
 
@@ -233,6 +239,18 @@ class MainViewModel(QObject):
 
             self.errorOccurred.emit(f"文件不存在: {file_path}")
 
+            return
+
+        # 纯音频由首页播放器走 QMediaPlayer；勿 probe_video（会报导入失败）
+        _audio_exts = {
+            ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".wma", ".opus",
+            ".aiff", ".ape",
+        }
+        if os.path.splitext(file_path)[1].lower() in _audio_exts:
+            self._status_message = (
+                f"已打开音频: {os.path.basename(file_path)}（不作为视频导入）"
+            )
+            self.statusMessageChanged.emit(self._status_message)
             return
 
 
@@ -1372,7 +1390,17 @@ class MainViewModel(QObject):
 
         self._app.output_dir = path
 
-
+    @Slot(str)
+    def set_yt_dlp_cookies_file(self, path: str):
+        """设置/清除 yt-dlp cookies 文件，并同步到 MediaBridge。"""
+        p = self._app.set_yt_dlp_cookies_file(path or "")
+        if self._bridge:
+            self._bridge.set_yt_dlp_cookies_file(p)
+        if p:
+            self._status_message = f"已设置 Cookie 文件: {os.path.basename(p)}"
+        else:
+            self._status_message = "已清除 Cookie 文件（将尝试浏览器 Cookie）"
+        self.statusMessageChanged.emit(self._status_message)
 
     @Slot(str, bool)
     def export_highlights(self, output_dir: str, concat: bool = True):
@@ -1603,6 +1631,8 @@ class MainViewModel(QObject):
                 info = self._bridge.probe_url(url, list_entries=list_entries)
                 self.downloadProbeReady.emit(info)
             except Exception as e:
+                import logging
+                logging.getLogger("MusicEditing").exception("探测失败 url=%s", url)
                 self.errorOccurred.emit(f"探测失败: {e}")
 
         import threading
@@ -1640,8 +1670,14 @@ class MainViewModel(QObject):
         import threading
         threading.Thread(target=run, daemon=True).start()
 
-    @Slot(str, str, bool)
-    def start_url_download(self, url: str, output_dir: str, audio_only: bool = False):
+    @Slot(str, str, bool, str)
+    def start_url_download(
+        self,
+        url: str,
+        output_dir: str,
+        audio_only: bool = False,
+        format_id: str = "",
+    ):
         if not self._bridge:
             self.errorOccurred.emit("媒体引擎未加载")
             return
@@ -1669,7 +1705,11 @@ class MainViewModel(QObject):
                     self.downloadProgress.emit(task.task_id, p, msg)
 
                 path = self._bridge.download_url(
-                    url, output_dir, audio_only=audio_only, on_progress=report,
+                    url,
+                    output_dir,
+                    audio_only=audio_only,
+                    format_id=format_id or "",
+                    on_progress=report,
                 )
                 task.state = TaskState.COMPLETED
                 task.progress = 100.0
@@ -1680,6 +1720,8 @@ class MainViewModel(QObject):
             except Exception as e:
                 task.state = TaskState.FAILED
                 self.taskStateChanged.emit(task.task_id, TaskState.FAILED)
+                import logging
+                logging.getLogger("MusicEditing").exception("下载失败 url=%s", url)
                 self.errorOccurred.emit(f"下载失败: {e}")
 
         import threading

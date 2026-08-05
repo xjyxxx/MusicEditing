@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import threading
 
-from PySide6.QtCore import Qt, Signal, Slot, QEvent, QSize, QTimer
+from PySide6.QtCore import Qt, Signal, Slot, QEvent, QPoint, QSize, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout, QGroupBox,
@@ -15,22 +15,25 @@ from PySide6.QtWidgets import (
 )
 
 from core.time_format import format_range, format_timestamp
-from ui.video_player import VideoPlayerWidget
-from ui.watermark_page import WatermarkPage
-from ui.enhance_page import EnhancePage
-from ui.hot_comments_page import HotCommentsPage
-from ui.download_page import DownloadPage
-from ui.pipeline_queue_page import PipelineQueuePage
-from ui.cover_page import CoverPage
 from ui.audio_fun_page import AudioFunPage
 from ui.bgm_page import BgmPage
+from ui.comment_marquee import (
+    AREA_FULL, AREA_HALF, AREA_QUARTER, CommentMarquee,
+)
+from ui.cover_page import CoverPage
+from ui.download_page import DownloadPage
+from ui.enhance_page import EnhancePage
 from ui.highlight_timeline import HighlightTimelineWidget
+from ui.pipeline_queue_page import PipelineQueuePage
 from ui.theme import app_stylesheet
+from ui.video_player import VideoPlayerWidget, _is_audio_file
+from ui.watermark_page import WatermarkPage
 from ui.workflow_link import (
     MENU_GROUPS,
     PAGE_TITLES,
     TAB_AUDIO_FUN,
     TAB_COVER,
+    TAB_DOWNLOAD,
     TAB_ENHANCE,
     TAB_HOME,
     TAB_WATERMARK,
@@ -43,6 +46,7 @@ class HomePage(QWidget):
     def __init__(self, vm: MainViewModel, parent=None):
         super().__init__(parent)
         self._vm = vm
+        self._loading_with_comments = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 4, 8, 8)
         layout.setSpacing(10)
@@ -50,20 +54,141 @@ class HomePage(QWidget):
         title = QLabel("MusicEditing")
         title.setObjectName("HomeTitle")
         layout.addWidget(title)
-        subtitle = QLabel("本地音视频打开 · 预览 · 点击画面暂停/继续")
+        subtitle = QLabel("本地音视频打开 · 预览 · 点击画面暂停/继续 · 可叠弹幕")
         subtitle.setObjectName("HomeSubtitle")
         layout.addWidget(subtitle)
 
         player_box = QGroupBox("本地预览")
         player_layout = QVBoxLayout(player_box)
+        self._player_stage = QWidget()
+        stage_layout = QVBoxLayout(self._player_stage)
+        stage_layout.setContentsMargins(0, 0, 0, 0)
+        stage_layout.setSpacing(0)
         self._player = VideoPlayerWidget()
-        player_layout.addWidget(self._player)
+        stage_layout.addWidget(self._player)
+        # 弹幕叠在画面区域（相对 stage 定位，避免做 OpenGL 子控件）
+        self._marquee = CommentMarquee(self._player_stage)
+        player_layout.addWidget(self._player_stage, 1)
+
+        # 弹幕控制：速度 / 密度 / 显示区域
+        danmaku_bar = QHBoxLayout()
+        danmaku_bar.setSpacing(10)
+        cap = QLabel("弹幕")
+        cap.setObjectName("MutedText")
+        danmaku_bar.addWidget(cap)
+
+        danmaku_bar.addWidget(QLabel("速度"))
+        self._dm_speed = QSlider(Qt.Horizontal)
+        self._dm_speed.setRange(40, 250)  # ×0.01 → 0.40～2.50
+        self._dm_speed.setValue(100)
+        self._dm_speed.setFixedWidth(120)
+        self._dm_speed.setToolTip("弹幕滚动速度")
+        self._dm_speed_label = QLabel("1.00×")
+        self._dm_speed_label.setObjectName("MutedText")
+        self._dm_speed_label.setMinimumWidth(40)
+        danmaku_bar.addWidget(self._dm_speed)
+        danmaku_bar.addWidget(self._dm_speed_label)
+
+        danmaku_bar.addWidget(QLabel("密度"))
+        self._dm_density = QSlider(Qt.Horizontal)
+        self._dm_density.setRange(40, 250)
+        self._dm_density.setValue(100)
+        self._dm_density.setFixedWidth(120)
+        self._dm_density.setToolTip("弹幕生成密度与同屏数量")
+        self._dm_density_label = QLabel("1.00×")
+        self._dm_density_label.setObjectName("MutedText")
+        self._dm_density_label.setMinimumWidth(40)
+        danmaku_bar.addWidget(self._dm_density)
+        danmaku_bar.addWidget(self._dm_density_label)
+
+        danmaku_bar.addWidget(QLabel("区域"))
+        self._dm_area = QComboBox()
+        self._dm_area.addItem("全屏", AREA_FULL)
+        self._dm_area.addItem("半屏", AREA_HALF)
+        self._dm_area.addItem("四分之一", AREA_QUARTER)
+        self._dm_area.setToolTip("弹幕占用画面高度（自顶部向下）")
+        danmaku_bar.addWidget(self._dm_area)
+        danmaku_bar.addStretch()
+        player_layout.addLayout(danmaku_bar)
+
         layout.addWidget(player_box, 1)
 
-        # 打开视频时同步导入到 ViewModel（供其他模块使用）
-        self._player.fileOpened.connect(vm.import_video)
+        self._dm_speed.valueChanged.connect(self._on_dm_speed)
+        self._dm_density.valueChanged.connect(self._on_dm_density)
+        self._dm_area.currentIndexChanged.connect(self._on_dm_area)
+
+        # 打开视频时同步导入到 ViewModel（供其他模块使用）；纯音频不走 probe_video
+        self._player.fileOpened.connect(self._on_player_opened_for_vm)
+        self._player.fileOpened.connect(self._on_player_file_opened)
         vm.videoLoaded.connect(self._on_video_loaded)
-        vm.downloadFinished.connect(self._on_download_finished)
+        # 下载完成不自动打开：由「送首页播放」/ previewPlayRequested 显式触发
+
+        # 画面尺寸变化时重铺弹幕层
+        self._player.display_widget.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if obj is self._player.display_widget and event.type() in (
+            QEvent.Resize, QEvent.Show,
+        ):
+            self._layout_marquee()
+        return super().eventFilter(obj, event)
+
+    @Slot(int)
+    def _on_dm_speed(self, value: int):
+        scale = value / 100.0
+        self._dm_speed_label.setText(f"{scale:.2f}×")
+        self._marquee.set_speed(scale)
+
+    @Slot(int)
+    def _on_dm_density(self, value: int):
+        dens = value / 100.0
+        self._dm_density_label.setText(f"{dens:.2f}×")
+        self._marquee.set_density(dens)
+
+    @Slot(int)
+    def _on_dm_area(self, _index: int):
+        mode = self._dm_area.currentData()
+        self._marquee.set_area_mode(str(mode or AREA_FULL))
+
+    @Slot(str)
+    def _on_player_opened_for_vm(self, path: str):
+        """音频用 Qt 播放即可；仅视频才导入 ViewModel（避免 probe_video 报「导入失败」）。"""
+        if not path or _is_audio_file(path):
+            return
+        self._vm.import_video(path)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._layout_marquee()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._layout_marquee()
+
+    def _layout_marquee(self):
+        host = self._player.display_widget
+        top_left = host.mapTo(self._player_stage, QPoint(0, 0))
+        w = max(1, host.width())
+        h = max(1, host.height())
+        self._marquee.setGeometry(top_left.x(), top_left.y(), w, h)
+        self._marquee.raise_()
+
+    @Slot(str)
+    def _on_player_file_opened(self, _path: str):
+        if not self._loading_with_comments:
+            self._marquee.stop()
+
+    def play_with_comments(self, path: str, comments, auto_play: bool = True):
+        """打开媒体并叠加热评弹幕（由下载页「送首页播放」触发）。"""
+        if not path or not os.path.isfile(path):
+            return
+        self._loading_with_comments = True
+        try:
+            self._player.open_file(path, auto_play=auto_play)
+            self._layout_marquee()
+            self._marquee.set_comments(list(comments or []))
+        finally:
+            self._loading_with_comments = False
 
     @Slot(object)
     def _on_video_loaded(self, video):
@@ -75,12 +200,8 @@ class HomePage(QWidget):
         if cur != vid:
             self._player.load_from_video_model(video, auto_play=False)
 
-    @Slot(str)
-    def _on_download_finished(self, path: str):
-        if path and os.path.isfile(path):
-            self._player.open_file(path, auto_play=False)
-
     def shutdown_player(self):
+        self._marquee.stop()
         self._player.shutdown()
 
     def apply_opencv_filter(self, mode: str) -> bool:
@@ -90,7 +211,6 @@ class HomePage(QWidget):
     def prompt_open_media(self):
         """菜单「打开文件」：弹出播放器文件对话框。"""
         self._player._on_open()  # noqa: SLF001
-
 
 class SlicePage(QWidget):
     """智能切片页：分析高光 → 缩略图时间轴 + 列表。"""
@@ -662,6 +782,15 @@ class MainWindow(QMainWindow):
         self._vm = MainViewModel()
         self._weather_mood = None
         self._weather_mood_hinted = False
+        self._weather_pulse_timer: QTimer | None = None
+        self._weather_pulse_n = 0
+        self._weather_base_qss = ""
+        self._weather_default_qss = (
+            "QLabel#ChromeWeather {"
+            " background: #2A4A48; color: #B8EDE4; border: 1px solid #3A6A64;"
+            " border-radius: 999px; padding: 4px 12px; font-size: 12px;"
+            " }"
+        )
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -716,7 +845,6 @@ class MainWindow(QMainWindow):
         self._slice_page = SlicePage(self._vm, handoff=self.open_with_video)
         self._enhance_page = EnhancePage(self._vm, handoff=self.open_with_video)
         self._watermark_page = WatermarkPage(self._vm, handoff=self.open_with_video)
-        self._hot_comments_page = HotCommentsPage(self._vm)
         self._download_page = DownloadPage(self._vm)
         self._pipeline_page = PipelineQueuePage(self._vm)
         self._cover_page = CoverPage(self._vm)
@@ -730,7 +858,6 @@ class MainWindow(QMainWindow):
             self._slice_page,
             self._enhance_page,
             self._watermark_page,
-            self._hot_comments_page,
             self._download_page,
             self._pipeline_page,
             self._cover_page,
@@ -747,8 +874,8 @@ class MainWindow(QMainWindow):
         self._build_menus()
         self._goto_page(TAB_HOME)
 
-        self._vm.downloadFinished.connect(self._on_download_to_home)
         self._download_page.previewPlayRequested.connect(self._on_preview_play)
+        self._download_page.playWithCommentsRequested.connect(self._on_play_with_comments)
 
         # 底部状态
         self._status_label = QLabel(self._vm.status_message)
@@ -793,11 +920,14 @@ class MainWindow(QMainWindow):
         from core.weather_service import (
             format_status_error,
             format_status_text,
+            mood_pill_stylesheet,
             recommend_mood,
         )
 
         if info is None:
             self._weather_mood = None
+            self._stop_weather_pulse()
+            self._weather_label.setStyleSheet(self._weather_default_qss)
             self._weather_label.setText(format_status_error())
             self._weather_label.setToolTip("天气暂不可用（网络或定位失败）")
             self._weather_label.setCursor(Qt.ArrowCursor)
@@ -807,31 +937,86 @@ class MainWindow(QMainWindow):
         self._weather_mood = mood
         self._weather_label.setText(format_status_text(info))
         if mood:
+            self._weather_base_qss = mood_pill_stylesheet(mood.accent)
+            self._weather_label.setStyleSheet(self._weather_base_qss)
             tip = (
                 f"{info.city} · {info.weather_text} {info.temperature_c:.0f}°C\n"
-                f"今日氛围：{mood.reason}\n"
-                f"点击应用「{mood.label}」滤镜到首页播放器"
+                f"今日氛围：{mood.label}（{mood.reason}）\n"
+                f"{mood.cta or '点击套用到首页播放器'}"
             )
             self._weather_label.setToolTip(tip)
             self._weather_label.setCursor(Qt.PointingHandCursor)
+            self._start_weather_pulse()
             if not self._weather_mood_hinted:
                 self._weather_mood_hinted = True
                 self._status_label.setText(
-                    f"今日氛围 · {mood.reason}，点击顶栏天气可套用「{mood.label}」"
+                    f"今日氛围 · {mood.glyph} {mood.label}：{mood.reason}。"
+                    f"点击顶栏天气胶囊即可套用"
                 )
         else:
+            self._stop_weather_pulse()
+            self._weather_label.setStyleSheet(self._weather_default_qss)
             self._weather_label.setToolTip(
                 f"{info.city} · {info.weather_text} {info.temperature_c:.0f}°C\n"
                 "按本机公网 IP 定位，经 Open-Meteo 显示天气"
             )
             self._weather_label.setCursor(Qt.ArrowCursor)
 
-    def eventFilter(self, obj, event):
-        if obj is self._weather_label and event.type() == QEvent.Type.MouseButtonRelease:
-            if event.button() == Qt.LeftButton:
-                self._on_weather_clicked()
-                return True
-        return super().eventFilter(obj, event)
+    def _start_weather_pulse(self):
+        """胶囊边框闪两下，提示「可点」。"""
+        self._stop_weather_pulse()
+        self._weather_pulse_n = 0
+        self._weather_pulse_timer = QTimer(self)
+        self._weather_pulse_timer.setInterval(380)
+        self._weather_pulse_timer.timeout.connect(self._on_weather_pulse_tick)
+        self._weather_pulse_timer.start()
+
+    def _stop_weather_pulse(self):
+        if self._weather_pulse_timer is not None:
+            self._weather_pulse_timer.stop()
+            self._weather_pulse_timer.deleteLater()
+            self._weather_pulse_timer = None
+        if self._weather_mood is not None and self._weather_base_qss:
+            self._weather_label.setStyleSheet(self._weather_base_qss)
+
+    def _on_weather_pulse_tick(self):
+        self._weather_pulse_n += 1
+        if self._weather_pulse_n > 6:
+            self._stop_weather_pulse()
+            return
+        # 奇偶切换：加亮边框
+        if self._weather_pulse_n % 2 == 1:
+            self._weather_label.setStyleSheet(
+                self._weather_base_qss.replace(
+                    "border: 1px solid",
+                    "border: 2px solid",
+                )
+            )
+        else:
+            self._weather_label.setStyleSheet(self._weather_base_qss)
+
+    def _on_weather_clicked(self):
+        mood = self._weather_mood
+        if mood is None:
+            return
+        self._stop_weather_pulse()
+        self._goto_page(TAB_HOME)
+        ok = self._home_page.apply_opencv_filter(mood.filter_mode)
+        if ok:
+            self._status_label.setText(
+                f"今日氛围 · 已套用「{mood.glyph} {mood.label}」"
+                f"（{mood.reason}）。首页滤镜下拉可改回"
+            )
+            # 短暂加亮胶囊，表示已生效
+            if self._weather_base_qss:
+                self._weather_label.setStyleSheet(
+                    self._weather_base_qss.replace("font-weight: 600", "font-weight: 700")
+                )
+        else:
+            self._status_label.setText(
+                f"今日氛围 · 无法应用「{mood.label}」"
+                f"（请先在首页打开一段视频，再点天气胶囊）"
+            )
 
     def _build_menus(self):
         """菜单栏导航：文件 / 核心 / 工作流 / 趣味 / 帮助。"""
@@ -858,11 +1043,16 @@ class MainWindow(QMainWindow):
                 act = QAction(label, self)
                 act.setCheckable(True)
                 act.setData(page_index)
-                act.triggered.connect(
-                    lambda _checked=False, idx=page_index: self._goto_page(idx)
-                )
+                if label == "热评弹幕":
+                    act.triggered.connect(self._goto_hot_comments_tab)
+                else:
+                    act.triggered.connect(
+                        lambda _checked=False, idx=page_index: self._goto_page(idx)
+                    )
                 self._nav_group.addAction(act)
-                self._nav_actions[page_index] = act
+                # 同页多入口时保留先注册的（工作流「下载与热评」）
+                if page_index not in self._nav_actions:
+                    self._nav_actions[page_index] = act
                 menu.addAction(act)
 
         if help_menu is not None:
@@ -884,6 +1074,12 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"MusicEditing · {title}")
 
     @Slot()
+    def _goto_hot_comments_tab(self):
+        """趣味菜单：进入下载与热评页并滚到评论结果区。"""
+        self._goto_page(TAB_DOWNLOAD)
+        self._download_page.focus_comments()
+
+    @Slot()
     def _on_menu_open_media(self):
         self._goto_page(TAB_HOME)
         self._home_page.prompt_open_media()
@@ -898,20 +1094,12 @@ class MainWindow(QMainWindow):
             "功能入口在顶部菜单：核心 / 工作流 / 趣味 / 帮助。",
         )
 
-    def _on_weather_clicked(self):
-        mood = self._weather_mood
-        if mood is None:
-            return
-        self._goto_page(TAB_HOME)
-        ok = self._home_page.apply_opencv_filter(mood.filter_mode)
-        if ok:
-            self._status_label.setText(
-                f"今日氛围 · 已套用「{mood.label}」滤镜（{mood.reason}）"
-            )
-        else:
-            self._status_label.setText(
-                f"今日氛围 · 无法应用「{mood.label}」滤镜（播放器未就绪或模式不可用）"
-            )
+    def eventFilter(self, obj, event):
+        if obj is self._weather_label and event.type() == QEvent.Type.MouseButtonRelease:
+            if event.button() == Qt.LeftButton:
+                self._on_weather_clicked()
+                return True
+        return super().eventFilter(obj, event)
 
     def open_with_video(self, path: str, tab_index: int) -> None:
         """切功能页 + 异步 import_video（probe 在后台，不卡主线程）。"""
@@ -931,18 +1119,25 @@ class MainWindow(QMainWindow):
         self._vm.import_video(path)
 
     @Slot(str)
-    def _on_download_to_home(self, path: str):
-        """下载/预览完成后切到首页（文件由 HomePage.downloadFinished 加载）。"""
-        if path and os.path.isfile(path):
-            self._goto_page(TAB_HOME)
-
-    @Slot(str)
     def _on_preview_play(self, path: str):
-        """列表试听：打开并自动播放。"""
+        """列表试听：打开并自动播放（无热评）。"""
         if not path or not os.path.isfile(path):
             return
-        self._home_page._player.open_file(path, auto_play=True)
+        self._home_page.play_with_comments(path, [], auto_play=True)
         self._goto_page(TAB_HOME)
+
+    @Slot(str, object)
+    def _on_play_with_comments(self, path: str, comments):
+        """「送首页播放」：打开媒体并叠弹幕（评论可为空）。"""
+        if not path or not os.path.isfile(path):
+            return
+        self._home_page.play_with_comments(path, comments, auto_play=True)
+        self._goto_page(TAB_HOME)
+        n = len(comments) if comments else 0
+        if n:
+            self._status_label.setText(f"首页播放 · 已叠加 {n} 条热评弹幕")
+        else:
+            self._status_label.setText("首页播放")
 
     def shutdown(self):
         """退出前释放播放器与子进程"""
@@ -950,8 +1145,8 @@ class MainWindow(QMainWindow):
             return
         self._shutdown_done = True
         self._home_page.shutdown_player()
-        if getattr(self, "_hot_comments_page", None):
-            self._hot_comments_page.shutdown()
+        if getattr(self, "_download_page", None):
+            self._download_page.shutdown()
 
     def closeEvent(self, event):
         self.shutdown()
