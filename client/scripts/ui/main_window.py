@@ -25,6 +25,7 @@ from ui.download_page import DownloadPage
 from ui.enhance_page import EnhancePage
 from ui.highlight_timeline import HighlightTimelineWidget
 from ui.pipeline_queue_page import PipelineQueuePage
+from ui.profile_page import ProfilePage
 from ui.theme import app_stylesheet
 from ui.video_player import VideoPlayerWidget, _is_audio_file
 from ui.watermark_page import WatermarkPage
@@ -655,7 +656,6 @@ class SlicePage(QWidget):
         self._vm.export_vertical_short(
             out,
             crop_bias=bias,
-            burn_subtitles=True,
             use_highlights=use_hl,
         )
 
@@ -850,9 +850,7 @@ class MainWindow(QMainWindow):
         self._cover_page = CoverPage(self._vm)
         self._audio_fun_page = AudioFunPage(self._vm)
         self._bgm_page = BgmPage(self._vm)
-        self._profile_page = PlaceholderPage(
-            "个人中心", "卡密兑换、版本更新、关于软件。",
-        )
+        self._profile_page = ProfilePage(self._vm)
         for page in (
             self._home_page,
             self._slice_page,

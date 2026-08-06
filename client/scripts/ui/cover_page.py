@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.cover_factory import COVER_SIZES
+from ui.elided_label import ElidedPathLabel
 from viewmodels.main_vm import MainViewModel
 
 
@@ -37,9 +38,7 @@ class CoverPage(QWidget):
         src_box = QGroupBox("视频")
         src_lay = QVBoxLayout(src_box)
         row = QHBoxLayout()
-        self._path_label = QLabel("未选择文件")
-        self._path_label.setObjectName("InfoText")
-        self._path_label.setWordWrap(True)
+        self._path_label = ElidedPathLabel("未选择文件", object_name="InfoText")
         btn_open = QPushButton("打开视频…")
         btn_open.setObjectName("GhostBtn")
         btn_open.clicked.connect(self._on_open)

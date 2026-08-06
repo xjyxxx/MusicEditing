@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 
 from core.bgm_mix import MIX_MODES
 from core.demucs_sep import probe_demucs
+from ui.elided_label import ElidedPathLabel
 from viewmodels.main_vm import MainViewModel
 
 
@@ -63,9 +64,7 @@ class BgmPage(QWidget):
         vbox = QGroupBox("成片视频")
         vl = QVBoxLayout(vbox)
         row = QHBoxLayout()
-        self._video_label = QLabel("未选择")
-        self._video_label.setObjectName("InfoText")
-        self._video_label.setWordWrap(True)
+        self._video_label = ElidedPathLabel("未选择", object_name="InfoText")
         b1 = QPushButton("选择视频…")
         b1.clicked.connect(self._pick_video)
         b2 = QPushButton("用当前导入")
@@ -79,9 +78,7 @@ class BgmPage(QWidget):
         bbox = QGroupBox("背景音乐（可从「链接下载」下好的 mp3）")
         bl = QVBoxLayout(bbox)
         row2 = QHBoxLayout()
-        self._bgm_label = QLabel("未选择")
-        self._bgm_label.setObjectName("InfoText")
-        self._bgm_label.setWordWrap(True)
+        self._bgm_label = ElidedPathLabel("未选择", object_name="InfoText")
         b3 = QPushButton("选择音频…")
         b3.clicked.connect(self._pick_bgm)
         row2.addWidget(self._bgm_label, 1)
@@ -145,9 +142,7 @@ class BgmPage(QWidget):
         src = QGroupBox("待分离音频 / 含音轨视频")
         sl = QVBoxLayout(src)
         row = QHBoxLayout()
-        self._sep_label = QLabel("未选择")
-        self._sep_label.setObjectName("InfoText")
-        self._sep_label.setWordWrap(True)
+        self._sep_label = ElidedPathLabel("未选择", object_name="InfoText")
         b1 = QPushButton("选择…")
         b1.clicked.connect(self._pick_sep)
         b2 = QPushButton("用当前导入")

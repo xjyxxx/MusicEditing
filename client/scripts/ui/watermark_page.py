@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.image_loader import load_preview
+from ui.elided_label import ElidedPathLabel
 from ui.exif_panel import ExifPanel, attach_exif_overlay
 from ui.region_selector import RegionSelectorWidget
 from ui.workflow_link import TAB_ENHANCE, ask_video_handoff
@@ -72,8 +73,7 @@ class WatermarkPage(QWidget):
         self._progress.setVisible(False)
         root.addWidget(self._progress)
 
-        self._status = QLabel("")
-        self._status.setObjectName("InfoText")
+        self._status = ElidedPathLabel("", object_name="InfoText")
         root.addWidget(self._status)
 
         vm.watermarkProgress.connect(self._on_progress)
@@ -86,7 +86,7 @@ class WatermarkPage(QWidget):
         layout = QVBoxLayout(page)
 
         row = QHBoxLayout()
-        self._img_path_label = QLabel("未选择图片")
+        self._img_path_label = ElidedPathLabel("未选择图片")
         btn_import = QPushButton("导入图片")
         btn_import.clicked.connect(self._on_import_image)
         row.addWidget(self._img_path_label, 1)
@@ -135,7 +135,7 @@ class WatermarkPage(QWidget):
         layout = QVBoxLayout(page)
 
         row = QHBoxLayout()
-        self._vid_path_label = QLabel("未选择视频")
+        self._vid_path_label = ElidedPathLabel("未选择视频")
         btn_import = QPushButton("导入视频")
         btn_import.clicked.connect(self._on_import_video)
         btn_use = QPushButton("用当前视频")
@@ -251,7 +251,7 @@ class WatermarkPage(QWidget):
             QMessageBox.warning(self, "提示", "无法加载图片")
             return
         self._vm.import_image(path)
-        self._img_path_label.setText(os.path.basename(path))
+        self._img_path_label.setText(path)
         self._img_selector.load_pixmap(preview.pixmap, preview.native_size)
         self._img_exif.load_path(path)
         self._status.setText(
@@ -301,7 +301,7 @@ class WatermarkPage(QWidget):
         self._apply_video_meta(video)
 
     def _apply_video_meta(self, video):
-        self._vid_path_label.setText(os.path.basename(video.file_path))
+        self._vid_path_label.setText(video.file_path)
         self._vid_info.setText(
             f"{video.width}x{video.height} | {video.duration_sec:.1f}s | {video.fps:.1f}fps"
         )

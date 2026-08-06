@@ -15,7 +15,7 @@
 | [§2 构建与启动](#2-构建与启动流程) | x64 / Win32、启动退出 |
 | [§3 MVVM](#3-mvvm-分层实现) | Model / VM / View、播放器、OpenCV、去水印/超分、GPU |
 | [§4 C++ 引擎](#4-c-媒体引擎实现流程) | VideoDecoder、C API、CLI 协议 |
-| [§5 业务链路](#5-业务功能链路) | 5.1 切片 · 5.8 字幕 · 5.12 波形响度 · 5.13 调色 · 5.14 封面 · 5.15 音频趣味 · 5.16 BGM/Demucs · … |
+| [§5 业务链路](#5-业务功能链路) | 5.1 切片 · 5.8 字幕已移除 · 5.12 波形响度 · 5.14 封面 · 5.16 BGM · … |
 | [§6 模块依赖](#6-模块间依赖关系) | CMake / Python 树 |
 | [§7 状态表](#7-已实现-vs-待实现) | ✅ / ⏳ |
 | [§8 llama.cpp](#8-llamacpp-集成说明) | 目录与 CMake |
@@ -171,7 +171,7 @@ MainWindow.shutdown()
 | BGM 混音 | `BgmPage` | 工作流 | FFmpeg 叠 BGM；Demucs 可选分轨（§5.16） |
 | 封面工厂 | `CoverPage` | 趣味 | 最清晰帧 + 标题 PNG（§5.14） |
 | 音频趣味 | `AudioFunPage` | 趣味 | 变调/变速/倒放/8D/混响（§5.15） |
-| 个人中心 | `PlaceholderPage` | 帮助 | 占位（授权待接入） |
+| 个人中心 | `ProfilePage` | 帮助 | 卡密本地校验、GPU 开关、输出目录、关于 |
 
 播放器组件：`client/scripts/ui/video_player.py`（`GlVideoWidget` OpenGL + `PlayerBackend` → `media_player.exe`）
 
@@ -189,7 +189,7 @@ MainWindow.shutdown()
 | `SIGNAL` | `#3DB8A8` | 信息文字、GroupBox 标题 |
 | 字体 | YaHei UI / Segoe UI Semibold | 中文桌面可读 |
 
-顶栏为圆角 `TopChrome`：品牌名 + 当前页胶囊 + GPU/授权/天气 + 版本号。主功能入口为菜单栏。主按钮用 `objectName="primaryButton"`。
+顶栏为圆角 `TopChrome`：品牌名 + 当前页胶囊 + GPU/授权/天气 + 版本号。主功能入口为菜单栏。主按钮用 `objectName="primaryButton"`。长路径标签用 `ui/elided_label.ElidedPathLabel`（中间省略 + Tooltip），避免撑开布局。
 
 ### 3.4 首页播放器交互（统一 FFmpeg 播放器）
 
@@ -475,7 +475,6 @@ GPU 在本产品中承担 **AI 推理** 与 **视频硬解码** 两类加速目�
 | **离线批处理解码** | `VideoDecoder` D3D11VA | ✅ x64 已实现 | `preferHwaccel` / `media_cli iterate --hw`；失败回退 CPU |
 | **OpenCV 帧滤镜** | CPU `cv::Mat` | CPU 运行 | 硬解后在 CPU 做 CLAHE 等，与硬解串联 |
 | **Vosk ASR** | CPU 推理 | ✅ 可选 | `download_vosk_model.bat`；无模型时人声段兜底 |
-| **实时字幕（流式）** | 云/本地流式 ASR | ⏳ 接口预留 | `core/live_subtitle`：2-pass + WS 分路；见 §5.8 |
 | **llama.cpp 高光分析** | CPU（`n_gpu_layers=0`） | ⏳ 接口已有 | 需 `GGML_CUDA=ON` 编译 + 传入层数 |
 | **去水印 LaMa** | ONNX Runtime + OpenCV | ✅ CPU EP（默认） | 已移除项目内 `cuda_runtime`；可选 `MUSIC_ORT_CUDA=1` |
 | **4K 超分** | Real-ESRGAN ONNX + OpenCV | ✅ CPU EP（默认） | 2× 半分辨率快路径 + tile=384；CUDA 需系统 CUDA 12 运行库（`cublasLt64_12.dll` 等） |
@@ -514,7 +513,7 @@ detect_gpu_info()
 
 硬解失败或未启用时显示 `CPU解码`。滤镜标签后缀为实际设备：`/opencl` 或 `/cpu`。
 
-**ViewModel 预留开关：** `MainViewModel.set_gpu_enabled(bool)` 可切换 `use_gpu` / `prefer_hw_decode`，目前**尚未绑定 UI 控件**。
+**ViewModel 开关：** `MainViewModel.set_gpu_enabled(bool)` 切换 `use_gpu` / `prefer_hw_decode`，写入 `app.conf` 的 `gpu_enabled`；**个人中心** `ProfilePage` 已绑定该开关。
 
 #### 3.6.3 配置项（`client/resources/config/app.conf`）
 
@@ -1000,8 +999,6 @@ SlicePage._on_highlights
 |----|------|
 | `vosk_model_dir` | Vosk 中文模型**绝对路径**（含 `am/final.mdl`）；留空自动探测，勿填 `.` |
 | `llm_model_path` | `.gguf` 模型路径；留空则 ASR + 规则打分 |
-| `live_subtitle_provider` | 实时字幕后端：`stub` / `funasr` / `aliyun` / `tencent`（§5.8） |
-| `live_subtitle_mode` | `two_pass` / `realtime_dynamic` / `delayed_steady` |
 
 ### 5.2 游戏高光（PySceneDetect 场景切点）
 
@@ -1156,15 +1153,13 @@ SlicePage「竖屏短视频」
   → 选裁切锚点（居中/偏上/偏下）→ 保存路径
   → MainViewModel.export_vertical_short
       ├─ 有高光片段：export_highlights 临时成片
-      ├─ 同名 .srt/.vtt/.ass：重定时（按片段拼接轴）→ 临时 burn.srt
       └─ MediaBridge.export_vertical_short
             → ffmpeg scale+crop 9:16（默认 1080x1920）
-            → 可选 subtitles 滤镜烧录
   → verticalExportFinished → 可送去超分/去水印
 ```
 
 优先走捆绑 `ffmpeg.exe`，无需新 C++ CLI。静音阈值默认 `-35dB`、最短静音 `0.45s`。  
-竖屏字幕依赖 **libass/subtitles** 滤镜；失败时自动降级为无字幕竖屏。裁切不做主体追踪（MVP）。
+竖屏导出**不再**烧录外挂 SRT；热评短视频仍可通过 ASS + `export_vertical_short(subtitle_path=…)` 烧录评论文本。裁切不做主体追踪（MVP）。
 
 ### 5.6 链接下载（yt-dlp）+ 热评三合一
 
@@ -1214,60 +1209,16 @@ EnhancePage / WatermarkPage 导入图片
 
 **注意：** 复制到 `bin/Release` 时必须同时复制 `exiftool_files`。不再在图片下方常驻大段文本。
 
-### 5.8 外挂字幕与实时字幕
+### 5.8 （已移除）外挂字幕 / 实时字幕
 
-对应产品：本地播放显示字幕；实时同传按平台常见手法预留接口。
+产品决定不做播放器外挂字幕与实时同传。已删除：
 
-**UI 状态：** 播放器上「字幕… / 关字幕 / 实时字幕」**暂不展示**（产品未就绪）；`SubtitleTrack` / `GlVideoWidget.set_subtitle_text` / `live_subtitle` 接口仍保留，恢复时取消 `setVisible(False)` 即可。
+- `client/scripts/core/subtitle_track.py`
+- `client/scripts/core/live_subtitle/`
+- 播放器字幕按钮 / 画面叠加 / 同名自动加载
+- `app.conf` 中 `live_subtitle_*` 配置项
 
-#### 5.8.1 外挂字幕（播放器叠加，接口保留）
-
-```
-（UI 隐藏）打开视频 / 调用 load_subtitle 接口
-  │
-  ▼
-View: VideoPlayerWidget
-  → find_sidecar_subtitles / SubtitleTrack.from_file
-  → GlVideoWidget.set_subtitle_text（底部半透明条）
-```
-
-| 资源 | 路径 |
-|------|------|
-| 解析 | `client/scripts/core/subtitle_track.py`（SRT / VTT / 简易 ASS Dialogue） |
-| 显示 | `client/scripts/ui/gl_video_widget.py` `_draw_subtitle` |
-| 控件 | `video_player.py` 按钮已隐藏；自动同名加载暂关 |
-
-**当前限制：** 仅外挂文件，不抽内嵌轨；ASS 只取文本时间轴，不渲染样式/特效。
-
-#### 5.8.2 实时字幕（流式 2-pass + 分路，接口预留）
-
-对齐 B 站/虎牙/云厂商常见工程手法（**已去掉 Whisper 离线批处理路径**）：
-
-```
-（UI 隐藏）「实时字幕」接口
-  → LiveSubtitleConfig（app.conf live_subtitle_*）
-  → create_pipeline()
-        StreamingAsrBackend（Pass-1 草稿 partial）
-        → [句末] Pass-2 / end_utterance → final（稳态订正）
-        → [可选] TranslationBackend
-        → FanOutSink：PlayerOverlaySink + WebSocketSubtitleSink
-```
-
-| 手法 | 代码入口 | 状态 |
-|------|----------|------|
-| 2-pass 草稿→订正 | `TwoPassSubtitlePipeline` + `SubtitleDisplayMode` | ✅ 编排层 |
-| 字幕与视频分路 | `WebSocketSubtitleSink` | ⏳ WS 发送体预留 |
-| 游戏热词 | `HotwordLexicon` / `set_hotwords` | ✅ 数据结构 |
-| 云 ASR / FunASR | `providers`: stub / aliyun / tencent / funasr | ⏳ 占位，未接 SDK |
-| 播放器 PCM 抽头 | `pipeline.feed_pcm` | ⏳ 待接通解码音轨 |
-
-| 资源 | 路径 |
-|------|------|
-| 包 | `client/scripts/core/live_subtitle/` |
-| 配置 | `app.conf`：`live_subtitle_provider|mode|hotwords|ws_url|…` |
-| UI | `VideoPlayerWidget`「实时字幕」按钮已隐藏；接口仍可调用 |
-
-**接入步骤（扩展）：** 实现 `StreamingAsrBackend` → 在 `providers.build_asr` 注册 → 设置 `live_subtitle_provider` → 从播放器/直播拉流向 `feed_pcm` 喂 16 kHz s16le mono。
+**仍保留：** 热评成片 / 竖屏导出里 FFmpeg `subtitles` 滤镜烧录 **ASS/评论文本**（`MediaBridge.export_vertical_short(..., subtitle_path=)`），与播放器字幕无关。
 
 ### 5.9 三大功能串联（一站式剪辑，异步）
 
@@ -1542,6 +1493,34 @@ BgmPage「人声分离」
 **限制：** Demucs 依赖 PyTorch（体积大）；CPU 分轨慢；模型首次下载需网络（或预置缓存）。
 
 
+### 5.17 个人中心（卡密 / GPU / 输出目录）
+
+```
+帮助 → 个人中心（ProfilePage）
+  │
+  ├─ 卡密兑换
+  │     → MainViewModel.redeem_license
+  │         → AppLogic.redeem_license → network.validate_license_key
+  │         → 写入 app.conf：auth_type=正式版、license_fp=指纹
+  │         → authTypeChanged → 顶栏「授权」胶囊
+  │
+  ├─ GPU 开关
+  │     → MainViewModel.set_gpu_enabled
+  │         → AppLogic.toggle_gpu → gpu_enabled 持久化
+  │         → MediaBridge.set_prefer_hw_decode / set_prefer_cuda
+  │
+  └─ 默认输出目录 → set_output_dir → app.conf output_dir
+```
+
+| 资源 | 路径 |
+|------|------|
+| UI | `client/scripts/ui/profile_page.py` |
+| 校验 | `client/scripts/core/network.py` |
+| 配置 | `app.conf`：`auth_type` / `license_fp` / `gpu_enabled` / `output_dir` |
+
+**当前限制：** 卡密为本地格式校验（≥16 且含字母数字），联网支付与正式门禁未接；功能页试用限权尚未灰显。
+
+
 ---
 
 ## 6. 模块间依赖关系
@@ -1568,14 +1547,14 @@ main.py
     ├── core/time_format.py        (m:ss / 区间格式化)
     ├── ui/video_player.py
     │   ├── core/player_backend.py  (subprocess → media_player.exe)
-    │   ├── core/subtitle_track.py  (外挂 SRT/VTT/ASS)
-    │   ├── core/live_subtitle/     (实时字幕 2-pass 接口预留)
     │   ├── core/audio_viz.py       (showwavespic + ebur128)
     │   ├── ui/waveform_widget.py   (波形/响度条)
-    │   └── ui/gl_video_widget.py   (OpenGL 画面 + 字幕叠加)
+    │   └── ui/gl_video_widget.py   (OpenGL 画面)
     ├── ui/enhance_page.py / watermark_page.py
+    │   ├── ui/elided_label.py     (长路径中间省略)
     │   ├── ui/exif_panel.py       (ExifTool 元数据面板)
     │   └── core/image_loader.py   (OpenCV 解码 / 可选 CUDA 缩放 / Qt 回退)
+    ├── ui/profile_page.py         (个人中心：卡密 / GPU / 输出目录)
     ├── ui/cover_page.py           (封面工厂)
     │   └── core/cover_factory.py  (最清晰帧 + 标题 PNG)
     ├── ui/audio_fun_page.py       (音频趣味)
@@ -1585,11 +1564,11 @@ main.py
     │   └── core/demucs_sep.py     (可选 Demucs → third_party/demucs)
     └── viewmodels/main_vm.py
         ├── models/video_model.py
-        ├── core/app_logic.py      (GPU 检测)
+        ├── core/app_logic.py      (GPU 检测 / 卡密持久化)
+        ├── core/network.py        (本地卡密校验)
         ├── core/weather_service.py (IP 定位 + Open-Meteo 天气)
         ├── core/pipeline_runner.py (批量全流程：切片→超分→去水印)
         ├── core/scene_detect.py (PySceneDetect 游戏高光切点)
-        ├── core/live_subtitle/ (流式字幕 2-pass / WS 分路预留)
         ├── core/asr_engine.py (Vosk)
         └── core/media_bridge.py   (subprocess → media_cli / FFmpeg；含 interpolate_video 补帧)
 ```
@@ -1621,8 +1600,6 @@ main.py
 | 首页本地播放器 | ✅ | FFmpeg 视频 + Qt 音乐；OpenGL；**解码后台线程** + UV 翻转减拷贝；点击画面：未加载开文件 / 已加载暂停继续 |
 | 波形/响度可视化 | ✅ | showwavespic + ebur128；播放器下方可点击 seek（§5.12） |
 | 响度高潮切片 | ✅ | 场景「响度高潮」；ebur128 峰值成段（§5.12） |
-| 外挂字幕 | ⏳ | 接口保留（SubtitleTrack/叠加）；播放器按钮暂隐藏（§5.8.1） |
-| 实时字幕（流式/同传） | ⏳ | `core/live_subtitle` 接口预留；UI 暂隐藏（§5.8.2） |
 | OpenCV 帧处理 | ✅ | `FrameProcessor`：CPU + **OpenCL UMat**；标题 `OpenCV:clahe/opencl` |
 | GLEW / OpenGL 第三方 | ✅ | `third_party/opengl`；`media_player` 链 GLEW |
 | OpenGL 视频显示 | ✅ | `GlVideoWidget` 替换 QLabel；首页播放器 |
@@ -1634,7 +1611,7 @@ main.py
 | AI 高光识别（演讲/解说） | ✅ | 演讲金句：Vosk+LLM/金句词；无人声模型时人声段兜底 |
 | AI 高光识别（游戏） | ✅ | PySceneDetect 场景切点（§5.2）；失败回退时间规则 |
 | 批量导出剪辑 | ✅ | `一键高光成片` → 分片 + `highlights_merged.mp4`（ffmpeg） |
-| 竖屏短视频导出 | ✅ | 切片成片→9:16 裁切+字幕烧录（§5.5）；居中/偏上/偏下 |
+| 竖屏短视频导出 | ✅ | 切片成片→9:16 裁切（§5.5）；居中/偏上/偏下；热评成片可另烧 ASS |
 | 静音剪掉 | ✅ | `静音剪掉` → silencedetect + 拼接紧凑口播 |
 | OpenCV 趣味滤镜 | ✅ | film / warm / cool / vintage / neon / comic / pixel；播放器下拉 |
 | LUT 一键调色 | ✅ | 增强页 Tab + lut3d 导出；与 FrameProcessor 同预设（§5.13） |
@@ -1642,7 +1619,9 @@ main.py
 | 图片 EXIF | ✅ | 图片右上角悬浮摘要 +「全部」弹窗；`exif_panel.py`（§5.7） |
 | 4K 超分 | ✅ | `EnhancePage` + Real-ESRGAN ONNX / OpenCV 双三次；`upscale` CLI；预览 `image_loader`（OpenCV） |
 | 去水印 | ✅ | `WatermarkPage` 快速(OpenCV)/精修(LaMa)；视频默认快速 + 帧批复用 |
-| 授权/卡密 | ⏳ | network.py 预留 |
+| 授权/卡密 | ✅ | 个人中心本地卡密校验；`license_fp`/`auth_type` 写入 app.conf；联网支付未接 |
+| 个人中心 | ✅ | `ProfilePage`：卡密、GPU 开关、输出目录、关于（§5.17） |
+| 长路径 UI | ✅ | `ElidedPathLabel`：增强/去水印/封面/BGM/音频趣味等路径行中间省略 |
 | llama.cpp 第三方集成 | ✅ | third_party/llama.cpp，CMake 目标 `music_llama` |
 | llama 本地推理业务 | ✅ | analyze-speech 已接入智能切片 |
 
@@ -1724,14 +1703,9 @@ x64 构建后 Python 可逐步改为 **ctypes 直接加载** `media_engine.dll`�
 
 待做：llama `GGML_CUDA` + `n_gpu_layers`。
 
-### 9.6 接入实时字幕（流式 ASR / 云同传）
+### 9.6 （已移除）实时字幕接入
 
-见 **§5.8.2**。步骤摘要：
-
-1. 实现 `StreamingAsrBackend`（`feed_pcm` / `on_partial` / `on_final`）
-2. 在 `core/live_subtitle/providers.py` 的 `build_asr` 注册，并设 `live_subtitle_provider`
-3. 可选：实现 `TranslationBackend`、填写 `live_subtitle_ws_url` 启用字幕分路
-4. 接通播放器或直播音轨 PCM → `TwoPassSubtitlePipeline.feed_pcm`
+播放器外挂字幕与实时同传已从产品范围移除；相关代码与 `live_subtitle_*` 配置已删除。热评 ASS 烧录仍见 §5.2.1 / `MediaBridge.export_vertical_short`。
 
 ### 9.7 接入热评短视频成片
 

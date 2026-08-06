@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.audio_fx import PRESETS, AudioFxParams, describe_params
+from ui.elided_label import ElidedPathLabel
 from viewmodels.main_vm import MainViewModel
 
 
@@ -35,9 +36,7 @@ class AudioFunPage(QWidget):
         src_box = QGroupBox("输入")
         src_lay = QVBoxLayout(src_box)
         row = QHBoxLayout()
-        self._path_label = QLabel("未选择文件")
-        self._path_label.setObjectName("InfoText")
-        self._path_label.setWordWrap(True)
+        self._path_label = ElidedPathLabel("未选择文件", object_name="InfoText")
         btn_open = QPushButton("打开…")
         btn_open.clicked.connect(self._on_open)
         btn_use = QPushButton("使用当前导入")

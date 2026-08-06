@@ -169,18 +169,24 @@ class AppLogic:
         self.auth_type = "试用版"
         self.version = "0.1.0"
         self.output_dir = ""
+        self.license_fp = ""
 
         cfg = load_app_config()
         self.llm_model_path = cfg.get("llm_model_path", "")
         self.vosk_model_dir = cfg.get("vosk_model_dir", "")
-        from core.live_subtitle import LiveSubtitleConfig
-        self.live_subtitle_config = LiveSubtitleConfig.from_mapping(cfg)
         self.opencv_filter = cfg.get("opencv_filter", "clahe")
         self.opencv_filter_device = cfg.get("opencv_filter_device", "auto")
         gpu_cfg = cfg.get("gpu_enabled", "true").strip().lower()
         want_gpu = gpu_cfg not in ("0", "false", "off", "no")
         self.prefer_hw_decode = want_gpu
         self.use_gpu = self.gpu_info["cuda_available"] and want_gpu
+        self.output_dir = (cfg.get("output_dir", "") or "").strip()
+        self.license_fp = (cfg.get("license_fp", "") or "").strip()
+        auth = (cfg.get("auth_type", "") or "").strip()
+        if self.license_fp and auth in ("正式版", "已授权"):
+            self.auth_type = "正式版"
+        else:
+            self.auth_type = "试用版"
         # 解析并校验 Vosk 目录（避免空串/「.」被当成模型路径）
         try:
             from core.asr_engine import resolve_vosk_model_dir, is_vosk_model_dir
@@ -243,4 +249,41 @@ class AppLogic:
             return False
         self.use_gpu = enabled
         self.prefer_hw_decode = enabled
+        try:
+            update_app_config_value("gpu_enabled", "true" if enabled else "false")
+        except Exception:
+            pass
         return True
+
+    def set_output_dir(self, path: str) -> str:
+        p = (path or "").strip()
+        self.output_dir = p
+        try:
+            update_app_config_value("output_dir", p)
+        except Exception:
+            pass
+        return p
+
+    def redeem_license(self, key: str) -> tuple[bool, str]:
+        from core.network import license_fingerprint, validate_license_key
+
+        if not validate_license_key(key):
+            return False, "卡密无效：需至少 16 位，且同时包含字母与数字"
+        self.license_fp = license_fingerprint(key)
+        self.auth_type = "正式版"
+        try:
+            update_app_config_value("license_fp", self.license_fp)
+            update_app_config_value("auth_type", "正式版")
+        except Exception:
+            pass
+        return True, "已激活为正式版（本地校验）"
+
+    def clear_license(self) -> tuple[bool, str]:
+        self.license_fp = ""
+        self.auth_type = "试用版"
+        try:
+            update_app_config_value("license_fp", "")
+            update_app_config_value("auth_type", "试用版")
+        except Exception:
+            pass
+        return True, "已恢复为试用版"

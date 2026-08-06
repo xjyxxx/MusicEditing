@@ -69,7 +69,6 @@ class GlVideoWidget(QOpenGLWidget):
         self._pending_image: QImage | None = None
         self._pending_keep: bytes | None = None
         self._paused_overlay = False
-        self._subtitle_text = ""
 
         self._program: QOpenGLShaderProgram | None = None
         self._vao: QOpenGLVertexArrayObject | None = None
@@ -88,13 +87,6 @@ class GlVideoWidget(QOpenGLWidget):
         if self._paused_overlay == paused:
             return
         self._paused_overlay = paused
-        self.update()
-
-    def set_subtitle_text(self, text: str) -> None:
-        text = (text or "").strip()
-        if self._subtitle_text == text:
-            return
-        self._subtitle_text = text
         self.update()
 
     def clear_frame(self) -> None:
@@ -201,43 +193,9 @@ class GlVideoWidget(QOpenGLWidget):
         if not drew_frame:
             painter.setPen(Qt.gray)
             painter.drawText(self.rect(), Qt.AlignCenter, self._placeholder)
-        if self._subtitle_text:
-            self._draw_subtitle(painter)
         if self._paused_overlay:
             self._draw_play_icon(painter)
         painter.end()
-
-    def _draw_subtitle(self, painter: QPainter) -> None:
-        """底部半透明字幕条。"""
-        text = self._subtitle_text
-        if not text:
-            return
-        margin = max(12, int(self.width() * 0.06))
-        bottom = max(16, int(self.height() * 0.06))
-        max_w = max(40, self.width() - margin * 2)
-        font = painter.font()
-        font.setPointSize(max(14, int(min(self.width(), self.height()) * 0.035)))
-        font.setBold(True)
-        painter.setFont(font)
-        br = painter.boundingRect(
-            0, 0, max_w, self.height(),
-            Qt.AlignHCenter | Qt.AlignBottom | Qt.TextWordWrap,
-            text,
-        )
-        pad_x, pad_y = 14, 8
-        box_w = min(max_w, br.width() + pad_x * 2)
-        box_h = br.height() + pad_y * 2
-        box_x = (self.width() - box_w) // 2
-        box_y = self.height() - bottom - box_h
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(QColor(0, 0, 0, 160)))
-        painter.drawRoundedRect(QRectF(box_x, box_y, box_w, box_h), 6, 6)
-        painter.setPen(QColor(255, 255, 240))
-        painter.drawText(
-            QRectF(box_x + pad_x, box_y + pad_y, box_w - pad_x * 2, box_h - pad_y * 2),
-            Qt.AlignHCenter | Qt.AlignVCenter | Qt.TextWordWrap,
-            text,
-        )
 
     def _draw_play_icon(self, painter: QPainter) -> None:
         """暂停时显示三角播放标志（提示点击继续）。"""

@@ -212,6 +212,14 @@ class MainViewModel(QObject):
 
         return self._app.auth_type
 
+    @property
+    def gpu_enabled(self) -> bool:
+        return bool(self._app.prefer_hw_decode)
+
+    @property
+    def output_dir(self) -> str:
+        return getattr(self._app, "output_dir", "") or ""
+
 
 
     @Property(str, constant=True)
@@ -1386,9 +1394,26 @@ class MainViewModel(QObject):
 
     def set_output_dir(self, path: str):
 
+        if hasattr(self._app, "set_output_dir"):
+            self._app.set_output_dir(path)
+        else:
+            self._app.output_dir = path
         self._state.output_dir = path
 
-        self._app.output_dir = path
+    @Slot(str, result=object)
+    def redeem_license(self, key: str):
+        """返回 (ok: bool, message: str)。"""
+        ok, msg = self._app.redeem_license(key)
+        if ok:
+            self.authTypeChanged.emit(self.auth_type)
+        return ok, msg
+
+    @Slot(result=object)
+    def clear_license(self):
+        ok, msg = self._app.clear_license()
+        if ok:
+            self.authTypeChanged.emit(self.auth_type)
+        return ok, msg
 
     @Slot(str)
     def set_yt_dlp_cookies_file(self, path: str):
@@ -1502,13 +1527,12 @@ class MainViewModel(QObject):
         output_path: str,
         *,
         crop_bias: str = "center",
-        burn_subtitles: bool = True,
         use_highlights: bool = True,
         width: int = 1080,
         height: int = 1920,
     ) -> None:
         """
-        竖屏短视频：可选先拼高光成片 → 9:16 裁切 → 烧录外挂字幕（片段时间轴重定时）。
+        竖屏短视频：可选先拼高光成片 → 9:16 裁切（不再烧录外挂字幕）。
         """
         video = self._state.current_video
         if not video or not self._bridge:
@@ -1526,7 +1550,6 @@ class MainViewModel(QObject):
         ranges = [(s.start_sec, s.end_sec) for s in segs] if use_hl else []
         src_path = video.file_path
         bias = crop_bias
-        burn = burn_subtitles
         out_path = os.path.abspath(output_path)
         w, h = int(width), int(height)
 
@@ -1546,13 +1569,6 @@ class MainViewModel(QObject):
         def run():
             tmp_dir = ""
             try:
-                from core.subtitle_track import (
-                    SubtitleTrack,
-                    find_sidecar_subtitles,
-                    retime_cues_for_segments,
-                    write_srt,
-                )
-
                 def report(p: float, msg: str):
                     task.progress = p
                     self.progressUpdated.emit(task.task_id, p, msg)
@@ -1570,33 +1586,14 @@ class MainViewModel(QObject):
                         raise RuntimeError("高光成片未生成")
                     work_input = merged
 
-                sub_path = None
-                if burn:
-                    side = find_sidecar_subtitles(src_path)
-                    if side:
-                        report(42.0, f"处理字幕 {os.path.basename(side)}…")
-                        track = SubtitleTrack.from_file(side)
-                        cues = track.cues
-                        if use_hl and ranges:
-                            cues = retime_cues_for_segments(cues, ranges)
-                        if cues:
-                            if not tmp_dir:
-                                tmp_dir = tempfile.mkdtemp(prefix="me_vertical_")
-                            sub_path = os.path.join(tmp_dir, "burn.srt")
-                            write_srt(cues, sub_path)
-                        else:
-                            report(45.0, "字幕与片段无交集，跳过烧录")
-                    else:
-                        report(42.0, "未找到同名外挂字幕，仅裁切竖屏")
-
-                report(50.0, "正在竖屏裁切 / 烧录…")
+                report(50.0, "正在竖屏裁切…")
                 self._bridge.export_vertical_short(
                     work_input,
                     out_path,
                     width=w,
                     height=h,
                     crop_bias=bias,
-                    subtitle_path=sub_path,
+                    subtitle_path=None,
                     on_progress=lambda p, m: report(50.0 + p * 0.5, m),
                 )
                 task.state = TaskState.COMPLETED
