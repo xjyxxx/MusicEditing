@@ -1417,6 +1417,29 @@ class DownloadPage(QWidget):
             self._set_media(path)
             self._merge_status(media_note=f"已选用本地: {os.path.basename(path)}")
 
+    def _ask_short_video_style(self) -> str:
+        """选热评短视频风格；取消返回空串。"""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("热评短视频风格")
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel("选择成片样式："))
+        grp = QButtonGroup(dlg)
+        r1 = QRadioButton("顺序字幕（底部逐条）")
+        r2 = QRadioButton("弹幕风（横向滚动）")
+        r3 = QRadioButton("卡片风（昵称 + 正文）")
+        r1.setChecked(True)
+        for i, r in enumerate((r1, r2, r3)):
+            grp.addButton(r, i)
+            lay.addWidget(r)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        lay.addWidget(buttons)
+        if dlg.exec() != QDialog.Accepted:
+            return ""
+        checked = grp.checkedId()
+        return {0: "ass_caption", 1: "danmaku", 2: "cards"}.get(checked, "ass_caption")
+
     @Slot()
     def _on_export_comments(self):
         if not self._comments:
@@ -1462,6 +1485,9 @@ class DownloadPage(QWidget):
                         "导出热评短视频需要先有媒体文件（播放/下载一条到本地）。",
                     )
                     return
+                style = self._ask_short_video_style()
+                if not style:
+                    return
                 if not lower.endswith(".mp4"):
                     path = path + ".mp4"
                 self._status.setText("正在生成热评短视频…")
@@ -1470,13 +1496,13 @@ class DownloadPage(QWidget):
                         media_path=self._media_path,
                         comments=list(self._comments),
                         output_path=path,
-                        style="ass_caption",
+                        style=style,
                         song_name=self._song_name or "",
                         song_id=self._song_id or "",
                     ),
                     bridge=self._vm.bridge,
                 )
-                tip = f"已导出热评短视频：\n{out}"
+                tip = f"已导出热评短视频（{style}）：\n{out}"
             elif want_ass:
                 if not lower.endswith(".ass"):
                     path = path + ".ass"

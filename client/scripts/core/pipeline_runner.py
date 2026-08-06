@@ -162,11 +162,14 @@ def _run_one(
     out_dir = _job_dir(settings, path)
     current = path
 
+    from core.progress_eta import EtaTracker, with_eta
+    _eta = EtaTracker()
+
     def report_phase(phase: PipelinePhase, p: float, msg: str) -> None:
         _check(cancel_event, skip_event, pause_event)
         job.phase = phase
         job.progress = max(0.0, min(100.0, float(p)))
-        job.message = msg
+        job.message = with_eta(msg, p, _eta)
         on_tick()
 
     # 1) probe

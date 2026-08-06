@@ -26,10 +26,26 @@ namespace media::core {
 
 namespace {
 
-/// 更大 tile → 更少 Session::Run；CUDA 下尤其受益
-constexpr int kTileSize = 384;
+/// 更大 tile → 更少 Session::Run；CUDA 下尤其受益。可用 MUSIC_UPSCALE_TILE 覆盖（128–1024）
+constexpr int kTileSizeDefault = 384;
 constexpr int kTilePad = 10;
 constexpr int kModelScale = 4;
+
+int tileSizeFromEnv() {
+    const char* v = std::getenv("MUSIC_UPSCALE_TILE");
+    if (!v || !*v) {
+        return kTileSizeDefault;
+    }
+    try {
+        int n = std::stoi(v);
+        if (n <= 0) {
+            return kTileSizeDefault;
+        }
+        return std::clamp(n, 128, 1024);
+    } catch (...) {
+        return kTileSizeDefault;
+    }
+}
 
 bool preferCudaFromEnv() {
     const char* v = std::getenv("MUSIC_ORT_CUDA");
@@ -116,6 +132,7 @@ bool runTiledX4(
     const int inW = work.cols;
     out = cv::Mat::zeros(inH * kModelScale, inW * kModelScale, CV_8UC3);
 
+    const int kTileSize = tileSizeFromEnv();
     auto memoryInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
     const char* inNames[] = {inputName.c_str()};
     const char* outNames[] = {outputName.c_str()};

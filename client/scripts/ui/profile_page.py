@@ -51,7 +51,10 @@ class ProfilePage(QWidget):
         key_row.addWidget(btn_redeem)
         key_row.addWidget(btn_clear)
         auth_lay.addLayout(key_row)
-        tip = QLabel("正式联网校验与支付尚未接入；当前为本地格式校验，便于联调门禁。")
+        tip = QLabel(
+            "试用版可用快速超分 2× / 快速去水印；"
+            "AI 4×、批量队列、LaMa 精修需正式版卡密。"
+        )
         tip.setObjectName("MutedText")
         tip.setWordWrap(True)
         auth_lay.addWidget(tip)
@@ -82,6 +85,19 @@ class ProfilePage(QWidget):
         out_row.addWidget(btn_out)
         out_lay.addLayout(out_row)
         root.addWidget(out_box)
+
+        # ── 开箱向导 ──
+        setup_box = QGroupBox("开箱与依赖")
+        setup_lay = QVBoxLayout(setup_box)
+        setup_tip = QLabel("检测超分/去水印模型、yt-dlp、Cookie、GPU，并可一键启动下载脚本。")
+        setup_tip.setObjectName("MutedText")
+        setup_tip.setWordWrap(True)
+        setup_lay.addWidget(setup_tip)
+        btn_wizard = QPushButton("打开开箱向导…")
+        btn_wizard.setObjectName("GhostBtn")
+        btn_wizard.clicked.connect(self._on_open_wizard)
+        setup_lay.addWidget(btn_wizard)
+        root.addWidget(setup_box)
 
         # ── 关于 ──
         about = QGroupBox("关于")
@@ -148,3 +164,12 @@ class ProfilePage(QWidget):
             return
         self._vm.set_output_dir(path)
         self._sync_output_label()
+
+    @Slot()
+    def _on_open_wizard(self):
+        win = self.window()
+        if hasattr(win, "open_setup_wizard"):
+            win.open_setup_wizard()
+        else:
+            from ui.setup_wizard import SetupWizardDialog
+            SetupWizardDialog(self._vm, self).exec()

@@ -90,6 +90,10 @@ class MainViewModel(QObject):
 
     bgmMixFinished = Signal(int, str)
 
+    sfxOverlayProgress = Signal(int, float, str)
+
+    sfxOverlayFinished = Signal(int, str)
+
     demucsProgress = Signal(int, float, str)
 
     demucsFinished = Signal(int, str)
@@ -221,6 +225,22 @@ class MainViewModel(QObject):
         return getattr(self._app, "output_dir", "") or ""
 
 
+
+    @property
+    def is_licensed(self) -> bool:
+        return bool(getattr(self._app, "is_licensed", False))
+
+    def require_feature(self, feature: str) -> tuple[bool, str]:
+        """试用门禁。返回 (ok, tip)。正式版一律放行。"""
+        if self.is_licensed:
+            return True, ""
+        tips = {
+            "enhance_ai_4x": "试用版不可用 AI 超分 4×，请到「个人中心」兑换正式版，或改用 2× / 快速 OpenCV。",
+            "pipeline_queue": "试用版不可用批量全流程队列，请到「个人中心」兑换正式版。",
+            "watermark_lama": "试用版不可用精修去水印（LaMa），请到「个人中心」兑换正式版，或改用「快速」。",
+        }
+        tip = tips.get(feature, "该功能需正式版，请到「个人中心」兑换卡密。")
+        return False, tip
 
     @Property(str, constant=True)
 
@@ -385,6 +405,12 @@ class MainViewModel(QObject):
 
             be = "lama"
 
+        if be == "lama":
+            ok, tip = self.require_feature("watermark_lama")
+            if not ok:
+                self.errorOccurred.emit(tip)
+                return
+
         self._state.watermark_params.backend = be
 
 
@@ -449,6 +475,12 @@ class MainViewModel(QObject):
 
             be = "lama"
 
+        if be == "lama":
+            ok, tip = self.require_feature("watermark_lama")
+            if not ok:
+                self.errorOccurred.emit(tip)
+                return
+
         self._state.watermark_params.backend = be
 
 
@@ -486,9 +518,9 @@ class MainViewModel(QObject):
         if not path or not os.path.isfile(path):
 
             raise RuntimeError(
-
-                "未找到 LaMa 模型 models/lama.onnx，请运行 scripts/download_lama_model.bat"
-
+                "未找到 LaMa 模型（models/lama.onnx）。\n"
+                "请在项目根目录运行：scripts\\download_lama_model.bat\n"
+                "下载完成后重启 UI；精修去水印需要该模型。"
             )
 
         return path
@@ -547,11 +579,14 @@ class MainViewModel(QObject):
 
             try:
 
+                from core.progress_eta import EtaTracker, with_eta
+                eta = EtaTracker()
+
                 def report(p: float, msg: str):
 
                     task.progress = p
 
-                    self.watermarkProgress.emit(task_id, p, msg)
+                    self.watermarkProgress.emit(task_id, p, with_eta(msg, p, eta))
 
 
 
@@ -610,10 +645,34 @@ class MainViewModel(QObject):
         if not path or not os.path.isfile(path):
 
             raise FileNotFoundError(
-                "未找到 Real-ESRGAN 模型 models/realesr-general-x4v3.onnx，请运行 scripts/download_realesrgan_model.bat"
+                "未找到 Real-ESRGAN 模型（models/realesr-general-x4v3.onnx）。\n"
+                "请在项目根目录运行：scripts\\download_realesrgan_model.bat\n"
+                "下载完成后重启 UI；也可先用「快速 · OpenCV」超分。"
             )
 
         return path
+
+    def ai_runtime_hint(self) -> str:
+        """GPU 推理 / 模型就绪一句话状态。"""
+        gpu = "GPU 推理开" if self._app.use_gpu else "GPU 推理关（CPU）"
+        sr_ok = bool(
+            getattr(self._app, "realesrgan_model_path", "")
+            and os.path.isfile(self._app.realesrgan_model_path)
+        )
+        lama_ok = bool(
+            getattr(self._app, "lama_model_path", "")
+            and os.path.isfile(self._app.lama_model_path)
+        )
+        parts = [gpu]
+        if self._bridge and self._app.use_gpu:
+            ok_ep, ep_msg = self._bridge.probe_ort_cuda()
+            if not ok_ep:
+                parts.append(ep_msg)
+            else:
+                parts.append("CUDA EP✓")
+        parts.append("超分模型✓" if sr_ok else "超分模型缺（download_realesrgan_model.bat）")
+        parts.append("LaMa✓" if lama_ok else "LaMa缺（download_lama_model.bat）")
+        return " · ".join(parts)
 
 
 
@@ -639,6 +698,12 @@ class MainViewModel(QObject):
         sc = 2 if int(scale) == 2 else 4
         sp = max(0, min(100, int(strength)))
 
+        if be == "realesrgan" and sc == 4:
+            ok, tip = self.require_feature("enhance_ai_4x")
+            if not ok:
+                self.errorOccurred.emit(tip)
+                return
+
         self._state.enhance_params.backend = be
 
         self._state.enhance_params.scale = sc
@@ -650,6 +715,8 @@ class MainViewModel(QObject):
 
             model = self._upscale_model_path(be)
 
+            tile = int(getattr(self._state.enhance_params, "tile", 0) or 0)
+            bridge.set_upscale_tile(tile)
             return bridge.upscale_image(
 
                 model, input_path, output_path, scale=sc, strength=sp, backend=be,
@@ -710,6 +777,12 @@ class MainViewModel(QObject):
         sc = 2 if int(scale) == 2 else 4
         sp = max(0, min(100, int(strength)))
 
+        if be == "realesrgan" and sc == 4:
+            ok, tip = self.require_feature("enhance_ai_4x")
+            if not ok:
+                self.errorOccurred.emit(tip)
+                return
+
         self._state.enhance_params.backend = be
 
         self._state.enhance_params.scale = sc
@@ -725,6 +798,8 @@ class MainViewModel(QObject):
 
             model = self._upscale_model_path(be)
 
+            tile = int(getattr(self._state.enhance_params, "tile", 0) or 0)
+            bridge.set_upscale_tile(tile)
             return bridge.upscale_video(
 
                 model,
@@ -812,11 +887,14 @@ class MainViewModel(QObject):
 
             try:
 
+                from core.progress_eta import EtaTracker, with_eta
+                eta = EtaTracker()
+
                 def report(p: float, msg: str):
 
                     task.progress = p
 
-                    self.enhanceProgress.emit(task_id, p, msg)
+                    self.enhanceProgress.emit(task_id, p, with_eta(msg, p, eta))
 
 
 
@@ -1428,8 +1506,16 @@ class MainViewModel(QObject):
         self.statusMessageChanged.emit(self._status_message)
 
     @Slot(str, bool)
-    def export_highlights(self, output_dir: str, concat: bool = True):
-        """批量导出高光片段，并可选拼接成 highlights_merged.mp4。"""
+    def export_highlights(
+        self,
+        output_dir: str,
+        concat: bool = True,
+        *,
+        max_height: int = 0,
+        quality: str = "high",
+        container: str = "mp4",
+    ):
+        """批量导出高光片段，并可选拼接成 highlights_merged。<ext>。"""
         video = self._state.current_video
         segs = [s for s in self._state.highlight_segments if s.selected and s.end_sec > s.start_sec]
         if not video or not self._bridge:
@@ -1461,6 +1547,7 @@ class MainViewModel(QObject):
                 clips, merged = self._bridge.export_highlights(
                     video.file_path, ranges, output_dir,
                     concat=concat, on_progress=report,
+                    max_height=max_height, quality=quality, container=container,
                 )
                 task.state = TaskState.COMPLETED
                 task.progress = 100.0
@@ -1527,9 +1614,11 @@ class MainViewModel(QObject):
         output_path: str,
         *,
         crop_bias: str = "center",
+        track_mode: str = "fixed",
         use_highlights: bool = True,
         width: int = 1080,
         height: int = 1920,
+        quality: str = "high",
     ) -> None:
         """
         竖屏短视频：可选先拼高光成片 → 9:16 裁切（不再烧录外挂字幕）。
@@ -1550,8 +1639,10 @@ class MainViewModel(QObject):
         ranges = [(s.start_sec, s.end_sec) for s in segs] if use_hl else []
         src_path = video.file_path
         bias = crop_bias
+        track_mode = (track_mode or "fixed").strip().lower() or "fixed"
         out_path = os.path.abspath(output_path)
         w, h = int(width), int(height)
+        quality = (quality or "high").strip().lower() or "high"
 
         task = TaskModel(
             task_id=self._next_task_id,
@@ -1569,10 +1660,13 @@ class MainViewModel(QObject):
         def run():
             tmp_dir = ""
             try:
+                from core.progress_eta import EtaTracker, with_eta
+                eta = EtaTracker()
                 def report(p: float, msg: str):
                     task.progress = p
-                    self.progressUpdated.emit(task.task_id, p, msg)
-                    self.verticalExportProgress.emit(task.task_id, p, msg)
+                    msg2 = with_eta(msg, p, eta)
+                    self.progressUpdated.emit(task.task_id, p, msg2)
+                    self.verticalExportProgress.emit(task.task_id, p, msg2)
 
                 work_input = src_path
                 if use_hl:
@@ -1593,7 +1687,9 @@ class MainViewModel(QObject):
                     width=w,
                     height=h,
                     crop_bias=bias,
+                    track_mode=track_mode,
                     subtitle_path=None,
+                    quality=quality,
                     on_progress=lambda p, m: report(50.0 + p * 0.5, m),
                 )
                 task.state = TaskState.COMPLETED
@@ -1764,9 +1860,13 @@ class MainViewModel(QObject):
             try:
                 def report(p: float, msg: str):
                     task.progress = p
-                    self.interpolateProgress.emit(task_id, p, msg)
+                    from core.progress_eta import EtaTracker, with_eta
+                    if not hasattr(run, '_eta'):
+                        run._eta = EtaTracker()
+                    self.interpolateProgress.emit(task_id, p, with_eta(msg, p, run._eta))
 
                 report(1.0, f"FFmpeg {mode}补帧 {factor}x…")
+                be_interp = (backend or "ffmpeg").strip().lower() or "ffmpeg"
                 out = bridge.interpolate_video(
                     input_path,
                     output_path,
@@ -1775,6 +1875,7 @@ class MainViewModel(QObject):
                     start_sec=start_sec,
                     end_sec=end_sec,
                     quality=q,
+                    backend=be_interp,
                     on_progress=report,
                 )
                 task.state = TaskState.COMPLETED
@@ -2018,6 +2119,54 @@ class MainViewModel(QObject):
         import threading
         threading.Thread(target=run, daemon=True).start()
 
+    def start_sfx_overlay(self, video_path: str, sfx_path: str, output_path: str, params):
+        """梗音效叠加到视频指定时刻（FFmpeg adelay + atempo）。"""
+        if not self._bridge:
+            self.errorOccurred.emit("媒体引擎未加载")
+            return
+        if not video_path or not os.path.isfile(video_path):
+            self.errorOccurred.emit("音效：视频无效")
+            return
+        if not sfx_path or not os.path.isfile(sfx_path):
+            self.errorOccurred.emit("音效：音效文件无效")
+            return
+        task = TaskModel(
+            task_id=self._next_task_id,
+            task_type=TaskType.SFX_OVERLAY,
+            file_path=video_path,
+            state=TaskState.PROCESSING,
+        )
+        self._next_task_id += 1
+        self._state.tasks.append(task)
+        task_id = task.task_id
+        bridge = self._bridge
+
+        def run():
+            try:
+                from core.progress_eta import EtaTracker, with_eta
+                eta = EtaTracker()
+
+                def report(p: float, msg: str):
+                    task.progress = p
+                    self.sfxOverlayProgress.emit(task_id, p, with_eta(msg, p, eta))
+
+                out = bridge.overlay_sfx(
+                    video_path, sfx_path, output_path, params, on_progress=report,
+                )
+                task.state = TaskState.COMPLETED
+                task.progress = 100.0
+                self.taskStateChanged.emit(task_id, TaskState.COMPLETED)
+                self.sfxOverlayFinished.emit(task_id, out or output_path)
+                self._status_message = f"梗音叠加完成: {os.path.basename(out or output_path)}"
+                self.statusMessageChanged.emit(self._status_message)
+            except Exception as e:
+                task.state = TaskState.FAILED
+                self.taskStateChanged.emit(task_id, TaskState.FAILED)
+                self.errorOccurred.emit(str(e))
+
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+
     def start_demucs_separate(self, input_path: str, output_dir: str):
         """可选 Demucs 人声分离。"""
         if not self._bridge:
@@ -2136,6 +2285,10 @@ class MainViewModel(QObject):
         return list(self._pipeline_jobs)
 
     def start_pipeline_queue(self, paths: list[str], settings: PipelineSettings) -> None:
+        ok, tip = self.require_feature("pipeline_queue")
+        if not ok:
+            self.errorOccurred.emit(tip)
+            return
         if self._pipeline_running:
             self.errorOccurred.emit("全流程队列正在运行")
             return

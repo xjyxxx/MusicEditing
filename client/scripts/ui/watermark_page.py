@@ -52,6 +52,16 @@ class WatermarkPage(QWidget):
         self._preview_debounce.setSingleShot(True)
         self._preview_debounce.setInterval(280)
         self._preview_debounce.timeout.connect(self._refresh_video_preview)
+        self._batch_queue: list = []
+        self._batch_out_dir = ""
+        self._batch_regions: list = []
+        self._batch_backend = "opencv"
+        self._batch_kind = ""  # image | video
+        self._batch_busy = False
+        self._batch_results: list = []  # dict path/status/msg
+        self._batch_retries: dict = {}  # path -> retry count
+        self._batch_current = ""
+        self._batch_max_retry = 2
 
         root = QVBoxLayout(self)
 
@@ -64,6 +74,17 @@ class WatermarkPage(QWidget):
         hint.setObjectName("MutedText")
         root.addWidget(hint)
 
+        self._ai_hint = QLabel("")
+        self._ai_hint.setObjectName("MutedText")
+        self._ai_hint.setWordWrap(True)
+        root.addWidget(self._ai_hint)
+        fn = getattr(vm, "ai_runtime_hint", None)
+        if callable(fn):
+            self._ai_hint.setText(fn())
+        vm.gpuNameChanged.connect(
+            lambda _n: self._ai_hint.setText(self._vm.ai_runtime_hint())
+        )
+
         self._tabs = QTabWidget()
         self._tabs.addTab(self._build_image_tab(), "图片去水印")
         self._tabs.addTab(self._build_video_tab(), "视频去水印")
@@ -73,6 +94,11 @@ class WatermarkPage(QWidget):
         self._progress.setVisible(False)
         root.addWidget(self._progress)
 
+        self._batch_list = QListWidget()
+        self._batch_list.setMaximumHeight(120)
+        self._batch_list.setVisible(False)
+        root.addWidget(self._batch_list)
+
         self._status = ElidedPathLabel("", object_name="InfoText")
         root.addWidget(self._status)
 
@@ -80,6 +106,22 @@ class WatermarkPage(QWidget):
         vm.watermarkFinished.connect(self._on_finished)
         vm.errorOccurred.connect(self._show_error)
         vm.videoLoaded.connect(self._on_video_loaded)
+        vm.authTypeChanged.connect(lambda _a: self._refresh_license_gates())
+        self._refresh_license_gates()
+
+    def _refresh_license_gates(self):
+        licensed = bool(getattr(self._vm, "is_licensed", False))
+        tip = "" if licensed else "正式版可用 · 请到「个人中心」兑换卡密"
+        for rb in (getattr(self, "_img_mode_lama", None), getattr(self, "_vid_mode_lama", None)):
+            if rb is None:
+                continue
+            rb.setEnabled(licensed)
+            rb.setToolTip(tip if not licensed else "LaMa 精修去水印")
+            if not licensed and rb.isChecked():
+                if rb is self._img_mode_lama:
+                    self._img_mode_fast.setChecked(True)
+                elif rb is self._vid_mode_lama:
+                    self._vid_mode_fast.setChecked(True)
 
     def _build_image_tab(self) -> QWidget:
         page = QWidget()
@@ -115,12 +157,30 @@ class WatermarkPage(QWidget):
         side.addWidget(mode_box)
 
         btn_col = QVBoxLayout()
+        btn_suggest = QPushButton("智能建议")
+        btn_suggest.setToolTip("根据四角边缘密度建议 1–2 个角标框，可再拖拽修改")
+        btn_suggest.clicked.connect(self._on_suggest_image)
+        btn_dy = QPushButton("抖音右上")
+        btn_dy.setObjectName("GhostBtn")
+        btn_dy.setToolTip("右上角标预设（约 22%×10%）")
+        btn_dy.clicked.connect(lambda: self._on_corner_preset("image", "douyin"))
+        btn_ks = QPushButton("快手右上")
+        btn_ks.setObjectName("GhostBtn")
+        btn_ks.setToolTip("右上角标预设（约 20%×9%）")
+        btn_ks.clicked.connect(lambda: self._on_corner_preset("image", "kuaishou"))
         btn_clear = QPushButton("清除区域")
         btn_clear.clicked.connect(self._img_selector.clear_regions)
+        btn_batch = QPushButton("文件夹批量…")
+        btn_batch.setToolTip("对文件夹内图片使用当前框选区域批量去水印")
+        btn_batch.clicked.connect(self._on_batch_images)
         btn_run = QPushButton("开始去水印")
         btn_run.setObjectName("primaryButton")
         btn_run.clicked.connect(self._on_run_image)
+        btn_col.addWidget(btn_suggest)
+        btn_col.addWidget(btn_dy)
+        btn_col.addWidget(btn_ks)
         btn_col.addWidget(btn_clear)
+        btn_col.addWidget(btn_batch)
         btn_col.addWidget(btn_run)
         btn_col.addStretch()
         side.addLayout(btn_col)
@@ -198,8 +258,19 @@ class WatermarkPage(QWidget):
         layout.addWidget(mode_box)
 
         btn_row = QHBoxLayout()
+        btn_suggest = QPushButton("智能建议")
+        btn_suggest.clicked.connect(self._on_suggest_video)
+        btn_dy = QPushButton("抖音右上")
+        btn_dy.setObjectName("GhostBtn")
+        btn_dy.clicked.connect(lambda: self._on_corner_preset("video", "douyin"))
+        btn_ks = QPushButton("快手右上")
+        btn_ks.setObjectName("GhostBtn")
+        btn_ks.clicked.connect(lambda: self._on_corner_preset("video", "kuaishou"))
         btn_clear = QPushButton("清除区域")
         btn_clear.clicked.connect(self._vid_selector.clear_regions)
+        btn_batch = QPushButton("多视频批量…")
+        btn_batch.setToolTip("多选视频，用当前角标区域与时间比例顺序处理")
+        btn_batch.clicked.connect(self._on_batch_videos)
         btn_run = QPushButton("开始视频去水印")
         btn_run.setObjectName("primaryButton")
         btn_run.clicked.connect(self._on_run_video)
@@ -207,7 +278,11 @@ class WatermarkPage(QWidget):
         self._btn_send_enhance.setEnabled(False)
         self._btn_send_enhance.setToolTip("将去水印结果导入「画质增强」")
         self._btn_send_enhance.clicked.connect(self._on_send_to_enhance)
+        btn_row.addWidget(btn_suggest)
+        btn_row.addWidget(btn_dy)
+        btn_row.addWidget(btn_ks)
         btn_row.addWidget(btn_clear)
+        btn_row.addWidget(btn_batch)
         btn_row.addWidget(btn_run)
         btn_row.addWidget(self._btn_send_enhance)
         btn_row.addStretch()
@@ -450,6 +525,228 @@ class WatermarkPage(QWidget):
         self._progress.setValue(0)
         self._vm.start_watermark_video(out, regions, start, end, backend=backend)
 
+    @Slot()
+    def _on_suggest_image(self):
+        picked = self._img_selector.suggest_corner_regions(2)
+        if not picked:
+            QMessageBox.information(self, "智能建议", "未检测到明显角标，请手动框选。")
+        else:
+            self._status.setText(f"已建议 {len(picked)} 个区域，可再调整")
+
+    @Slot()
+    def _on_suggest_video(self):
+        picked = self._vid_selector.suggest_corner_regions(2)
+        if not picked:
+            QMessageBox.information(self, "智能建议", "未检测到明显角标，请先刷新预览帧或手动框选。")
+        else:
+            self._status.setText(f"已建议 {len(picked)} 个区域，可再调整")
+
+    def _on_corner_preset(self, kind: str, platform: str):
+        sel = self._img_selector if kind == "image" else self._vid_selector
+        picked = sel.apply_platform_corner_preset(platform)
+        if not picked:
+            QMessageBox.information(self, "角标预设", "请先导入图片/刷新预览帧。")
+        else:
+            label = "抖音" if platform == "douyin" else "快手"
+            self._status.setText(f"已套用{label}右上角标预设，可再微调")
+
+    @Slot()
+    def _on_batch_images(self):
+        if self._batch_busy:
+            QMessageBox.information(self, "提示", "批量任务进行中")
+            return
+        regions = [r.as_tuple() for r in self._img_selector.regions()]
+        if not regions:
+            QMessageBox.warning(self, "提示", "请先框选或「智能建议」至少一个区域")
+            return
+        folder = QFileDialog.getExistingDirectory(self, "选择图片文件夹")
+        if not folder:
+            return
+        out_dir = QFileDialog.getExistingDirectory(self, "选择输出目录", folder)
+        if not out_dir:
+            return
+        exts = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+        files = sorted(
+            os.path.join(folder, n)
+            for n in os.listdir(folder)
+            if os.path.splitext(n)[1].lower() in exts
+        )
+        if not files:
+            QMessageBox.warning(self, "提示", "文件夹内没有支持的图片")
+            return
+        backend = "opencv" if self._img_mode_fast.isChecked() else "lama"
+        if backend == "lama":
+            ok, tip = self._vm.require_feature("watermark_lama")
+            if not ok:
+                QMessageBox.warning(self, "正式版", tip)
+                return
+        self._batch_queue = files
+        self._batch_out_dir = out_dir
+        self._batch_regions = regions
+        self._batch_backend = backend
+        self._batch_kind = "image"
+        self._batch_busy = True
+        self._batch_results = []
+        self._batch_retries = {}
+        self._batch_list.clear()
+        self._batch_list.setVisible(True)
+        for f in files:
+            self._batch_list.addItem(f"等待 · {os.path.basename(f)}")
+        self._progress.setVisible(True)
+        self._status.setText(f"批量去水印：0/{len(files)}")
+        self._run_next_batch()
+
+    @Slot()
+    def _on_batch_videos(self):
+        if self._batch_busy:
+            QMessageBox.information(self, "提示", "批量任务进行中")
+            return
+        regions = [r.as_tuple() for r in self._vid_selector.regions()]
+        if not regions:
+            QMessageBox.warning(self, "提示", "请先框选或「智能建议」至少一个区域")
+            return
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "选择多个视频",
+            "",
+            "视频 (*.mp4 *.mov *.mkv *.avi *.webm);;所有文件 (*.*)",
+        )
+        if not files:
+            return
+        out_dir = QFileDialog.getExistingDirectory(self, "选择输出目录")
+        if not out_dir:
+            return
+        backend = "opencv" if self._vid_mode_fast.isChecked() else "lama"
+        if backend == "lama":
+            ok, tip = self._vm.require_feature("watermark_lama")
+            if not ok:
+                QMessageBox.warning(self, "正式版", tip)
+                return
+        self._batch_queue = list(files)
+        self._batch_out_dir = out_dir
+        self._batch_regions = regions
+        self._batch_backend = backend
+        self._batch_kind = "video"
+        self._batch_busy = True
+        self._batch_results = []
+        self._batch_retries = {}
+        self._batch_list.clear()
+        self._batch_list.setVisible(True)
+        for f in files:
+            self._batch_list.addItem(f"等待 · {os.path.basename(f)}")
+        self._progress.setVisible(True)
+        self._status.setText(f"批量视频去水印：0/{len(files)}")
+        self._run_next_batch()
+
+    def _batch_mark(self, src: str, status: str):
+        name = os.path.basename(src)
+        for i in range(self._batch_list.count()):
+            it = self._batch_list.item(i)
+            if it and name in it.text():
+                it.setText(f"{status} · {name}")
+                break
+
+    def _run_next_batch(self):
+        if not self._batch_queue:
+            self._batch_busy = False
+            self._progress.setValue(100)
+            ok = sum(1 for r in self._batch_results if r.get("status") == "成功")
+            fail = sum(1 for r in self._batch_results if r.get("status") == "失败")
+            self._status.setText(
+                f"批量完成 · 成功 {ok} · 失败 {fail} → {self._batch_out_dir}"
+            )
+            QMessageBox.information(
+                self, "批量完成",
+                f"成功 {ok} · 失败 {fail}\n结果目录：\n{self._batch_out_dir}",
+            )
+            return
+        src = self._batch_queue.pop(0)
+        self._batch_current = src
+        stem = os.path.splitext(os.path.basename(src))[0]
+        left = len(self._batch_queue)
+        retries = self._batch_retries.get(src, 0)
+        tag = "重试中" if retries else "处理中"
+        self._batch_mark(src, tag)
+        self._status.setText(f"批量{tag}… 剩余 {left} · {os.path.basename(src)}")
+        if self._batch_kind == "image":
+            ext = os.path.splitext(src)[1] or ".png"
+            out = os.path.join(self._batch_out_dir, f"{stem}_nowm{ext}")
+            # 失败重试时换快速后端
+            be = self._batch_backend
+            if retries > 0:
+                be = "opencv"
+            self._vm.start_watermark_image(
+                src, out, self._batch_regions, backend=be,
+            )
+            return
+        # 视频：后台线程直接调 bridge，避免 import_video 异步竞态
+        out = os.path.join(self._batch_out_dir, f"{stem}_nowm.mp4")
+        bridge = self._vm.bridge
+        regions = list(self._batch_regions)
+        backend = "opencv" if retries > 0 else self._batch_backend
+        # 重试时略缩小区域
+        if retries > 0 and regions:
+            regions = [
+                (max(0.0, x + 0.01), max(0.0, y + 0.01),
+                 min(1.0, w - 0.02), min(1.0, h - 0.02))
+                for x, y, w, h in regions
+            ]
+        if not bridge:
+            self._batch_busy = False
+            QMessageBox.critical(self, "错误", "媒体引擎未加载")
+            return
+
+        def work():
+            try:
+                model = self._vm._watermark_model_path(backend)  # noqa: SLF001
+                info = bridge.probe_video(src)
+                fps = float(getattr(info, "fps", 0) or 25.0)
+                dur = float(getattr(info, "duration_sec", 0) or 0.0)
+                bridge.watermark_inpaint_video(
+                    model, src, out, regions,
+                    fps=fps,
+                    start_sec=0.0,
+                    end_sec=max(0.0, dur),
+                    backend=backend,
+                )
+                return out, ""
+            except Exception as e:
+                return "", str(e)
+
+        import threading
+
+        def done():
+            path, err = result[0], result[1]
+            if err:
+                n = self._batch_retries.get(src, 0) + 1
+                self._batch_retries[src] = n
+                if n <= self._batch_max_retry:
+                    self._batch_mark(src, f"重试{n}")
+                    self._batch_queue.insert(0, src)
+                    self._run_next_batch()
+                    return
+                self._batch_mark(src, "失败")
+                self._batch_results.append(
+                    {"name": os.path.basename(src), "status": "失败", "detail": err}
+                )
+                self._run_next_batch()
+                return
+            self._batch_mark(src, "成功")
+            self._batch_results.append(
+                {"name": os.path.basename(src), "status": "成功", "detail": path}
+            )
+            self._last_result_path = path
+            self._run_next_batch()
+
+        result: list = ["", "pending"]
+
+        def run():
+            path, err = work()
+            result[0], result[1] = path, err
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(0, done)
+
+        threading.Thread(target=run, daemon=True).start()
+
     @Slot(int, float, str)
     def _on_progress(self, task_id, progress, message):
         self._progress.setValue(int(progress))
@@ -460,6 +757,17 @@ class WatermarkPage(QWidget):
         self._progress.setValue(100)
         self._status.setText(f"完成: {output_path}")
         self._last_result_path = output_path or ""
+        if self._batch_busy:
+            src = self._batch_current
+            if src:
+                self._batch_mark(src, "成功")
+                self._batch_results.append(
+                    {"name": os.path.basename(src), "status": "成功", "detail": output_path}
+                )
+            left = len(self._batch_queue)
+            self._status.setText(f"批量剩余 {left} · 刚完成 {os.path.basename(output_path or '')}")
+            self._run_next_batch()
+            return
         is_video = bool(output_path) and not output_path.lower().endswith(
             (".png", ".jpg", ".jpeg", ".bmp", ".webp")
         )
@@ -480,4 +788,24 @@ class WatermarkPage(QWidget):
     @Slot(str)
     def _show_error(self, msg):
         self._progress.setVisible(False)
+        if self._batch_busy:
+            src = self._batch_current
+            if src:
+                n = self._batch_retries.get(src, 0) + 1
+                self._batch_retries[src] = n
+                if n <= self._batch_max_retry:
+                    self._batch_mark(src, f"重试{n}")
+                    self._batch_queue.insert(0, src)
+                    self._progress.setVisible(True)
+                    self._run_next_batch()
+                    return
+                self._batch_mark(src, "失败")
+                self._batch_results.append(
+                    {"name": os.path.basename(src), "status": "失败", "detail": msg}
+                )
+                self._progress.setVisible(True)
+                self._run_next_batch()
+                return
+            self._batch_busy = False
+            self._batch_queue.clear()
         QMessageBox.critical(self, "错误", msg)

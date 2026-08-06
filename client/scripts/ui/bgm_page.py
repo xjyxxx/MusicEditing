@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 from core.bgm_mix import MIX_MODES
 from core.demucs_sep import probe_demucs
 from ui.elided_label import ElidedPathLabel
+from ui.theme import style_spinbox
 from viewmodels.main_vm import MainViewModel
 
 
@@ -102,12 +103,14 @@ class BgmPage(QWidget):
         self._bgm_vol.setRange(0.05, 1.5)
         self._bgm_vol.setSingleStep(0.05)
         self._bgm_vol.setValue(0.35)
+        style_spinbox(self._bgm_vol)
         vol_row.addWidget(self._bgm_vol)
         vol_row.addWidget(QLabel("原声音量"))
         self._voice_vol = QDoubleSpinBox()
         self._voice_vol.setRange(0.0, 1.5)
         self._voice_vol.setSingleStep(0.05)
         self._voice_vol.setValue(1.0)
+        style_spinbox(self._voice_vol)
         vol_row.addWidget(self._voice_vol)
         self._loop = QCheckBox("BGM 循环铺满")
         self._loop.setChecked(True)

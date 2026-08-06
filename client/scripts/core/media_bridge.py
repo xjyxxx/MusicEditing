@@ -92,9 +92,17 @@ def _file_has_audio_stream(path: str) -> bool:
 
 
 def _file_has_video_stream(path: str) -> bool:
-    """用 ffprobe 判断文件是否含视频流。"""
+    """判断是否含视频流；优先 ctypes probe，避免起 ffprobe。"""
     if not path or not os.path.isfile(path):
         return False
+    try:
+        from core.media_engine_ctypes import get_media_engine
+        eng = get_media_engine()
+        if eng is not None:
+            r = eng.probe_video(path)
+            return int(r.width) > 0 and int(r.height) > 0
+    except Exception:
+        pass
     try:
         probe = _find_ffprobe()
         proc = subprocess.run(
@@ -319,17 +327,42 @@ _EXIF_HIGHLIGHT_TAGS = (
 )
 
 
-def _video_encoder_args(*, high_quality: bool = False) -> list[str]:
-    """捆绑 FFmpeg 无 libx264 时，Windows 使用 Media Foundation H.264。"""
+def _video_encoder_args(*, high_quality: bool = False, quality: str = "") -> list[str]:
+    """捆绑 FFmpeg 无 libx264 时，Windows 使用 Media Foundation H.264。
+
+    quality: high | standard | small（优先于 high_quality）。
+    """
+    q = (quality or "").strip().lower()
+    if not q:
+        q = "high" if high_quality else "standard"
     if sys.platform == "win32":
         args = ["-c:v", "h264_mf", "-pix_fmt", "yuv420p"]
-        if high_quality:
-            # 默认码率偏低会明显糊于原片；补帧等重编码场景提高码率
+        if q == "high":
             args.extend(["-b:v", "12M", "-maxrate", "18M", "-bufsize", "24M"])
+        elif q == "small":
+            args.extend(["-b:v", "3M", "-maxrate", "4M", "-bufsize", "6M"])
+        else:
+            args.extend(["-b:v", "6M", "-maxrate", "8M", "-bufsize", "12M"])
         return args
-    if high_quality:
+    if q == "high":
         return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-preset", "medium"]
-    return ["-c:v", "libx264", "-pix_fmt", "yuv420p"]
+    if q == "small":
+        return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "28", "-preset", "faster"]
+    return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "medium"]
+
+
+def _audio_encoder_args(*, quality: str = "high") -> list[str]:
+    """AAC 码率随导出质量档变化。"""
+    q = (quality or "high").strip().lower()
+    if q == "small":
+        return ["-c:a", "aac", "-b:a", "96k"]
+    if q == "standard":
+        return ["-c:a", "aac", "-b:a", "160k"]
+    return ["-c:a", "aac", "-b:a", "192k"]
+
+
+def _mux_flags() -> list[str]:
+    return ["-movflags", "+faststart"]
 
 
 def _format_exit_code(code: int) -> str:
@@ -433,7 +466,7 @@ class UrlMediaInfo:
 
 
 class MediaBridge:
-    """通过子进程调用 32 位 media_cli.exe，避免 Python 位数不匹配"""
+    """调用 media_engine：短调用优先 ctypes 直连 DLL，失败回退 media_cli 子进程。"""
 
     def __init__(self, cli_path: Optional[str] = None):
         self._cli = Path(cli_path) if cli_path else _find_cli()
@@ -458,6 +491,9 @@ class MediaBridge:
         # url -> (monotonic_ts, UrlMediaInfo)；短时缓存减少重复 yt-dlp -J
         self._probe_cache: dict[str, tuple[float, "UrlMediaInfo"]] = {}
         self._probe_cache_ttl_sec = 120.0
+        # 本地文件 probe：mtime 缓存，少起 media_cli / 重复 ctypes
+        self._local_probe_cache: dict[str, tuple[float, "VideoInfo"]] = {}
+        self._ctypes_mode = "unknown"  # unknown | on | off
 
         ver = self._run(["version"]).strip()
         self._ffmpeg_version = ver or "unknown"
@@ -527,6 +563,25 @@ class MediaBridge:
         """LaMa ONNX CUDA EP 开关（默认关闭，项目不再捆绑 cuda_runtime）。"""
         self._prefer_cuda = bool(enabled)
         self._env["MUSIC_ORT_CUDA"] = "1" if self._prefer_cuda else "0"
+
+    def set_upscale_tile(self, tile: int) -> None:
+        """超分 tile 尺寸（128–1024）；0 或无效则用 C++ 默认 384。"""
+        t = int(tile or 0)
+        if t <= 0:
+            self._env.pop("MUSIC_UPSCALE_TILE", None)
+        else:
+            self._env["MUSIC_UPSCALE_TILE"] = str(max(128, min(1024, t)))
+
+    def probe_ort_cuda(self) -> tuple[bool, str]:
+        """探测 ONNX Runtime 是否提供 CUDA EP。"""
+        try:
+            import onnxruntime as ort
+            providers = list(ort.get_available_providers() or [])
+            if "CUDAExecutionProvider" in providers:
+                return True, "CUDA EP 可用"
+            return False, "已回退 CPU（无 CUDAExecutionProvider）"
+        except Exception as e:
+            return False, f"已回退 CPU（ORT 不可用: {e})"
 
     def set_prefer_hw_decode(self, enabled: bool) -> None:
         """批处理 iterate / 缩略图是否请求 D3D11VA（CLI --hw）。"""
@@ -599,31 +654,73 @@ class MediaBridge:
     def ffmpeg_version(self) -> str:
         return self._ffmpeg_version
 
+    @property
+    def uses_ctypes_engine(self) -> bool:
+        """短调用是否已成功走 media_engine.dll。"""
+        return self._ctypes_mode == "on"
+
     def probe_video(self, file_path: str) -> VideoInfo:
         if not os.path.isfile(file_path):
             raise FileNotFoundError(f"文件不存在: {file_path}")
 
-        out = self._run(["probe", file_path])
-        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
-        if not any(ln == "PROBE_OK" for ln in lines):
-            raise RuntimeError(f"探测视频失败: {file_path}\n{out}")
+        abspath = os.path.abspath(file_path)
+        try:
+            mtime = os.path.getmtime(abspath)
+        except OSError:
+            mtime = 0.0
+        cached = self._local_probe_cache.get(abspath)
+        if cached and cached[0] == mtime:
+            return cached[1]
 
-        data: dict[str, str] = {}
-        for line in lines[1:]:
-            if "=" in line:
-                k, v = line.split("=", 1)
-                data[k.strip()] = v.strip()
+        info: Optional[VideoInfo] = None
+        # 1) ctypes 直连（无子进程）
+        try:
+            from core.media_engine_ctypes import get_media_engine
+            eng = get_media_engine()
+            if eng is not None:
+                r = eng.probe_video(abspath)
+                info = VideoInfo(
+                    file_path=file_path,
+                    width=r.width,
+                    height=r.height,
+                    duration_sec=r.duration_sec,
+                    fps=r.fps,
+                    total_frames=r.total_frames,
+                    codec_name=r.codec_name,
+                    format_name=r.format_name,
+                )
+                self._ctypes_mode = "on"
+        except Exception:
+            info = None
 
-        return VideoInfo(
-            file_path=file_path,
-            width=int(data.get("width", 0)),
-            height=int(data.get("height", 0)),
-            duration_sec=float(data.get("duration", 0)),
-            fps=float(data.get("fps", 0)),
-            total_frames=int(data.get("total_frames", 0)),
-            codec_name=data.get("codec", ""),
-            format_name=data.get("format", ""),
-        )
+        # 2) 回退 media_cli
+        if info is None:
+            out = self._run(["probe", file_path])
+            lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+            if not any(ln == "PROBE_OK" for ln in lines):
+                raise RuntimeError(f"探测视频失败: {file_path}\n{out}")
+
+            data: dict[str, str] = {}
+            for line in lines[1:]:
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    data[k.strip()] = v.strip()
+
+            info = VideoInfo(
+                file_path=file_path,
+                width=int(data.get("width", 0)),
+                height=int(data.get("height", 0)),
+                duration_sec=float(data.get("duration", 0)),
+                fps=float(data.get("fps", 0)),
+                total_frames=int(data.get("total_frames", 0)),
+                codec_name=data.get("codec", ""),
+                format_name=data.get("format", ""),
+            )
+            if self._ctypes_mode == "unknown":
+                self._ctypes_mode = "off"
+
+        self._local_probe_cache[abspath] = (mtime, info)
+        return info
 
     def extract_thumbnail(
         self,
@@ -636,8 +733,8 @@ class MediaBridge:
         use_cache: bool = True,
     ) -> str:
         """
-        抽取指定时刻缩略图（PPM），经 media_cli thumbnail → extractThumbnail。
-        默认写入系统临时目录小图缓存。
+        抽取指定时刻缩略图（PPM）。
+        优先 ctypes → media_engine.dll；失败再 media_cli thumbnail。
         """
         if not os.path.isfile(file_path):
             raise FileNotFoundError(f"文件不存在: {file_path}")
@@ -651,6 +748,23 @@ class MediaBridge:
             return str(out)
 
         out.parent.mkdir(parents=True, exist_ok=True)
+        use_hw = self._prefer_hw_decode if prefer_hw is None else bool(prefer_hw)
+
+        # ctypes 直连
+        try:
+            from core.media_engine_ctypes import get_media_engine
+            eng = get_media_engine()
+            if eng is not None:
+                eng.extract_thumbnail_ppm(
+                    file_path, float(timestamp_sec), str(out),
+                    max_width=int(max_width), prefer_hw=use_hw,
+                )
+                if out.is_file() and out.stat().st_size >= 32:
+                    self._ctypes_mode = "on"
+                    return str(out)
+        except Exception:
+            pass
+
         args = [
             "thumbnail",
             file_path,
@@ -658,7 +772,6 @@ class MediaBridge:
             str(out),
             f"--max-w={int(max_width)}",
         ]
-        use_hw = self._prefer_hw_decode if prefer_hw is None else bool(prefer_hw)
         if use_hw:
             args.append("--hw")
 
@@ -666,7 +779,7 @@ class MediaBridge:
         if "THUMBNAIL_OK" not in text:
             raise RuntimeError(f"提取缩略图失败:\n{text}")
         if not out.is_file() or out.stat().st_size < 32:
-            raise RuntimeError(f"缩略图未生成: {out}")
+            raise RuntimeError(f"缩略图文件无效: {out}")
         return str(out)
 
     def iterate_frames(
@@ -1247,11 +1360,12 @@ class MediaBridge:
         start_sec: float = 0.0,
         end_sec: float = 0.0,
         quality: str = "fast",
+        backend: str = "ffmpeg",
         on_progress: Optional[Callable[[float, str], None]] = None,
         **_ignored,
     ) -> str:
         """
-        视频补帧：FFmpeg minterpolate 提升帧率（默认 2x）。
+        视频补帧：默认 FFmpeg minterpolate；backend=rife 时尝试 ONNX，失败回退。
         quality=fast → blend（快，默认）；quality=quality → MCI 运动补偿（慢、更顺）。
         """
         factor = 2 if int(factor) <= 2 else 4
@@ -1260,10 +1374,22 @@ class MediaBridge:
             q = "quality"
         if q not in ("fast", "quality"):
             q = "fast"
+        be = (backend or "ffmpeg").strip().lower()
 
         def report(p: float, msg: str):
             if on_progress:
                 on_progress(p, msg)
+
+        if be in ("rife", "onnx_rife"):
+            try:
+                return self._interpolate_rife(
+                    input_path, output_path,
+                    fps=fps, factor=factor,
+                    start_sec=start_sec, end_sec=end_sec,
+                    on_progress=on_progress,
+                )
+            except Exception as e:
+                report(8.0, f"RIFE 不可用，回退 FFmpeg（{e}）…")
 
         ffmpeg = _find_ffmpeg()
         if fps <= 0:
@@ -1340,6 +1466,100 @@ class MediaBridge:
                 )
         report(100.0, "完成")
         return output_path
+
+    def _interpolate_rife(
+        self,
+        input_path: str,
+        output_path: str,
+        *,
+        fps: float = 0.0,
+        factor: int = 2,
+        start_sec: float = 0.0,
+        end_sec: float = 0.0,
+        on_progress: Optional[Callable[[float, str], None]] = None,
+    ) -> str:
+        from core.rife_interp import find_rife_model, interpolate_rife_frames
+
+        def report(p: float, msg: str):
+            if on_progress:
+                on_progress(p, msg)
+
+        model = find_rife_model()
+        if not model:
+            raise FileNotFoundError("未找到 models/rife.onnx")
+        ffmpeg = _find_ffmpeg()
+        if fps <= 0:
+            try:
+                info = self.probe_video(input_path)
+                fps = float(info.fps or 0.0)
+            except Exception:
+                fps = 0.0
+        if fps <= 0:
+            fps = 25.0
+        out_fps = fps * (2 if int(factor) <= 2 else 4)
+        duration = 0.0
+        if end_sec > start_sec:
+            duration = end_sec - start_sec
+        tmp = tempfile.mkdtemp(prefix="me_rife_")
+        frames_in = os.path.join(tmp, "in")
+        frames_out = os.path.join(tmp, "out")
+        os.makedirs(frames_in, exist_ok=True)
+        os.makedirs(frames_out, exist_ok=True)
+        try:
+            report(5.0, "RIFE：提取帧…")
+            cmd = [str(ffmpeg), "-y", "-hide_banner", "-loglevel", "error"]
+            if start_sec > 0:
+                cmd.extend(["-ss", f"{start_sec:.3f}"])
+            cmd.extend(["-i", input_path])
+            if duration > 0:
+                cmd.extend(["-t", f"{duration:.3f}"])
+            cmd.extend(["-vsync", "0", os.path.join(frames_in, "f_%06d.png")])
+            r = subprocess.run(
+                cmd, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", env=self._env,
+            )
+            if r.returncode != 0:
+                raise RuntimeError((r.stderr or "提帧失败").strip())
+            report(15.0, "RIFE ONNX 推理…")
+            interpolate_rife_frames(
+                frames_in, frames_out, factor=factor, model_path=model, on_progress=report,
+            )
+            report(90.0, "RIFE：编码输出…")
+            enc = _video_encoder_args(high_quality=False)
+            cmd = [
+                str(ffmpeg), "-y", "-hide_banner", "-loglevel", "error",
+                "-framerate", f"{out_fps:.3f}",
+                "-i", os.path.join(frames_out, "f_%06d.png"),
+                "-i", input_path,
+                "-map", "0:v:0", "-map", "1:a:0?",
+                *enc,
+                "-c:a", "aac", "-b:a", "160k",
+                "-shortest",
+                output_path,
+            ]
+            if start_sec > 0:
+                # 音频对齐：第二个输入 seek
+                cmd = [
+                    str(ffmpeg), "-y", "-hide_banner", "-loglevel", "error",
+                    "-framerate", f"{out_fps:.3f}",
+                    "-i", os.path.join(frames_out, "f_%06d.png"),
+                    "-ss", f"{start_sec:.3f}", "-i", input_path,
+                    "-map", "0:v:0", "-map", "1:a:0?",
+                    *enc,
+                    "-c:a", "aac", "-b:a", "160k",
+                    "-shortest",
+                    output_path,
+                ]
+            r = subprocess.run(
+                cmd, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", env=self._env,
+            )
+            if r.returncode != 0 or not os.path.isfile(output_path):
+                raise RuntimeError((r.stderr or "RIFE 编码失败").strip())
+            report(100.0, "RIFE 完成")
+            return output_path
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     @property
     def yt_dlp_available(self) -> bool:
@@ -2193,26 +2413,41 @@ class MediaBridge:
         output_path: str,
         *,
         reencode: bool = False,
+        quality: str = "high",
     ) -> str:
-        """按时间切一段视频。优先 stream copy，失败再重编码。"""
+        """按时间切一段视频。默认 stream copy（remux）；失败或要求重编码再编码。"""
         if end_sec <= start_sec:
             raise ValueError(f"无效时间段: {start_sec:.3f} → {end_sec:.3f}")
         ffmpeg = _find_ffmpeg()
         duration = end_sec - start_sec
         os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+        q = (quality or "high").strip().lower() or "high"
 
         def _run(copy: bool) -> subprocess.CompletedProcess:
-            cmd = [
-                str(ffmpeg), "-y",
-                "-ss", f"{max(0.0, start_sec):.3f}",
-                "-i", input_path,
-                "-t", f"{duration:.3f}",
-            ]
             if copy:
-                cmd.extend(["-c", "copy", "-avoid_negative_ts", "make_zero"])
+                # 关键 -ss：按关键帧快速切，适合 remux
+                cmd = [
+                    str(ffmpeg), "-y", "-hide_banner",
+                    "-ss", f"{max(0.0, start_sec):.3f}",
+                    "-i", input_path,
+                    "-t", f"{duration:.3f}",
+                    "-c", "copy",
+                    "-avoid_negative_ts", "make_zero",
+                    *_mux_flags(),
+                    output_path,
+                ]
             else:
-                cmd.extend([*_video_encoder_args(), "-c:a", "aac", "-b:a", "192k"])
-            cmd.append(output_path)
+                # 输入后 -ss：帧精确；按质量档编码
+                cmd = [
+                    str(ffmpeg), "-y", "-hide_banner",
+                    "-i", input_path,
+                    "-ss", f"{max(0.0, start_sec):.3f}",
+                    "-t", f"{duration:.3f}",
+                    *_video_encoder_args(quality=q),
+                    *_audio_encoder_args(quality=q),
+                    *_mux_flags(),
+                    output_path,
+                ]
             return subprocess.run(
                 cmd, capture_output=True, text=True,
                 encoding="utf-8", errors="replace", env=self._env,
@@ -2225,6 +2460,27 @@ class MediaBridge:
         result = _run(False)
         if result.returncode != 0 or not os.path.isfile(output_path):
             raise RuntimeError(result.stderr.strip() or "片段导出失败")
+        return output_path
+
+    def remux_copy(self, input_path: str, output_path: str) -> str:
+        """仅改封装（-c copy），不重编码。用于 mp4↔mov 等。"""
+        if not input_path or not os.path.isfile(input_path):
+            raise FileNotFoundError(input_path)
+        ffmpeg = _find_ffmpeg()
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+        cmd = [
+            str(ffmpeg), "-y", "-hide_banner",
+            "-i", input_path,
+            "-c", "copy",
+            *_mux_flags(),
+            output_path,
+        ]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", env=self._env,
+        )
+        if result.returncode != 0 or not os.path.isfile(output_path):
+            raise RuntimeError(result.stderr.strip() or "remux 失败")
         return output_path
 
     def concat_clips(self, clip_paths: List[str], output_path: str) -> str:
@@ -2248,14 +2504,18 @@ class MediaBridge:
 
             def _run(copy: bool) -> subprocess.CompletedProcess:
                 cmd = [
-                    str(ffmpeg), "-y",
+                    str(ffmpeg), "-y", "-hide_banner",
                     "-f", "concat", "-safe", "0",
                     "-i", list_path,
                 ]
                 if copy:
-                    cmd.extend(["-c", "copy"])
+                    cmd.extend(["-c", "copy", *_mux_flags()])
                 else:
-                    cmd.extend([*_video_encoder_args(), "-c:a", "aac", "-b:a", "192k"])
+                    cmd.extend([
+                        *_video_encoder_args(quality="high"),
+                        *_audio_encoder_args(quality="high"),
+                        *_mux_flags(),
+                    ])
                 cmd.append(output_path)
                 return subprocess.run(
                     cmd, capture_output=True, text=True,
@@ -2282,14 +2542,20 @@ class MediaBridge:
         *,
         concat: bool = True,
         on_progress: Optional[Callable[[float, str], None]] = None,
+        max_height: int = 0,
+        quality: str = "high",
+        container: str = "mp4",
     ) -> Tuple[List[str], str]:
         """
-        导出高光片段到目录，并可选拼接成 highlights_merged.mp4。
-        返回 (clip_paths, merged_path)；未拼接时 merged_path 为空串。
+        导出高光片段到目录，并可选拼接成 highlights_merged.<ext>。
+        max_height>0 时对成片做缩放重编码；quality/container 控制输出。
         """
         if not segments:
             raise ValueError("没有可导出的高光片段")
         os.makedirs(output_dir, exist_ok=True)
+        ext = (container or "mp4").strip().lower().lstrip(".")
+        if ext not in ("mp4", "mov"):
+            ext = "mp4"
 
         def report(p: float, msg: str):
             if on_progress:
@@ -2297,13 +2563,18 @@ class MediaBridge:
 
         clips: List[str] = []
         total = len(segments)
+        q = (quality or "high").strip().lower() or "high"
+        need_param_reencode = bool(max_height and int(max_height) > 0) or (
+            q not in ("high", "")
+        )
         for i, (start, end) in enumerate(segments):
             if end <= start:
                 continue
-            name = f"highlight_{i + 1:03d}_{start:.1f}-{end:.1f}.mp4"
+            name = f"highlight_{i + 1:03d}_{start:.1f}-{end:.1f}.{ext}"
             out = os.path.join(output_dir, name)
             report(5.0 + i / max(total, 1) * 70.0, f"导出片段 {i + 1}/{total}")
-            self.export_clip(input_path, start, end, out)
+            # 分段优先 remux（-c copy），少起重编码
+            self.export_clip(input_path, start, end, out, reencode=False, quality=q)
             clips.append(out)
 
         if not clips:
@@ -2311,11 +2582,56 @@ class MediaBridge:
 
         merged = ""
         if concat:
-            merged = os.path.join(output_dir, "highlights_merged.mp4")
+            merged = os.path.join(output_dir, f"highlights_merged.{ext}")
             report(90.0, "正在拼接成片…")
             self.concat_clips(clips, merged)
+            # 仅当用户选了非「高」质量或分辨率限制时，整段一次重编码
+            if need_param_reencode and merged and os.path.isfile(merged):
+                report(94.0, "按导出参数重编码…")
+                tmp = merged + ".reenc.tmp." + ext
+                self._reencode_scaled(
+                    merged, tmp,
+                    max_height=int(max_height or 0),
+                    quality=q,
+                )
+                os.replace(tmp, merged)
         report(100.0, "导出完成")
         return clips, merged
+
+    def _reencode_scaled(
+        self,
+        input_path: str,
+        output_path: str,
+        *,
+        max_height: int = 0,
+        quality: str = "high",
+    ) -> str:
+        ffmpeg = _find_ffmpeg()
+        vf = []
+        mh = int(max_height or 0)
+        if mh > 0:
+            vf.append(f"scale=-2:{mh}")
+        cmd = [
+            str(ffmpeg), "-y", "-hide_banner",
+            "-i", input_path,
+        ]
+        if vf:
+            cmd.extend(["-vf", ",".join(vf)])
+        cmd.extend([
+            *_video_encoder_args(quality=quality),
+            *_audio_encoder_args(quality=quality),
+            *_mux_flags(),
+            output_path,
+        ])
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", env=self._env,
+        )
+        if result.returncode != 0 or not os.path.isfile(output_path):
+            raise RuntimeError(
+                (result.stderr or result.stdout or "重编码失败")[-400:]
+            )
+        return output_path
 
     @staticmethod
     def _parse_silence_intervals(ffmpeg_stderr: str) -> List[Tuple[float, float]]:
@@ -2460,12 +2776,15 @@ class MediaBridge:
         width: int = 1080,
         height: int = 1920,
         crop_bias: str = "center",
+        track_mode: str = "fixed",
         subtitle_path: Optional[str] = None,
         on_progress: Optional[Callable[[float, str], None]] = None,
+        quality: str = "high",
     ) -> str:
         """
         竖屏短视频：缩放到覆盖 9:16 后裁切，可选烧录外挂字幕。
         crop_bias: center | top | bottom（裁切窗在画面上的垂直位置）。
+        track_mode: fixed | face（智能跟脸；失败回退 fixed+crop_bias）。
         """
         if not input_path or not os.path.isfile(input_path):
             raise FileNotFoundError(f"输入不存在: {input_path}")
@@ -2474,6 +2793,22 @@ class MediaBridge:
         # 保证偶数（yuv420）
         w -= w % 2
         h -= h % 2
+        mode = (track_mode or "fixed").strip().lower()
+        if mode in ("face", "track", "跟脸", "智能跟脸"):
+            try:
+                return self._export_vertical_face_track(
+                    input_path, output_path,
+                    width=w, height=h, crop_bias=crop_bias,
+                    subtitle_path=subtitle_path,
+                    on_progress=on_progress, quality=quality,
+                )
+            except Exception as e:
+                def _rep(p: float, msg: str):
+                    if on_progress:
+                        on_progress(p, msg)
+                _rep(6.0, f"跟脸失败，回退固定裁切（{e}）…")
+                mode = "fixed"
+
         bias = (crop_bias or "center").strip().lower()
         if bias in ("top", "上", "0"):
             y_expr = "0"
@@ -2525,9 +2860,9 @@ class MediaBridge:
             str(ffmpeg), "-y", "-hide_banner", "-stats",
             "-i", input_path,
             "-vf", vf,
-            *_video_encoder_args(high_quality=True),
-            "-c:a", "aac", "-b:a", "192k",
-            "-movflags", "+faststart",
+            *_video_encoder_args(high_quality=True, quality=quality or "high"),
+            *_audio_encoder_args(quality=quality or "high"),
+            *_mux_flags(),
             output_path,
         ]
         try:
@@ -2545,7 +2880,7 @@ class MediaBridge:
                         str(ffmpeg), "-y", "-hide_banner", "-stats",
                         "-i", input_path,
                         "-vf", vf2,
-                        *_video_encoder_args(high_quality=True),
+                        *_video_encoder_args(high_quality=True, quality=quality or "high"),
                         "-c:a", "aac", "-b:a", "192k",
                         "-movflags", "+faststart",
                         output_path,
@@ -2568,6 +2903,117 @@ class MediaBridge:
                     os.remove(sub_tmp)
                 except OSError:
                     pass
+
+    def _export_vertical_face_track(
+        self,
+        input_path: str,
+        output_path: str,
+        *,
+        width: int,
+        height: int,
+        crop_bias: str = "center",
+        subtitle_path: Optional[str] = None,
+        on_progress: Optional[Callable[[float, str], None]] = None,
+        quality: str = "high",
+    ) -> str:
+        """分段 crop 跟脸；无人脸则抛错由上层回退 fixed。"""
+        from core.face_track import build_face_segments, sample_face_track, smooth_track
+
+        def report(p: float, msg: str):
+            if on_progress:
+                on_progress(p, msg)
+
+        report(4.0, "采样人脸轨迹…")
+        try:
+            info = self.probe_video(input_path)
+            dur = float(getattr(info, "duration_sec", 0) or 0.0)
+        except Exception:
+            dur = 0.0
+        raw = sample_face_track(input_path, duration_sec=dur, interval_sec=0.5)
+        if len(raw) < 2:
+            raise RuntimeError("未检测到足够人脸")
+        track = smooth_track(raw)
+        segs = build_face_segments(track, dur or track[-1].t, seg_sec=1.0)
+        if not segs:
+            raise RuntimeError("跟脸分段为空")
+
+        bias = (crop_bias or "center").strip().lower()
+        ffmpeg = _find_ffmpeg()
+        tmp = tempfile.mkdtemp(prefix="me_face_")
+        part_files: list[str] = []
+        try:
+            n = len(segs)
+            for i, (t0, t1, nx, ny) in enumerate(segs):
+                pct = 8.0 + (i / max(n, 1)) * 70.0
+                report(pct, f"跟脸裁切 {i + 1}/{n}…")
+                # 裁切窗中心跟随人脸；y 略受 bias 约束
+                if bias in ("top", "上"):
+                    y_expr = f"max(0\\,min(ih-oh\\,{ny}*ih-oh*0.35))"
+                elif bias in ("bottom", "下"):
+                    y_expr = f"max(0\\,min(ih-oh\\,{ny}*ih-oh*0.65))"
+                else:
+                    y_expr = f"max(0\\,min(ih-oh\\,{ny}*ih-oh-oh/2))"
+                x_expr = f"max(0\\,min(iw-ow\\,{nx}*iw-ow/2))"
+                vf = (
+                    f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+                    f"crop={width}:{height}:{x_expr}:{y_expr}"
+                )
+                part = os.path.join(tmp, f"part_{i:04d}.mp4")
+                cmd = [
+                    str(ffmpeg), "-y", "-hide_banner", "-loglevel", "error",
+                    "-ss", f"{t0:.3f}", "-i", input_path,
+                    "-t", f"{max(0.05, t1 - t0):.3f}",
+                    "-vf", vf,
+                    *_video_encoder_args(high_quality=True, quality=quality or "high"),
+                    *_audio_encoder_args(quality=quality or "high"),
+                    part,
+                ]
+                r = subprocess.run(
+                    cmd, capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", env=self._env,
+                )
+                if r.returncode != 0 or not os.path.isfile(part):
+                    raise RuntimeError((r.stderr or "分段导出失败").strip())
+                part_files.append(part)
+
+            report(85.0, "拼接跟脸竖屏…")
+            lst = os.path.join(tmp, "list.txt")
+            with open(lst, "w", encoding="utf-8") as f:
+                for p in part_files:
+                    ap = os.path.abspath(p).replace("\\", "/")
+                    f.write(f"file '{ap}'\n")
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+            cmd = [
+                str(ffmpeg), "-y", "-hide_banner", "-loglevel", "error",
+                "-f", "concat", "-safe", "0", "-i", lst,
+                "-c", "copy",
+                *_mux_flags(),
+                output_path,
+            ]
+            r = subprocess.run(
+                cmd, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", env=self._env,
+            )
+            if r.returncode != 0 or not os.path.isfile(output_path):
+                # concat copy 失败则重编码
+                cmd = [
+                    str(ffmpeg), "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "concat", "-safe", "0", "-i", lst,
+                    *_video_encoder_args(high_quality=True, quality=quality or "high"),
+                    *_audio_encoder_args(quality=quality or "high"),
+                    *_mux_flags(),
+                    output_path,
+                ]
+                r = subprocess.run(
+                    cmd, capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", env=self._env,
+                )
+                if r.returncode != 0 or not os.path.isfile(output_path):
+                    raise RuntimeError((r.stderr or "跟脸拼接失败").strip())
+            report(100.0, "跟脸竖屏完成")
+            return output_path
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def apply_color_grade(
         self,
@@ -2680,6 +3126,26 @@ class MediaBridge:
                 voice_volume=voice_volume,
                 loop_bgm=loop_bgm,
             ),
+            on_progress=on_progress,
+        )
+
+    def overlay_sfx(
+        self,
+        video_path: str,
+        sfx_path: str,
+        output_path: str,
+        params=None,
+        *,
+        on_progress: Optional[Callable[[float, str], None]] = None,
+    ) -> str:
+        """梗音效叠加：延迟 + 倍数 + 音量（FFmpeg）。"""
+        from core.sfx_overlay import SfxOverlayParams, overlay_sfx
+
+        return overlay_sfx(
+            video_path,
+            sfx_path,
+            output_path,
+            params if params is not None else SfxOverlayParams(),
             on_progress=on_progress,
         )
 

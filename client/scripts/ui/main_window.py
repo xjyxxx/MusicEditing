@@ -8,7 +8,7 @@ import threading
 from PySide6.QtCore import Qt, Signal, Slot, QEvent, QPoint, QSize, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout, QGroupBox,
+    QApplication, QDialog, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QProgressBar, QPushButton, QSlider, QComboBox, QStackedWidget,
     QVBoxLayout, QWidget,
@@ -23,10 +23,14 @@ from ui.comment_marquee import (
 from ui.cover_page import CoverPage
 from ui.download_page import DownloadPage
 from ui.enhance_page import EnhancePage
+from ui.export_options_dialog import ExportOptionsDialog
 from ui.highlight_timeline import HighlightTimelineWidget
+from ui.media_library_page import MediaLibraryPage
 from ui.pipeline_queue_page import PipelineQueuePage
 from ui.profile_page import ProfilePage
-from ui.theme import app_stylesheet
+from ui.setup_wizard import SetupWizardDialog
+from ui.stego_page import StegoPage
+from ui.theme import app_stylesheet, style_spinbox
 from ui.video_player import VideoPlayerWidget, _is_audio_file
 from ui.watermark_page import WatermarkPage
 from ui.workflow_link import (
@@ -37,6 +41,11 @@ from ui.workflow_link import (
     TAB_DOWNLOAD,
     TAB_ENHANCE,
     TAB_HOME,
+    TAB_LIBRARY,
+    TAB_PIPELINE,
+    TAB_PROFILE,
+    TAB_SLICE,
+    TAB_STEGO,
     TAB_WATERMARK,
     ask_video_handoff,
 )
@@ -222,6 +231,7 @@ class SlicePage(QWidget):
         super().__init__(parent)
         self._vm = vm
         self._handoff = handoff  # Callable[[str, int], None]
+        self._pending_publish = None
         self._duration_sec = 0.0
         self._syncing_selection = False
         self._last_result_path = ""
@@ -302,12 +312,14 @@ class SlicePage(QWidget):
         self._manual_start.setDecimals(1)
         self._manual_start.setSuffix(" s")
         self._manual_start.setSingleStep(0.5)
+        style_spinbox(self._manual_start)
         self._manual_end = QDoubleSpinBox()
         self._manual_end.setRange(0.0, 86400.0)
         self._manual_end.setDecimals(1)
         self._manual_end.setSuffix(" s")
         self._manual_end.setSingleStep(0.5)
         self._manual_end.setValue(10.0)
+        style_spinbox(self._manual_end)
         self._manual_range_label = QLabel("0:00 – 0:10")
         self._manual_range_label.setObjectName("InfoText")
         self._manual_start.valueChanged.connect(self._on_manual_spin)
@@ -595,12 +607,22 @@ class SlicePage(QWidget):
         if not self._vm.get_app_state().highlight_segments:
             QMessageBox.warning(self, "提示", "请先添加片段（AI 分析或手动切片）")
             return
+        opts_dlg = ExportOptionsDialog(self, title="高光成片导出参数")
+        if opts_dlg.exec() != QDialog.Accepted:
+            return
+        opts = opts_dlg.options()
         out_dir = QFileDialog.getExistingDirectory(self, "选择导出目录")
         if not out_dir:
             return
         self._progress.setVisible(True)
         self._progress.setValue(0)
-        self._vm.export_highlights(out_dir, concat=True)
+        self._vm.export_highlights(
+            out_dir,
+            concat=True,
+            max_height=opts.max_height,
+            quality=opts.quality,
+            container=opts.container,
+        )
 
     @Slot()
     def _on_vertical_export(self):
@@ -616,7 +638,7 @@ class SlicePage(QWidget):
         if not use_hl:
             tip = (
                 "当前没有高光片段。\n"
-                "将对整段视频做 9:16 竖屏裁切（有同名字幕则烧录）。\n\n继续？"
+                "将对整段视频做 9:16 竖屏裁切。\n\n继续？"
             )
             if QMessageBox.question(self, "竖屏短视频", tip) != QMessageBox.Yes:
                 return
@@ -627,36 +649,57 @@ class SlicePage(QWidget):
         bias_box.setText(
             "选择画面裁切锚点（横屏素材变 9:16 时保留哪一侧）："
             + ("\n将先拼接高光成片再竖屏导出。" if use_hl else "")
+            + "\n口播建议用「智能跟脸」。"
         )
+        btn_face = bias_box.addButton("智能跟脸", QMessageBox.AcceptRole)
         btn_c = bias_box.addButton("居中", QMessageBox.AcceptRole)
         btn_t = bias_box.addButton("偏上", QMessageBox.AcceptRole)
         btn_b = bias_box.addButton("偏下", QMessageBox.AcceptRole)
         bias_box.addButton("取消", QMessageBox.RejectRole)
         bias_box.exec()
         clicked = bias_box.clickedButton()
-        if clicked is None or clicked not in (btn_c, btn_t, btn_b):
+        if clicked is None or clicked not in (btn_face, btn_c, btn_t, btn_b):
             return
-        if clicked is btn_t:
+        track_mode = "fixed"
+        if clicked is btn_face:
+            track_mode = "face"
+            bias = "center"
+        elif clicked is btn_t:
             bias = "top"
         elif clicked is btn_b:
             bias = "bottom"
         else:
             bias = "center"
 
+        opts_dlg = ExportOptionsDialog(self, title="竖屏导出参数")
+        if opts_dlg.exec() != QDialog.Accepted:
+            return
+        opts = opts_dlg.options()
+        vw, vh = opts.vertical_size
+
         base = os.path.splitext(os.path.basename(video.file_path))[0]
-        default = f"{base}_vertical.mp4"
+        default = f"{base}_vertical.{opts.container}"
+        filt = "MP4 (*.mp4);;MOV (*.mov);;所有文件 (*.*)"
         out, _ = QFileDialog.getSaveFileName(
-            self, "保存竖屏短视频", default,
-            "MP4 (*.mp4);;所有文件 (*.*)",
+            self, "保存竖屏短视频", default, filt,
         )
         if not out:
             return
+        # 后缀与容器对齐
+        root, ext = os.path.splitext(out)
+        if ext.lower().lstrip(".") != opts.container:
+            out = f"{root}.{opts.container}"
+        self._pending_publish = opts
         self._progress.setVisible(True)
         self._progress.setValue(0)
         self._vm.export_vertical_short(
             out,
             crop_bias=bias,
+            track_mode=track_mode,
             use_highlights=use_hl,
+            width=vw,
+            height=vh,
+            quality=opts.quality,
         )
 
     @Slot()
@@ -733,11 +776,33 @@ class SlicePage(QWidget):
     def _on_vertical_done(self, path: str):
         self._progress.setValue(100)
         self._last_result_path = path or ""
+        extra = ""
+        opts = getattr(self, "_pending_publish", None)
+        self._pending_publish = None
+        if path and opts and (getattr(opts, "make_cover", False) or getattr(opts, "make_topic_draft", False)):
+            try:
+                from core.publish_pack import make_publish_pack, write_topic_draft
+                cover = draft = ""
+                if opts.make_cover and self._vm.bridge:
+                    cover, draft = make_publish_pack(
+                        self._vm.bridge, path,
+                        width=opts.vertical_size[0], height=opts.vertical_size[1],
+                    )
+                elif opts.make_topic_draft:
+                    draft = write_topic_draft(path)
+                bits = []
+                if cover:
+                    bits.append(f"封面：{os.path.basename(cover)}")
+                if draft:
+                    bits.append(f"话题草稿：{os.path.basename(draft)}")
+                if bits:
+                    extra = "\n" + " · ".join(bits)
+            except Exception as e:
+                extra = f"\n（发布包生成失败：{e}）"
         tab = ask_video_handoff(
             self,
             "竖屏短视频完成",
-            f"9:16 成片已保存：\n{path}\n\n"
-            "有同名字幕时已尝试烧录（高光片段已重定时）。\n"
+            f"9:16 成片已保存：\n{path}{extra}\n\n"
             "可继续送去超分或去水印。",
             [("送去超分", TAB_ENHANCE), ("送去去水印", TAB_WATERMARK)],
         )
@@ -785,6 +850,7 @@ class MainWindow(QMainWindow):
         self._weather_pulse_timer: QTimer | None = None
         self._weather_pulse_n = 0
         self._weather_base_qss = ""
+        self._setup_wizard_shown = False
         self._weather_default_qss = (
             "QLabel#ChromeWeather {"
             " background: #2A4A48; color: #B8EDE4; border: 1px solid #3A6A64;"
@@ -851,6 +917,8 @@ class MainWindow(QMainWindow):
         self._audio_fun_page = AudioFunPage(self._vm)
         self._bgm_page = BgmPage(self._vm)
         self._profile_page = ProfilePage(self._vm)
+        self._library_page = MediaLibraryPage(self._vm, handoff=self.open_with_video)
+        self._stego_page = StegoPage(self._vm)
         for page in (
             self._home_page,
             self._slice_page,
@@ -862,6 +930,8 @@ class MainWindow(QMainWindow):
             self._audio_fun_page,
             self._bgm_page,
             self._profile_page,
+            self._library_page,
+            self._stego_page,
         ):
             self._stack.addWidget(page)
         main_layout.addWidget(self._stack, 1)
@@ -884,14 +954,56 @@ class MainWindow(QMainWindow):
         # 天气刷新依赖底栏提示，放在 status_label 之后
         self._start_weather_refresh()
 
-        # GPU 提示
+        # GPU 提示（向导未弹出时再提示）
         from core.app_logic import AppLogic
+        from core.setup_status import should_show_setup_wizard
         app = AppLogic()
-        if not app.gpu_info["cuda_available"]:
+        QTimer.singleShot(400, lambda: self._maybe_show_setup_wizard(app))
+        if not should_show_setup_wizard(app) and not app.gpu_info["cuda_available"]:
             QMessageBox.information(
                 self, "硬件提示",
                 "当前为 CPU 模式，处理速度较慢。\n支持 NVIDIA 显卡硬件加速（CUDA）。"
             )
+
+    def _maybe_show_setup_wizard(self, app=None):
+        if self._setup_wizard_shown:
+            return
+        from core.setup_status import should_show_setup_wizard
+        if not should_show_setup_wizard(app):
+            return
+        self._setup_wizard_shown = True
+        dlg = SetupWizardDialog(self._vm, self)
+        dlg.exec()
+
+    def open_setup_wizard(self):
+        dlg = SetupWizardDialog(self._vm, self)
+        dlg.exec()
+
+    def navigate_to(self, name: str):
+        """向导 / 首页卡片用字符串导航。"""
+        key = (name or "").strip().lower()
+        mapping = {
+            "home": TAB_HOME,
+            "slice": TAB_SLICE,
+            "enhance": TAB_ENHANCE,
+            "watermark": TAB_WATERMARK,
+            "download": TAB_DOWNLOAD,
+            "pipeline": TAB_PIPELINE,
+            "profile": TAB_PROFILE,
+            "library": TAB_LIBRARY,
+            "cover": TAB_COVER,
+            "stego": TAB_STEGO,
+        }
+        idx = mapping.get(key)
+        if idx is None:
+            return
+        if key == "pipeline" and getattr(self, "_pending_library_path", ""):
+            path = self._pending_library_path
+            self._pending_library_path = ""
+            self._goto_page(TAB_PIPELINE)
+            self._pipeline_page.enqueue_paths([path])
+            return
+        self._goto_page(idx)
 
     def _start_weather_refresh(self):
         """后台拉取天气，不阻塞 UI；每 30 分钟刷新。"""
@@ -1153,8 +1265,13 @@ class MainWindow(QMainWindow):
 
 def run_app():
     import sys
+    from ui.theme import app_stylesheet, apply_dark_palette
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    apply_dark_palette(app)
+    # 应用到 QApplication，下拉弹出层也能吃到深色 QSS（避免白边）
+    app.setStyleSheet(app_stylesheet())
     app.setQuitOnLastWindowClosed(True)
     win = MainWindow()
     app.aboutToQuit.connect(win.shutdown)

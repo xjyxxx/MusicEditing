@@ -181,16 +181,21 @@ stop()
 ```
 有音频播放 tick:
     audio_sec = QtAudioOutput.position_sec()     # 主时钟
+    [软校正] 开播 4s 后；画面落后≥450ms 或超前≥350ms 连续约 20 次
+           → 仅 backend.seek（不 seek 音轨）；冷却 6s
     want_idx  = 已显示帧 index + 1（落后太多则跳到 audio_idx 附近）
     next_frame(min_ts = want_idx * frame_interval)
         → C++ 丢弃过旧帧（skipped）再写 RGB
-    进度条 / 字幕时间 ≈ audio_sec
+    进度条 ≈ audio_sec
 
 无音频:
     纯按 fps timer 连续 NEXT
 ```
 
-对齐点：`play` / `pause` / `seek` 两端一起动；长播漂移依赖音频追帧，不是工业级锁相。
+对齐点：`play` / `pause` / `seek` 两端一起动；跳帧追音频为主。  
+**漂移软校正**仅在画面落后 ≥450ms 或超前 ≥350ms、且开播 4s 后、冷却 6s，且**只 seek 视频不碰音轨**（避免爆音/卡顿）。常态 200~300ms 解码滞后不触发。
+
+**媒体信息（封装层洞察）：** 控制栏「信息」→ `core/media_probe.probe_media`（ffprobe JSON）→ `MediaInfoDialog` 键值表 + 复制摘要；打开文件后标题 Tooltip 也会异步写入一行摘要。
 
 ---
 

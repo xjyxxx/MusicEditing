@@ -187,6 +187,7 @@ class AppLogic:
             self.auth_type = "正式版"
         else:
             self.auth_type = "试用版"
+
         # 解析并校验 Vosk 目录（避免空串/「.」被当成模型路径）
         try:
             from core.asr_engine import resolve_vosk_model_dir, is_vosk_model_dir
@@ -227,6 +228,11 @@ class AppLogic:
                     pass
             else:
                 self._yt_cookies_warn = reason if reason.startswith("warn_") else ""
+
+    @property
+    def is_licensed(self) -> bool:
+        """正式版：有卡密指纹且 auth_type 为正式版。"""
+        return bool(self.license_fp) and self.auth_type in ("正式版", "已授权")
 
     def set_yt_dlp_cookies_file(self, path: str) -> str:
         """设置 Netscape cookies.txt 路径并写入 app.conf；空串表示清除。"""

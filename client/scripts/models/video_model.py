@@ -28,6 +28,7 @@ class TaskType(IntEnum):
     AUDIO_FX = 8
     BGM_MIX = 9
     DEMUCS = 10
+    SFX_OVERLAY = 11
 
 
 @dataclass
@@ -98,6 +99,8 @@ class EnhanceParams:
     backend: str = "opencv"
     # AI 与双三次混合强度 0~100，越小越自然（减轻假锐）
     strength: int = 65
+    # Real-ESRGAN tile（0=默认 384；高级选项 256/512/768）
+    tile: int = 0
 
 
 @dataclass

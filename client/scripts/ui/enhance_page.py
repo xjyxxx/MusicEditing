@@ -337,6 +337,13 @@ class EnhancePage(QWidget):
         hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         root.addWidget(hint)
 
+        self._ai_hint = QLabel("")
+        self._ai_hint.setObjectName("MutedText")
+        self._ai_hint.setWordWrap(True)
+        root.addWidget(self._ai_hint)
+        self._refresh_ai_hint()
+        vm.gpuNameChanged.connect(lambda _n: self._refresh_ai_hint())
+
         self._tabs = QTabWidget()
         self._tabs.setObjectName("EnhanceInnerTabs")
         self._tabs.setMinimumWidth(0)
@@ -363,6 +370,8 @@ class EnhancePage(QWidget):
         vm.colorGradeFinished.connect(self._on_grade_finished)
         vm.errorOccurred.connect(self._show_error)
         vm.videoLoaded.connect(self._on_video_loaded)
+        vm.authTypeChanged.connect(lambda _a: self._refresh_license_gates())
+        self._refresh_license_gates()
 
     def _build_mode_panel(self, prefix: str, default_ai: bool) -> QWidget:
         box = QGroupBox("处理参数")
@@ -414,11 +423,25 @@ class EnhancePage(QWidget):
         preset.addStretch()
         col.addLayout(preset)
 
+        tile_row = QHBoxLayout()
+        tile_row.addWidget(QLabel("高级 tile"))
+        tile = QComboBox()
+        tile.addItem("默认 384", 0)
+        tile.addItem("256（省显存）", 256)
+        tile.addItem("512", 512)
+        tile.addItem("768（大图）", 768)
+        tile.setToolTip("Real-ESRGAN 分块尺寸（MUSIC_UPSCALE_TILE）")
+        tile_row.addWidget(tile)
+        tile_row.addStretch()
+        col.addLayout(tile_row)
+
         setattr(self, f"_{prefix}_mode_fast", fast)
         setattr(self, f"_{prefix}_mode_ai", ai)
         setattr(self, f"_{prefix}_scale_2", s2)
         setattr(self, f"_{prefix}_scale_4", s4)
         setattr(self, f"_{prefix}_strength", strength)
+        setattr(self, f"_{prefix}_tile", tile)
+        ai.toggled.connect(lambda _=False, p=prefix: self._refresh_license_gates())
         return box
 
     def _build_image_tab(self) -> QWidget:
@@ -630,6 +653,22 @@ class EnhancePage(QWidget):
         q_l.addStretch()
         layout.addWidget(q_box)
 
+        be_box = QGroupBox("补帧引擎")
+        be_l = QHBoxLayout(be_box)
+        self._interp_be_ffmpeg = QRadioButton("FFmpeg（默认）")
+        self._interp_be_rife = QRadioButton("RIFE ONNX（可选）")
+        self._interp_be_ffmpeg.setChecked(True)
+        self._interp_be_rife.setToolTip(
+            "需 models/rife.onnx；失败自动回退 FFmpeg minterpolate"
+        )
+        self._interp_be_group = QButtonGroup(self)
+        self._interp_be_group.addButton(self._interp_be_ffmpeg)
+        self._interp_be_group.addButton(self._interp_be_rife)
+        be_l.addWidget(self._interp_be_ffmpeg)
+        be_l.addWidget(self._interp_be_rife)
+        be_l.addStretch()
+        layout.addWidget(be_box)
+
         range_box = QGroupBox("处理时间段（默认试 15 秒，可改全程）")
         rc = QVBoxLayout(range_box)
         start_row = QHBoxLayout()
@@ -805,8 +844,46 @@ class EnhancePage(QWidget):
         outer.addWidget(scroll)
         return page
 
+    def _refresh_ai_hint(self):
+        lbl = getattr(self, "_ai_hint", None)
+        if lbl is None:
+            return
+        fn = getattr(self._vm, "ai_runtime_hint", None)
+        lbl.setText(fn() if callable(fn) else "")
+
+    def _refresh_license_gates(self):
+        """试用：灰显 AI 4×；正式版全开。"""
+        self._refresh_ai_hint()
+        licensed = bool(getattr(self._vm, "is_licensed", False))
+        tip = "" if licensed else "正式版可用 · 请到「个人中心」兑换卡密"
+        for prefix in ("img", "vid"):
+            s4 = getattr(self, f"_{prefix}_scale_4", None)
+            ai = getattr(self, f"_{prefix}_mode_ai", None)
+            if s4 is None:
+                continue
+            # 仅当选 AI 时限制 4×；快速 OpenCV 的 4× 仍可用
+            need_gate = (not licensed) and (ai is None or ai.isChecked())
+            s4.setEnabled(not need_gate)
+            s4.setToolTip(tip if need_gate else "AI 超分 4×")
+            if need_gate and s4.isChecked():
+                s2 = getattr(self, f"_{prefix}_scale_2", None)
+                if s2:
+                    s2.setChecked(True)
+
     def _current_scale(self, prefix: str) -> int:
         return 4 if getattr(self, f"_{prefix}_scale_4").isChecked() else 2
+
+    def _current_tile(self, prefix: str) -> int:
+        combo = getattr(self, f"_{prefix}_tile", None)
+        if combo is None:
+            return 0
+        return int(combo.currentData() or 0)
+
+    def _apply_tile(self, prefix: str) -> None:
+        try:
+            self._vm.get_app_state().enhance_params.tile = self._current_tile(prefix)
+        except Exception:
+            pass
 
     def _current_backend(self, prefix: str) -> str:
         return "opencv" if getattr(self, f"_{prefix}_mode_fast").isChecked() else "realesrgan"
@@ -1087,6 +1164,7 @@ class EnhancePage(QWidget):
         self._set_busy(True)
         self._img_compare.clear_result("超分处理中…")
         self._status.setText("超分处理中…")
+        self._apply_tile("img")
         self._vm.start_enhance_image(
             state.current_image_path, out,
             scale=self._current_scale("img"),
@@ -1129,6 +1207,7 @@ class EnhancePage(QWidget):
         self._set_busy(True)
         self._vid_compare.clear_result("视频超分处理中…")
         self._status.setText("视频超分处理中…")
+        self._apply_tile("vid")
         self._vm.start_enhance_video(
             out, start, end, scale=scale, backend=backend,
             strength=self._current_strength("vid"),
@@ -1381,9 +1460,11 @@ class EnhancePage(QWidget):
         self._set_busy(True)
         range_txt = "全程" if full else f"{dur:.1f}s"
         mode_txt = "精细" if quality == "quality" else "快速"
-        self._status.setText(f"补帧处理中（{mode_txt} {factor}x · {range_txt}）…")
+        be = "rife" if getattr(self, "_interp_be_rife", None) and self._interp_be_rife.isChecked() else "ffmpeg"
+        eng = "RIFE" if be == "rife" else mode_txt
+        self._status.setText(f"补帧处理中（{eng} {factor}x · {range_txt}）…")
         self._vm.start_interpolate_video(
-            out, factor=factor, start_sec=start, end_sec=end, quality=quality,
+            out, factor=factor, start_sec=start, end_sec=end, quality=quality, backend=be,
         )
 
     @Slot(int, str)

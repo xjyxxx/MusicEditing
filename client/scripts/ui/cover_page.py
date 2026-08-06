@@ -8,13 +8,16 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QComboBox, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QCheckBox, QComboBox, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QProgressBar, QPushButton, QSpinBox, QTextEdit, QVBoxLayout,
     QWidget,
 )
 
+from core.blind_watermark_dct import embed_text_dct
 from core.cover_factory import COVER_SIZES
+from core.exif_stamp import ExifStamp, stamp_exif
 from ui.elided_label import ElidedPathLabel
+from ui.theme import style_spinbox
 from viewmodels.main_vm import MainViewModel
 
 
@@ -77,10 +80,25 @@ class CoverPage(QWidget):
         self._count = QSpinBox()
         self._count.setRange(4, 36)
         self._count.setValue(12)
+        style_spinbox(self._count)
         size_row.addWidget(self._count)
         size_row.addStretch()
         opt.addLayout(size_row)
         root.addWidget(opt_box)
+
+        stamp_box = QGroupBox("导出后溯源（可选）")
+        stamp_lay = QVBoxLayout(stamp_box)
+        self._chk_exif = QCheckBox("写入 EXIF 署名（作者=大标题，备注含 MusicEditing）")
+        self._chk_dct = QCheckBox("嵌入频域隐形水印（文字=大标题）")
+        self._chk_exif.setChecked(False)
+        self._chk_dct.setChecked(False)
+        stamp_lay.addWidget(self._chk_exif)
+        stamp_lay.addWidget(self._chk_dct)
+        tip_s = QLabel("频域水印会就地改写导出的 PNG；需 ExifTool 才写 EXIF。")
+        tip_s.setObjectName("MutedText")
+        tip_s.setWordWrap(True)
+        stamp_lay.addWidget(tip_s)
+        root.addWidget(stamp_box)
 
         preview_box = QGroupBox("预览")
         prev = QHBoxLayout(preview_box)
@@ -245,8 +263,37 @@ class CoverPage(QWidget):
             size = getattr(meta, "size", None)
             if size:
                 lines.append(f"尺寸: {size[0]}×{size[1]}")
+        extra = []
+        title = self._title.text().strip() or Path(path).stem
+        if path and os.path.isfile(path) and self._chk_dct.isChecked():
+            try:
+                embed_text_dct(path, path, title[:96])
+                extra.append("已嵌频域水印")
+            except Exception as e:
+                extra.append(f"频域水印失败: {e}")
+        if path and os.path.isfile(path) and self._chk_exif.isChecked():
+            try:
+                stamp_exif(
+                    path,
+                    ExifStamp(
+                        artist=title[:64],
+                        title=title[:128],
+                        comment=f"MusicEditing cover · {self._subtitle.text().strip()}",
+                        copyright="MusicEditing",
+                    ),
+                    output_path=None,
+                )
+                extra.append("已写 EXIF")
+            except Exception as e:
+                extra.append(f"EXIF 失败: {e}")
+        if extra:
+            lines.append(" · ".join(extra))
+            self._status.setText(self._status.text() + " · " + " · ".join(extra))
         self._meta.setPlainText("\n".join(lines))
-        QMessageBox.information(self, "封面完成", f"已保存：\n{path}")
+        tip = f"已保存：\n{path}"
+        if extra:
+            tip += "\n" + "\n".join(extra)
+        QMessageBox.information(self, "封面完成", tip)
 
     @Slot(str)
     def _on_error(self, msg: str):

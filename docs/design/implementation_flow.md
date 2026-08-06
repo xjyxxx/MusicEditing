@@ -15,7 +15,7 @@
 | [§2 构建与启动](#2-构建与启动流程) | x64 / Win32、启动退出 |
 | [§3 MVVM](#3-mvvm-分层实现) | Model / VM / View、播放器、OpenCV、去水印/超分、GPU |
 | [§4 C++ 引擎](#4-c-媒体引擎实现流程) | VideoDecoder、C API、CLI 协议 |
-| [§5 业务链路](#5-业务功能链路) | 5.1 切片 · 5.8 字幕已移除 · 5.12 波形响度 · 5.14 封面 · 5.16 BGM · … |
+| [§5 业务链路](#5-业务功能链路) | 切片/热评/竖屏跟脸/开箱向导/素材库/溯源水印/RIFE · … |
 | [§6 模块依赖](#6-模块间依赖关系) | CMake / Python 树 |
 | [§7 状态表](#7-已实现-vs-待实现) | ✅ / ⏳ |
 | [§8 llama.cpp](#8-llamacpp-集成说明) | 目录与 CMake |
@@ -30,7 +30,7 @@
 
 ## 1. 总体架构
 
-**C++ 媒体引擎 + Python/PySide6 UI**；Python 经 **MediaBridge / PlayerBackend 子进程**调用 `media_cli.exe`、`media_player.exe` 与捆绑 `ffmpeg.exe`（stdout=协议，stderr=日志）。
+**C++ 媒体引擎 + Python/PySide6 UI**；Python 经 **MediaBridge / PlayerBackend** 调用引擎：短调用（`probe` / `thumbnail`）优先 **ctypes 直连 `media_engine.dll`**，失败回退 `media_cli.exe`；播放仍用 `media_player.exe`；批处理导出用捆绑 `ffmpeg.exe`（stdout=协议，stderr=日志）。
 
 日常推荐 **x64**（`build_x64.bat` + `run_ui_x64.bat`）。
 
@@ -170,7 +170,7 @@ MainWindow.shutdown()
 | 下载与热评 | `DownloadPage`（一步获取） | 工作流 | 评论列表 + 唯一媒体 → 首页叠播 |
 | BGM 混音 | `BgmPage` | 工作流 | FFmpeg 叠 BGM；Demucs 可选分轨（§5.16） |
 | 封面工厂 | `CoverPage` | 趣味 | 最清晰帧 + 标题 PNG（§5.14） |
-| 音频趣味 | `AudioFunPage` | 趣味 | 变调/变速/倒放/8D/混响（§5.15） |
+| 音频趣味 | `AudioFunPage` | 趣味 | 整轨趣味 + 梗音叠加/倍数（§5.15） |
 | 个人中心 | `ProfilePage` | 帮助 | 卡密本地校验、GPU 开关、输出目录、关于 |
 
 播放器组件：`client/scripts/ui/video_player.py`（`GlVideoWidget` OpenGL + `PlayerBackend` → `media_player.exe`）
@@ -199,9 +199,9 @@ MainWindow.shutdown()
 HomePage
   ├─ VideoPlayerWidget（Python GUI）
   │    ├─ GlVideoWidget（QOpenGLWidget）显示 RGB 帧；点击画面 → 未加载时打开文件对话框（同「打开文件」），已加载则暂停/继续；暂停时中央显示三角播放图标
-  │    ├─ 视频：FFmpeg 解码画面 + Qt QMediaPlayer 音频主时钟
+  │    ├─ 视频：FFmpeg 解码画面 + Qt QMediaPlayer 音频主时钟；长播漂移可软校正（seek 对齐，见 player_decode_flow §5）
   │    ├─ 音乐：仅 Qt QMediaPlayer（mp3/wav/flac/m4a…），封面占位图
-  │    ├─ 「打开文件」同时支持视频与音乐过滤器
+  │    ├─ 「打开文件」同时支持视频与音乐过滤器；「信息」→ ffprobe 媒体信息对话框
   │    ├─ 打开视频 → fileOpened → ViewModel.import_video（全局共享）
   │    └─ 打开音乐不导入切片链路（避免当视频 probe）
   └─ videoLoaded 信号 → 智能切片页导入后，主页播放器自动同步加载
@@ -385,9 +385,9 @@ media_cli watermark-inpaint models/lama.onnx in.png out.png <x> <y> <w> <h> [x2 
 
 快速模式示例：`set MUSIC_WATERMARK_BACKEND=opencv` 后 path 传 `-` 即可。
 
-环境变量 `MUSIC_ORT_CUDA=1` 可尝试 CUDA EP（**默认关闭**）。项目**不再**捆绑 `third_party/cuda_runtime`；缺库时回退 CPU，再失败回退 OpenCV inpaint。
+个人中心开启 GPU 且检测到 NVIDIA 时，`MediaBridge.set_prefer_cuda(True)` 将子进程环境设为 `MUSIC_ORT_CUDA=1`，超分/LaMa 优先尝试 CUDA EP；缺 CUDA 运行库或 EP 失败则回退 CPU，再失败回退 OpenCV inpaint。项目**不再**捆绑 `third_party/cuda_runtime`。缺模型时 UI/`MainViewModel` 提示运行 `scripts\download_lama_model.bat` / `download_realesrgan_model.bat`。
 
-视频默认 OpenCV 快速模式；图片/精修默认 LaMa **CPU**。
+视频默认 OpenCV 快速模式；图片/精修默认 LaMa（有 GPU 开关则优先 CUDA，否则 CPU）。
 
 **CLI 批量帧（视频去水印，后端只加载一次）：**
 
@@ -404,8 +404,11 @@ media_cli watermark-inpaint-frames [-|models/lama.onnx] <输入帧目录> <输�
 **Python UI 链路（`WatermarkPage`）：**
 
 ```
-WatermarkPage（图片/视频 Tab + 质量模式）
+WatermarkPage（图片/视频 Tab + 质量模式 + AI 运行提示）
   → RegionSelectorWidget 框选多矩形
+  → 「智能建议」：对预览帧四角做对比度/边缘密度启发式，生成 1–2 个角标矩形（可再编辑）
+  → 图片「导入文件夹」批量：同一套区域 + 快速/精修（精修受正式版门禁）→ 输出目录
+  → 视频「多视频批量」：多文件顺序处理同一角标预设（复用单视频管线）
   → MainViewModel.start_watermark_image(..., backend) / start_watermark_video(..., backend)
   → MediaBridge（MUSIC_WATERMARK_BACKEND）
   → media_cli watermark-inpaint-frames（一次加载，帧间复用）+ ffmpeg 抽帧/编码/混音
@@ -476,8 +479,8 @@ GPU 在本产品中承担 **AI 推理** 与 **视频硬解码** 两类加速目�
 | **OpenCV 帧滤镜** | CPU `cv::Mat` | CPU 运行 | 硬解后在 CPU 做 CLAHE 等，与硬解串联 |
 | **Vosk ASR** | CPU 推理 | ✅ 可选 | `download_vosk_model.bat`；无模型时人声段兜底 |
 | **llama.cpp 高光分析** | CPU（`n_gpu_layers=0`） | ⏳ 接口已有 | 需 `GGML_CUDA=ON` 编译 + 传入层数 |
-| **去水印 LaMa** | ONNX Runtime + OpenCV | ✅ CPU EP（默认） | 已移除项目内 `cuda_runtime`；可选 `MUSIC_ORT_CUDA=1` |
-| **4K 超分** | Real-ESRGAN ONNX + OpenCV | ✅ CPU EP（默认） | 2× 半分辨率快路径 + tile=384；CUDA 需系统 CUDA 12 运行库（`cublasLt64_12.dll` 等） |
+| **去水印 LaMa** | ONNX Runtime + OpenCV | ✅ GPU 开则 CUDA EP，失败回退 CPU | `set_prefer_cuda` → `MUSIC_ORT_CUDA`；无捆绑 `cuda_runtime` |
+| **4K 超分** | Real-ESRGAN ONNX + OpenCV | ✅ 同上 | 2× 半分辨率快路径 + tile=384；CUDA 需系统 CUDA 12 运行库 |
 | **图片预览解码** | OpenCV `imdecode` + 可选 CUDA resize | ✅ OpenCV；CUDA 视本机包 | `core/image_loader.py`；超大 PNG 不走 Qt 解码；对比视图不用 OpenGL 视口（防缩放残影） |
 | **Qt 音频播放** | 系统解码器 | 可能硬解 | 与业务 GPU 开关无关 |
 
@@ -513,7 +516,7 @@ detect_gpu_info()
 
 硬解失败或未启用时显示 `CPU解码`。滤镜标签后缀为实际设备：`/opencl` 或 `/cpu`。
 
-**ViewModel 开关：** `MainViewModel.set_gpu_enabled(bool)` 切换 `use_gpu` / `prefer_hw_decode`，写入 `app.conf` 的 `gpu_enabled`；**个人中心** `ProfilePage` 已绑定该开关。
+**ViewModel 开关：** `MainViewModel.set_gpu_enabled(bool)` 切换 `use_gpu` / `prefer_hw_decode`，写入 `app.conf` 的 `gpu_enabled`；同时 `MediaBridge.set_prefer_cuda(use_gpu)` 控制超分/LaMa 的 `MUSIC_ORT_CUDA`。**个人中心** `ProfilePage` 已绑定该开关。
 
 #### 3.6.3 配置项（`client/resources/config/app.conf`）
 
@@ -1074,10 +1077,10 @@ B 站：列表优先「音画合并」（DASH 画面+音轨）；获取时并行
 |-----|------|------|
 | `CommentExportPackage` / `build_export_package` | ✅ | 导出契约：评论 + 歌曲/媒体元数据 |
 | `export_comments_json` / `load_export_package` | ✅ | 完整 JSON，可供二次处理 |
-| `export_comments_ass` | ✅ | 顺序 ASS，可交给竖屏烧录 |
-| `CommentShortVideoRequest` / `render_comment_short_video` | ✅ | 最小管线：ASS + `export_vertical_short`；纯音频则先生成黑底画布。下载页「导出」可选热评短视频 MP4 |
+| `export_comments_ass` | ✅ | `style=ass_caption\|danmaku\|cards`（顺序 / 滚动弹幕 / 底栏卡片） |
+| `CommentShortVideoRequest` / `render_comment_short_video` | ✅ | 按 style 生成 ASS 后竖屏烧录；下载页导出可选三种风格 |
 
-UI「导出评论…」可选 JSON / ASS / 热评短视频 MP4。完整弹幕风滤镜仍可后续增强。
+UI「导出评论…」可选 JSON / ASS / 热评短视频 MP4（短视频前选风格）。
 
 **配置（`app.conf`）：**
 
@@ -1118,8 +1121,11 @@ media_cli analyze-speech <transcript.json> <model.gguf> <场景> <最短> <最�
   │
   ▼
 View: EnhancePage._on_run_image / _on_run_video
+  → 顶栏 ai_runtime_hint（GPU 推理开/关 · 超分/LaMa 模型是否就绪）
+  → 试用门禁：AI 4× 灰显 + require_feature("enhance_ai_4x")
   → ViewModel.start_enhance_image / start_enhance_video
-      → MediaBridge.upscale_image / upscale_video
+      → 缺 realesrgan 模型时提示 scripts\download_realesrgan_model.bat
+      → MediaBridge.upscale_image / upscale_video（继承 MUSIC_ORT_CUDA）
           → media_cli upscale / upscale-frames
               → SuperResolution::upscaleImageFile
   → emit enhanceProgress / enhanceFinished
@@ -1128,7 +1134,7 @@ View: EnhancePage._on_run_image / _on_run_video
 View 更新进度与结果预览
 ```
 
-**当前限制：** 视频 AI 超分较慢。对比区左原图 / 右超分结果，中间 1px 细线；滚轮缩放当前侧，Ctrl+滚轮两侧同步；拖拽平移。预览经 `image_loader`（OpenCV 解码）；显示为不透明底软件合成，避免缩小时残影。
+**当前限制：** 视频 AI 超分较慢。对比区左原图 / 右超分结果，中间 1px 细线；滚轮缩放当前侧，Ctrl+滚轮两侧同步；拖拽平移。预览经 `image_loader`（OpenCV 解码）；显示为不透明底软件合成，避免缩小时残影。试用可用 OpenCV 2×；正式版解锁 AI 4×（见 §5.17）。
 
 **长路径：** 各子 Tab 路径行使用 `ui/elided_label.ElidedPathLabel`（`ElideMiddle` + Tooltip 全文），`sizeHint` 不按完整路径回报宽度，避免缓存目录超长文件名把整页/窗口撑向右侧。
 
@@ -1136,10 +1142,11 @@ View 更新进度与结果预览
 
 ```
 SlicePage「一键高光成片」
-  → MainViewModel.export_highlights(out_dir)
+  → ExportOptionsDialog（分辨率 / 质量 / 容器；可等同现网默认）
+  → MainViewModel.export_highlights(out_dir, max_height=, quality=, container=)
       → MediaBridge.export_highlights
-          → ffmpeg 按段 -ss/-t 切出 highlight_XXX.mp4（优先 -c copy）
-          → concat demuxer → highlights_merged.mp4
+          → ffmpeg 按段 -ss/-t 切出 highlight_XXX.（优先 -c copy；有缩放/质量则重编码）
+          → concat demuxer → highlights_merged.*
   → exportFinished
 
 SlicePage「静音剪掉」
@@ -1150,16 +1157,23 @@ SlicePage「静音剪掉」
   → silenceFinished
 
 SlicePage「竖屏短视频」
-  → 选裁切锚点（居中/偏上/偏下）→ 保存路径
-  → MainViewModel.export_vertical_short
+  → 选裁切锚点（居中/偏上/偏下）→ ExportOptionsDialog → 保存路径
+  → MainViewModel.export_vertical_short(..., quality=)
       ├─ 有高光片段：export_highlights 临时成片
       └─ MediaBridge.export_vertical_short
-            → ffmpeg scale+crop 9:16（默认 1080x1920）
+            → ffmpeg scale+crop 9:16（默认 1080x1920；质量映射 _video_encoder_args）
   → verticalExportFinished → 可送去超分/去水印
 ```
 
+**导出参数（`ui/export_options_dialog.py`）：** 分辨率 原画/1080p/720p；质量 高/标准/小文件；格式 mp4/mov。不选或保持默认时行为与现网固定管线一致。  
+**remux 优先：** 高光分段与拼接默认 `-c copy`；仅当质量≠高或限制分辨率时，对合并成片**一次**重编码（避免分段多次重编）。编码档映射 `_video_encoder_args` / `_audio_encoder_args`，并带 `-movflags +faststart`。另有 `MediaBridge.remux_copy` 供仅改封装。
+
 优先走捆绑 `ffmpeg.exe`，无需新 C++ CLI。静音阈值默认 `-35dB`、最短静音 `0.45s`。  
-竖屏导出**不再**烧录外挂 SRT；热评短视频仍可通过 ASS + `export_vertical_short(subtitle_path=…)` 烧录评论文本。裁切不做主体追踪（MVP）。
+竖屏导出**不再**烧录外挂 SRT；热评短视频仍可通过 ASS + `export_vertical_short(subtitle_path=…)` 烧录评论文本。
+
+**智能跟脸（`track_mode=face`）：** SlicePage 竖屏锚点可选「智能跟脸」→ OpenCV Haar 采样人脸中心 → 平滑轨迹 → 分段 `crop`+`concat`；无人脸或失败回退 `crop_bias` 固定裁切（`core/face_track.py`）。
+
+**发布预设：** `ExportOptionsDialog` 支持「抖音竖屏」→ 1080×1920 + 高码率 + 可选封面 PNG / 话题草稿 `.txt`（`core/publish_pack.py`，不接发布 API）。
 
 ### 5.6 链接下载（yt-dlp）+ 热评三合一
 
@@ -1280,20 +1294,20 @@ PipelineQueuePage「开始队列」
 
 **限制：** 单线程顺序执行（非底层多任务并行）；角标去水印是启发式框，复杂游走水印仍需去水印页手动画框；切片场景与单页相同（游戏为规则兜底）。
 
-### 5.10 视频补帧（FFmpeg minterpolate）
+### 5.10 视频补帧（FFmpeg minterpolate / 可选 RIFE）
 
-对应画质增强 Tab「视频补帧」：2× / 4× 提帧率，**无 AI 模型**（Practical-RIFE 等已移除）。
+对应画质增强 Tab「视频补帧」：2× / 4× 提帧率。默认 FFmpeg minterpolate；可选 RIFE ONNX（需 `models/rife.onnx`，失败回退 FFmpeg）。
 
 ```
 EnhancePage「视频补帧」
-  → 独立时间段（默认试 15 秒；可全程）+ 快速/精细
-  → MainViewModel.start_interpolate_video
-      → MediaBridge.interpolate_video(quality=fast|quality)
-          → ffmpeg -vf minterpolate=…
+  → 独立时间段（默认试 15 秒；可全程）+ 快速/精细 + 引擎 ffmpeg|rife
+  → MainViewModel.start_interpolate_video(backend=)
+      → MediaBridge.interpolate_video
+          ├─ backend=rife → 提帧 → RIFE ONNX → 编码（失败回退）
+          └─ ffmpeg -vf minterpolate=…
                 fast → mi_mode=blend（默认，快）
                 quality → mi_mode=mci（运动补偿，慢；失败回退 blend）
-          → h264_mf / libx264 重编码 + AAC
-  → interpolateProgress / interpolateFinished
+  → interpolateProgress / interpolateFinished（含 ETA）
 ```
 
 | 资源 | 路径 |
@@ -1427,6 +1441,9 @@ CoverPage「生成封面」
           → cover_factory.pick_sharpest_frame（多次 extract_thumbnail）
           → cover_factory.render_cover_png（QPainter + 微软雅黑）
   → coverFinished → 预览 PNG
+  →（可选）导出后溯源勾选
+        → blind_watermark_dct.embed_text_dct（大标题）
+        → exif_stamp.stamp_exif（作者=大标题）
 ```
 
 | 资源 | 路径 |
@@ -1434,30 +1451,51 @@ CoverPage「生成封面」
 | Python | `core/cover_factory.py` |
 | UI | `ui/cover_page.py`（Tab「封面工厂」） |
 | VM | `MainViewModel.start_cover_factory` |
-| 依赖 | `extract_thumbnail`（PPM）+ OpenCV + PySide6 |
+| 依赖 | `extract_thumbnail`（PPM）+ OpenCV + PySide6；可选 ExifTool / 频域水印 |
 
 **限制：** 锐度启发式（非语义「好看」）；中文字体依赖系统「Microsoft YaHei UI」。
 
 
 ### 5.15 音频趣味页
 
-纯 FFmpeg 滤镜链：变调 `asetrate`+`aresample`、变速 `atempo`、倒放 `areverse`、伪 8D `apulsator`、简单混响 `aecho`。可作用于音频文件或视频音轨（默认视频轨 copy）。
+纯 FFmpeg 滤镜链：变调 `asetrate`+`aresample`、变速 `atempo`、倒放 `areverse`、伪 8D `apulsator`、简单混响 `aecho`。可作用于音频文件或**带画面的视频**。
+
+**音画同步（重要）：** 旧实现仅对音轨 `atempo`/`areverse` 且 `-c:v copy`，加速 1.25× 等会导致音频变短而画面仍原时长 → 音画不同步。现已对齐：
+
+| 效果 | 音频 | 视频 | 说明 |
+|------|------|------|------|
+| 变速 `speed` | `atempo`（可串联） | `setpts=PTS/speed` 重编码 | 倍速一致，时长一致 |
+| 倒放 | `areverse` | `reverse` 重编码 | 须整段解码，耗内存 |
+| 变调 `pitch` | `asetrate`+补偿 `atempo` | copy（时长不变） | 采样率取自 ffprobe，非写死 44100 |
+| 8D / 混响 | `apulsator` / `aecho` | copy + `-shortest` | 混响尾音裁到画面长度 |
 
 ```
 AudioFunPage「导出效果」
   → MainViewModel.start_audio_fx
       → MediaBridge.apply_audio_fx
-          → core.audio_fx.apply_audio_fx（subprocess ffmpeg -af …）
+          → core.audio_fx.apply_audio_fx
+                ├─ 仅音效：-af … -c:v copy
+                └─ 变速/倒放：-vf setpts|reverse -af … 视频重编码
   → audioFxFinished
 ```
 
 | 资源 | 路径 |
 |------|------|
 | Python | `core/audio_fx.py` |
-| UI | `ui/audio_fun_page.py`（Tab「音频趣味」） |
+| UI | `ui/audio_fun_page.py`（Tab「整轨趣味」） |
 | VM | `MainViewModel.start_audio_fx` |
 
-**限制：** 变调为采样率法（非专业移调器）；8D 为左右脉冲伪环绕；非实时预览。
+**限制：** 变调为采样率法（非专业移调器）；8D 为左右脉冲伪环绕；视频倒放需整段进内存；非实时预览。
+
+**梗音叠加（同页 Tab「梗音叠加」）：** 本地短音效叠到视频指定时刻，支持倍数（0.5～4×，atempo 串联）与音量；可选略压原声。音效库：`assets/sfx/user/`（用户自备热梗）+ `assets/sfx/demo/`（自动生成免费演示音）。**不内置**第三方热梗原声。
+
+```
+AudioFunPage「梗音叠加」→ 导出
+  → MainViewModel.start_sfx_overlay
+      → MediaBridge.overlay_sfx → core.sfx_overlay.overlay_sfx
+            → ffmpeg adelay + atempo + amix（视频 -c:v copy）
+  → sfxOverlayFinished
+```
 
 
 ### 5.16 BGM 混音 / 人声分离（Demucs 可选）
@@ -1518,7 +1556,99 @@ BgmPage「人声分离」
 | 校验 | `client/scripts/core/network.py` |
 | 配置 | `app.conf`：`auth_type` / `license_fp` / `gpu_enabled` / `output_dir` |
 
-**当前限制：** 卡密为本地格式校验（≥16 且含字母数字），联网支付与正式门禁未接；功能页试用限权尚未灰显。
+**当前限制：** 卡密为本地格式校验（≥16 且含字母数字），联网支付未接。
+
+**试用 / 正式门禁（`MainViewModel.require_feature`）：**
+
+| 功能键 | 试用 | 正式 |
+|--------|------|------|
+| `enhance_ai_4x` | 灰显 AI 4×，VM 拦截 | ✅ |
+| `pipeline_queue` | 「开始队列」灰显 + 拦截 | ✅ |
+| `watermark_lama` | 精修 LaMa 灰显 + 拦截 | ✅ |
+
+试用仍可用：OpenCV 超分 2×、快速去水印、单文件切片/导出。兑换/恢复试用经 `authTypeChanged` 刷新各页。
+
+
+### 5.18 开箱向导 / 进度 ETA / 去水印批量加固
+
+```
+首次启动（setup_wizard_done 未写）
+  → MainWindow._maybe_show_setup_wizard
+      → SetupWizardDialog（检测 GPU / Real-ESRGAN / LaMa / Vosk / yt-dlp / Cookie）
+      → 一键 scripts/download_*.bat；Cookie → 下载页说明
+      → 完成 → app.conf setup_wizard_done=true
+个人中心「打开开箱向导…」可再次打开
+```
+
+**进度 ETA：** `core/progress_eta.py` 线性外推；超分/去水印/补帧/竖屏导出/全流程队列进度文案附「剩余约 XmYs」。
+
+**批量去水印：** 失败自动重试 1～2 次（换 OpenCV / 略缩小区域）；列表显示等待/处理中/重试/成功/失败。角标预设：抖音右上 / 快手右上（`RegionSelector.apply_platform_corner_preset`）。
+
+| 资源 | 路径 |
+|------|------|
+| 检测 | `core/setup_status.py` |
+| 向导 UI | `ui/setup_wizard.py` |
+| ETA | `core/progress_eta.py` |
+
+
+### 5.19 本地素材库
+
+```
+工作流 → 本地素材库（MediaLibraryPage）
+  → 索引 output_dir / 自选根目录（非云）
+  → 列表：文件名 / 大小
+  → 送首页 / 送切片 / 送队列（enqueue_paths）
+```
+
+| 资源 | 路径 |
+|------|------|
+| 索引 | `core/media_library.py` |
+| UI | `ui/media_library_page.py`（`TAB_LIBRARY=10`） |
+
+
+### 5.20 差异化能力入口（菜单）
+
+首页仅作本地预览；功能入口走顶部菜单，例如：
+
+1. **热评短视频** → 工作流「下载与热评」/ 趣味「热评弹幕」  
+2. **演讲成片** → 核心「智能切片」（金句 → 静音剪掉 → 跟脸竖屏 → 抖音预设）  
+3. **批量成片** → 工作流「全流程队列」（ETA + 角标去水印）
+
+本地离线主链路默认可用；下载/热评网络步骤单独标注。
+
+
+### 5.21 AI 画质速度（CUDA / tile / RIFE）
+
+- **CUDA 自检：** `MediaBridge.probe_ort_cuda`；`ai_runtime_hint` 在 GPU 开但无 CUDA EP 时提示「已回退 CPU」  
+- **超分 tile：** 增强页高级选项 → `MUSIC_UPSCALE_TILE`（C++ `super_resolution.cpp`，默认 384）  
+- **补帧 RIFE：** EnhancePage 可选 RIFE ONNX（`models/rife.onnx`）；失败回退 FFmpeg minterpolate（`core/rife_interp.py`）  
+- **不做：** TensorRT、云端超分  
+
+
+### 5.22 溯源水印（频域 / 回声 / LSB / EXIF，自研）
+
+与「去水印」分离：主动藏信息，非去除台标。**不 pip 安装** HideInfo / blind-watermark；仅用 OpenCV/NumPy/ExifTool/FFmpeg。
+
+```
+趣味 → 溯源水印（StegoPage）
+  ├─ 频域封面（DCT Y 通道中频）→ core/blind_watermark_dct.py
+  ├─ 回声水印（成片音轨 / WAV）→ core/echo_watermark.py（≥约 11s）
+  ├─ LSB（PNG）→ core/stego_lsb.py
+  └─ EXIF 署名 → core/exif_stamp.py
+封面工厂导出可选：勾选后对 PNG 嵌频域水印 + 写 EXIF
+```
+
+| 资源 | 路径 |
+|------|------|
+| 频域 | `client/scripts/core/blind_watermark_dct.py` |
+| 回声 | `client/scripts/core/echo_watermark.py` |
+| LSB | `client/scripts/core/stego_lsb.py` |
+| EXIF | `client/scripts/core/exif_stamp.py` |
+| UI | `client/scripts/ui/stego_page.py`（`TAB_STEGO=11`） |
+
+**致谢：** 思路参考 [blind-watermark](https://github.com/guofei9987/blind_watermark)、[HideInfo](https://github.com/guofei9987/HideInfo)（MIT），独立实现、未整库 vendoring。
+
+**限制：** LSB 不抗强 JPEG；频域抗轻度压缩更好；回声需足够音轨时长且会重编码音频。不宣称对抗平台重编码。
 
 
 ---
@@ -1547,18 +1677,34 @@ main.py
     ├── core/time_format.py        (m:ss / 区间格式化)
     ├── ui/video_player.py
     │   ├── core/player_backend.py  (subprocess → media_player.exe)
+    │   ├── core/media_probe.py     (ffprobe 封装/码流探测)
+    │   ├── ui/media_info_dialog.py (媒体信息对话框)
     │   ├── core/audio_viz.py       (showwavespic + ebur128)
     │   ├── ui/waveform_widget.py   (波形/响度条)
     │   └── ui/gl_video_widget.py   (OpenGL 画面)
     ├── ui/enhance_page.py / watermark_page.py
     │   ├── ui/elided_label.py     (长路径中间省略)
+    │   ├── ui/region_selector.py  (框选 + 四角智能建议)
     │   ├── ui/exif_panel.py       (ExifTool 元数据面板)
     │   └── core/image_loader.py   (OpenCV 解码 / 可选 CUDA 缩放 / Qt 回退)
-    ├── ui/profile_page.py         (个人中心：卡密 / GPU / 输出目录)
+    ├── ui/export_options_dialog.py (高光/竖屏/抖音预设 + 封面话题)
+    ├── ui/setup_wizard.py         (首次开箱依赖向导)
+    ├── ui/media_library_page.py   (本地素材库)
+    ├── ui/profile_page.py         (个人中心：卡密 / GPU / 输出目录 / 向导)
     ├── ui/cover_page.py           (封面工厂)
     │   └── core/cover_factory.py  (最清晰帧 + 标题 PNG)
-    ├── ui/audio_fun_page.py       (音频趣味)
-    │   └── core/audio_fx.py       (asetrate/atempo/areverse/apulsator/aecho)
+    ├── ui/stego_page.py           (溯源：频域/回声/LSB/EXIF)
+    │   ├── core/blind_watermark_dct.py
+    │   ├── core/echo_watermark.py
+    │   ├── core/stego_lsb.py
+    │   └── core/exif_stamp.py
+    ├── core/face_track.py         (竖屏跟脸采样)
+    ├── core/publish_pack.py       (封面+话题草稿)
+    ├── core/progress_eta.py       (线性 ETA)
+    ├── core/rife_interp.py        (可选 RIFE ONNX)
+    ├── ui/audio_fun_page.py       (音频趣味：整轨 + 梗音叠加)
+    │   ├── core/audio_fx.py       (atempo+setpts 同步变速；areverse+reverse 倒放)
+    │   └── core/sfx_overlay.py    (adelay+atempo 梗音叠加)
     ├── ui/bgm_page.py             (BGM 混音 / 人声分离)
     │   ├── core/bgm_mix.py        (FFmpeg 混音)
     │   └── core/demucs_sep.py     (可选 Demucs → third_party/demucs)
@@ -1570,7 +1716,8 @@ main.py
         ├── core/pipeline_runner.py (批量全流程：切片→超分→去水印)
         ├── core/scene_detect.py (PySceneDetect 游戏高光切点)
         ├── core/asr_engine.py (Vosk)
-        └── core/media_bridge.py   (subprocess → media_cli / FFmpeg；含 interpolate_video 补帧)
+        ├── core/media_bridge.py   (ctypes 优先 + media_cli / FFmpeg)
+        └── core/media_engine_ctypes.py  (直连 media_engine.dll)
 ```
 
 ---
@@ -1581,9 +1728,11 @@ main.py
 |------|------|------|
 | FFmpeg 视频打开/探测 | ✅ | VideoDecoder + probe |
 | 视频帧遍历 | ✅ | iterateFrames + CLI |
-| 缩略图提取 | ✅ | `media_cli thumbnail` + `MediaBridge.extract_thumbnail` + 磁盘小图缓存 |
+| 缩略图提取 | ✅ | ctypes/`media_cli` thumbnail + 磁盘小图缓存 |
+| MediaBridge ctypes | ✅ | `probe`/`thumbnail` 直连 `media_engine.dll`；失败回退 CLI；mtime 缓存 |
+| 导出 remux 优先 | ✅ | 高光分段/拼接 `-c copy`；按参数整段一次重编码；AAC 分档 + faststart |
 | 封面/缩略图工厂 | ✅ | 最清晰帧 + 大字标题 PNG；`CoverPage`（§5.14） |
-| 音频趣味页 | ✅ | 变调/变速/倒放/8D/混响；`AudioFunPage`（§5.15） |
+| 音频趣味页 | ✅ | 整轨趣味 + **梗音叠加**（时刻/倍数/音量；user 自备热梗）（§5.15） |
 | BGM 混音 | ✅ | FFmpeg 叠/替换/压低原声；`BgmPage`（§5.16） |
 | Demucs 人声分离 | ✅ 可选 | `third_party/demucs` + `setup_demucs.bat`；未装不影响混音 |
 | 高光时间轴（缩略图） | ✅ | `HighlightTimelineWidget` 色块+胶片条；列表带图标；见 §5.1.1 |
@@ -1591,13 +1740,14 @@ main.py
 | 批量全流程队列 | ✅ | `PipelineQueuePage`：切片成片→超分→去水印；暂停/跳过/取消（§5.9.1） |
 | 切片/导入异步 | ✅ | `import_video` / `start_slice_analysis` 后台线程；UI 收 Signal |
 | 手动切片 | ✅ | SlicePage 起止时间添加/删除/清空；不依赖 Vosk |
-| 视频补帧 | ✅ | EnhancePage：FFmpeg minterpolate；默认快速 blend，可选精细 MCI；默认试 15 秒 |
+| 视频补帧 | ✅ | FFmpeg minterpolate（快速/精细）+ 可选 RIFE ONNX；默认试 15 秒（§5.10/§5.21） |
 | PySide6 菜单导航 UI | ✅ | MenuBar + QStackedWidget；核心/工作流/趣味/帮助分组（§3.3） |
 | Studio 视觉主题 | ✅ | `ui/theme.py` 炭黑+琥珀；顶栏胶囊；§3.3.1 |
 | 网易云热评滚动 | ✅ | 三合一；B 站弹幕；首页速度/密度/区域（§5.2.1） |
 | 链接下载 | ✅ | `DownloadPage` + 历史缓存；B 站音画合并；Cookie 文件选择；探测短时缓存（§5.6） |
-| 热评导出 / 短视频成片 | ✅ | JSON+ASS+竖屏热评短视频（ASS 烧录）；§5.2.1 |
-| 首页本地播放器 | ✅ | FFmpeg 视频 + Qt 音乐；OpenGL；**解码后台线程** + UV 翻转减拷贝；点击画面：未加载开文件 / 已加载暂停继续 |
+| 热评导出 / 短视频成片 | ✅ | JSON+ASS+竖屏；三种风格 ass_caption/danmaku/cards（§5.2.1） |
+| 首页本地播放器 | ✅ | FFmpeg 视频 + Qt 音乐；OpenGL；播完再点播放从头开始；**音画漂移软校正** |
+| 媒体信息面板 | ✅ | 「信息」→ ffprobe 封装/编码/分辨率/码率（`MediaInfoDialog`，VideoEye 精简） |
 | 波形/响度可视化 | ✅ | showwavespic + ebur128；播放器下方可点击 seek（§5.12） |
 | 响度高潮切片 | ✅ | 场景「响度高潮」；ebur128 峰值成段（§5.12） |
 | OpenCV 帧处理 | ✅ | `FrameProcessor`：CPU + **OpenCL UMat**；标题 `OpenCV:clahe/opencl` |
@@ -1611,16 +1761,29 @@ main.py
 | AI 高光识别（演讲/解说） | ✅ | 演讲金句：Vosk+LLM/金句词；无人声模型时人声段兜底 |
 | AI 高光识别（游戏） | ✅ | PySceneDetect 场景切点（§5.2）；失败回退时间规则 |
 | 批量导出剪辑 | ✅ | `一键高光成片` → 分片 + `highlights_merged.mp4`（ffmpeg） |
-| 竖屏短视频导出 | ✅ | 切片成片→9:16 裁切（§5.5）；居中/偏上/偏下；热评成片可另烧 ASS |
+| 竖屏短视频导出 | ✅ | 切片成片→9:16；固定锚点 + **智能跟脸** `track_mode=face`（§5.5） |
+| 开箱依赖向导 | ✅ | 首次启动 + 个人中心；模型/GPU/Cookie/yt-dlp（§5.18） |
+| 长任务进度 ETA | ✅ | 超分/去水印/补帧/队列线性外推「剩余约…」（§5.18） |
+| 去水印批量重试 | ✅ | 失败重试 1–2 次；结果列表；抖音/快手角标预设（§5.18） |
+| 抖音发布预设 | ✅ | ExportOptions 抖音竖屏 + 封面 PNG + 话题草稿（§5.5） |
+| 本地素材库 | ✅ | 目录索引；送首页/切片/队列（§5.19） |
+| CUDA EP 自检 / tile / RIFE | ✅ | 提示回退 CPU；超分 tile；可选 RIFE 回退 minterpolate（§5.21） |
+| 差异化能力入口 | ✅ | 菜单导航：热评 / 切片演讲成片 / 全流程队列（§5.20；首页无流水线卡片） |
+| 溯源水印 | ✅ | 频域封面 + 回声音频 + LSB + EXIF；封面导出可勾选（§5.22） |
 | 静音剪掉 | ✅ | `静音剪掉` → silencedetect + 拼接紧凑口播 |
 | OpenCV 趣味滤镜 | ✅ | film / warm / cool / vintage / neon / comic / pixel；播放器下拉 |
 | LUT 一键调色 | ✅ | 增强页 Tab + lut3d 导出；与 FrameProcessor 同预设（§5.13） |
 | OpenCV GPU 滤镜 | ✅ | OpenCL `cv::UMat`（`opencv_filter_device=auto`）；失败回退 CPU |
 | 图片 EXIF | ✅ | 图片右上角悬浮摘要 +「全部」弹窗；`exif_panel.py`（§5.7） |
 | 4K 超分 | ✅ | `EnhancePage` + Real-ESRGAN ONNX / OpenCV 双三次；`upscale` CLI；预览 `image_loader`（OpenCV） |
-| 去水印 | ✅ | `WatermarkPage` 快速(OpenCV)/精修(LaMa)；视频默认快速 + 帧批复用 |
-| 授权/卡密 | ✅ | 个人中心本地卡密校验；`license_fp`/`auth_type` 写入 app.conf；联网支付未接 |
-| 个人中心 | ✅ | `ProfilePage`：卡密、GPU 开关、输出目录、关于（§5.17） |
+| 去水印 | ✅ | `WatermarkPage` 快速/精修；智能建议角标；图片文件夹/多视频批量；帧批复用 |
+
+| 授权/卡密 | ✅ | 本地卡密 + **功能门禁**（AI4× / 队列 / LaMa）；联网支付未接 |
+| 个人中心 | ✅ | `ProfilePage`：卡密、GPU、输出目录、开箱向导、关于（§5.17/§5.18） |
+| 热评弹幕/卡片成片 | ✅ | `danmaku` / `cards` / `ass_caption` 三种 ASS 风格（§5.2.1） |
+| 导出参数面板 | ✅ | 高光/竖屏/抖音预设：分辨率·质量·容器·封面话题（`ExportOptionsDialog`） |
+| 水印智能建议/批量 | ✅ | 四角启发式 + 抖音/快手预设；批量重试与结果列表（§5.18） |
+| AI 运行状态提示 | ✅ | 增强/去水印页显示 GPU 推理与模型是否就绪；缺模型指向 download_*.bat |
 | 长路径 UI | ✅ | `ElidedPathLabel`：增强/去水印/封面/BGM/音频趣味等路径行中间省略 |
 | llama.cpp 第三方集成 | ✅ | third_party/llama.cpp，CMake 目标 `music_llama` |
 | llama 本地推理业务 | ✅ | analyze-speech 已接入智能切片 |
@@ -1690,7 +1853,7 @@ endif()
 | `build.bat` | Win32 | `third_party/ffmpeg/x86/` |
 | `build_x64.bat` | x64 | `third_party/ffmpeg/x64/`（`setup_ffmpeg_x64.bat`） |
 
-x64 构建后 Python 可逐步改为 **ctypes 直接加载** `media_engine.dll`，减少 subprocess 开销。
+x64 下 **`probe` / `thumbnail` 已优先 ctypes 直连** `media_engine.dll`（`core/media_engine_ctypes.py`），失败再回退 `media_cli`；本地 probe 按 mtime 缓存。播放器仍为 `media_player` 子进程（后续可再评估统一时钟）。
 
 ### 9.5 启用 GPU 加速（路线图）
 
@@ -1698,8 +1861,8 @@ x64 构建后 Python 可逐步改为 **ctypes 直接加载** `media_engine.dll`�
 
 1. 播放器 D3D11VA 硬解  
 2. ~~**VideoDecoder 硬解**~~：`open(..., preferHw)` + `media_cli iterate --hw`（复用 `ffmpeg_hwaccel`）  
-3. **个人中心 UI**：`set_gpu_enabled()` → 播放硬解 / iterate `--hw`（不再默认开 LaMa CUDA）  
-4. ~~**ONNX CUDA EP**~~：默认关闭；已移除 `third_party/cuda_runtime`  
+3. **个人中心 UI**：`set_gpu_enabled()` → 播放硬解 / iterate `--hw` / `set_prefer_cuda`（超分·LaMa）  
+4. **ONNX CUDA EP**：GPU 开且有 NVIDIA 时默认 `MUSIC_ORT_CUDA=1`；失败回退 CPU；已移除捆绑 `cuda_runtime`  
 
 待做：llama `GGML_CUDA` + `n_gpu_layers`。
 
@@ -1707,14 +1870,9 @@ x64 构建后 Python 可逐步改为 **ctypes 直接加载** `media_engine.dll`�
 
 播放器外挂字幕与实时同传已从产品范围移除；相关代码与 `live_subtitle_*` 配置已删除。热评 ASS 烧录仍见 §5.2.1 / `MediaBridge.export_vertical_short`。
 
-### 9.7 接入热评短视频成片
+### 9.7 热评短视频成片
 
-见 **§5.2.1** 导出表。步骤摘要：
-
-1. UI「导出评论」已写出 JSON / ASS（`core/comment_export.py`）
-2. 轻量路径：`export_comments_ass` → `MediaBridge.export_vertical_short(..., subtitle_path=ass)`
-3. 完整弹幕风：实现 `render_comment_short_video`（`style=danmaku|cards`），读 `load_export_package` 或直接吃 `HotComment` 列表
-4. 可选：封面工厂叠歌名 + 最清晰帧
+见 **§5.2.1**。已支持 `style=ass_caption|danmaku|cards`；下载页导出短视频前选择风格。可选再叠封面工厂歌名。
 
 ---
 
@@ -1734,3 +1892,5 @@ x64 构建后 Python 可逐步改为 **ctypes 直接加载** `media_engine.dll`�
 .\scripts\download_vosk_model.bat          # 演讲金句 ASR：vosk-model-small-cn-0.22 → models/
 .\scripts\install_scenedetect.bat          # 游戏高光：安装 PySceneDetect（scenedetect）
 ```
+
+https://blog.csdn.net/leixiaohua1020/article/details/42658139?spm=1001.2014.3001.5502

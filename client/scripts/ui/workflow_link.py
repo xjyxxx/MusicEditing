@@ -21,6 +21,8 @@ TAB_COVER = 6
 TAB_AUDIO_FUN = 7
 TAB_BGM = 8
 TAB_PROFILE = 9
+TAB_LIBRARY = 10
+TAB_STEGO = 11
 
 PAGE_TITLES: dict[int, str] = {
     TAB_HOME: "首页",
@@ -33,6 +35,8 @@ PAGE_TITLES: dict[int, str] = {
     TAB_AUDIO_FUN: "音频趣味",
     TAB_BGM: "BGM 混音",
     TAB_PROFILE: "个人中心",
+    TAB_LIBRARY: "本地素材库",
+    TAB_STEGO: "溯源水印",
 }
 
 # 菜单：(菜单标题, [(动作文案, page_index), ...])
@@ -51,6 +55,7 @@ MENU_GROUPS: Sequence[Tuple[str, Sequence[Tuple[str, int]]]] = (
         "工作流",
         (
             ("全流程队列", TAB_PIPELINE),
+            ("本地素材库", TAB_LIBRARY),
             ("下载与热评", TAB_DOWNLOAD),
             ("BGM 混音", TAB_BGM),
         ),
@@ -60,7 +65,8 @@ MENU_GROUPS: Sequence[Tuple[str, Sequence[Tuple[str, int]]]] = (
         (
             ("热评弹幕", TAB_HOT_COMMENTS),
             ("封面工厂", TAB_COVER),
-            ("音频趣味", TAB_AUDIO_FUN),
+            ("音频趣味 / 梗音", TAB_AUDIO_FUN),
+            ("溯源水印", TAB_STEGO),
         ),
     ),
     (

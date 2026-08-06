@@ -234,7 +234,7 @@ QPushButton#primaryButton:disabled, QPushButton[cssClass="primary"]:disabled {{
 }}
 
 /* ── Inputs ── */
-QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
+QLineEdit, QTextEdit, QPlainTextEdit {{
     background: {SURFACE_2};
     color: {TEXT};
     border: 1px solid {BORDER};
@@ -243,21 +243,144 @@ QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
     selection-background-color: {ACCENT};
     selection-color: {ACCENT_ON};
 }}
-QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus,
-QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {{
     border: 1px solid {SIGNAL};
 }}
+
+/* Combo：深色弹出列表，避免系统白边 */
+QComboBox {{
+    background: {SURFACE_2};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 6px 28px 6px 10px;
+    min-height: 28px;
+    selection-background-color: {ACCENT};
+    selection-color: {ACCENT_ON};
+    /* 强制非原生弹出层，QSS 才吃得住 */
+    combobox-popup: 0;
+}}
+QComboBox:hover {{
+    border-color: {BORDER_STRONG};
+    background: {ELEVATED};
+}}
+QComboBox:focus {{
+    border: 1px solid {SIGNAL};
+}}
+QComboBox:disabled {{
+    color: {TEXT_DIM};
+    background: {SURFACE};
+}}
 QComboBox::drop-down {{
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    width: 26px;
     border: none;
-    width: 24px;
+    border-left: 1px solid {BORDER};
+    background: {ELEVATED};
+    border-top-right-radius: 7px;
+    border-bottom-right-radius: 7px;
+}}
+QComboBox::drop-down:hover {{
+    background: #2C3444;
+}}
+QComboBox::down-arrow {{
+    width: 0;
+    height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 6px solid {TEXT};
+    margin-right: 2px;
 }}
 QComboBox QAbstractItemView {{
     background: {ELEVATED};
     color: {TEXT};
     border: 1px solid {BORDER_STRONG};
+    border-radius: 8px;
+    padding: 4px;
+    outline: 0;
     selection-background-color: {ACCENT};
     selection-color: {ACCENT_ON};
-    outline: 0;
+}}
+QComboBox QAbstractItemView::item {{
+    min-height: 30px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    color: {TEXT};
+    background: transparent;
+}}
+QComboBox QAbstractItemView::item:hover {{
+    background: {SURFACE_2};
+    color: {TEXT};
+}}
+QComboBox QAbstractItemView::item:selected {{
+    background: {ACCENT};
+    color: {ACCENT_ON};
+}}
+
+/* Spin：加宽上下按钮，箭头用实心三角，避免暗色里看不见 */
+QSpinBox, QDoubleSpinBox {{
+    background: {SURFACE_2};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 4px 36px 4px 10px;
+    min-height: 28px;
+    selection-background-color: {ACCENT};
+    selection-color: {ACCENT_ON};
+}}
+QSpinBox:focus, QDoubleSpinBox:focus {{
+    border: 1px solid {SIGNAL};
+}}
+QSpinBox:hover, QDoubleSpinBox:hover {{
+    border-color: {BORDER_STRONG};
+}}
+QSpinBox::up-button, QDoubleSpinBox::up-button {{
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 28px;
+    height: 16px;
+    background: {ELEVATED};
+    border-left: 1px solid {BORDER_STRONG};
+    border-bottom: 1px solid {BORDER};
+    border-top-right-radius: 7px;
+}}
+QSpinBox::down-button, QDoubleSpinBox::down-button {{
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 28px;
+    height: 16px;
+    background: {ELEVATED};
+    border-left: 1px solid {BORDER_STRONG};
+    border-bottom-right-radius: 7px;
+}}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+    background: {ACCENT};
+}}
+QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed,
+QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {{
+    background: {ACCENT_PRESSED};
+}}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+    width: 0;
+    height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-bottom: 7px solid {ACCENT};
+}}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+    width: 0;
+    height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 7px solid {ACCENT};
+}}
+QSpinBox::up-arrow:on, QDoubleSpinBox::up-arrow:on {{
+    border-bottom-color: {ACCENT_ON};
+}}
+QSpinBox::down-arrow:on, QDoubleSpinBox::down-arrow:on {{
+    border-top-color: {ACCENT_ON};
 }}
 
 /* ── Group / lists / progress ── */
@@ -407,6 +530,51 @@ QLabel#WarnText {{
     color: {ACCENT};
 }}
 """
+
+
+def apply_dark_palette(app) -> None:
+    """Fusion + 深色 QPalette，压掉下拉/弹层系统白边。"""
+    from PySide6.QtGui import QColor, QPalette
+
+    p = QPalette()
+    bg = QColor(BG)
+    surface = QColor(SURFACE)
+    elevated = QColor(ELEVATED)
+    text = QColor(TEXT)
+    muted = QColor(TEXT_MUTED)
+    accent = QColor(ACCENT)
+    accent_on = QColor(ACCENT_ON)
+    border = QColor(BORDER_STRONG)
+
+    p.setColor(QPalette.Window, bg)
+    p.setColor(QPalette.WindowText, text)
+    p.setColor(QPalette.Base, QColor(SURFACE_2))
+    p.setColor(QPalette.AlternateBase, elevated)
+    p.setColor(QPalette.Text, text)
+    p.setColor(QPalette.Button, elevated)
+    p.setColor(QPalette.ButtonText, text)
+    p.setColor(QPalette.BrightText, accent)
+    p.setColor(QPalette.Highlight, accent)
+    p.setColor(QPalette.HighlightedText, accent_on)
+    p.setColor(QPalette.ToolTipBase, elevated)
+    p.setColor(QPalette.ToolTipText, text)
+    p.setColor(QPalette.PlaceholderText, muted)
+    p.setColor(QPalette.Link, QColor(SIGNAL))
+    p.setColor(QPalette.Light, border)
+    p.setColor(QPalette.Mid, QColor(BORDER))
+    p.setColor(QPalette.Dark, surface)
+    p.setColor(QPalette.Shadow, QColor(PLAYER_BG))
+    app.setPalette(p)
+
+
+def style_spinbox(spin) -> None:
+    """秒数等 Spin：用明显的 + / − 按钮符号，加高一点好点。"""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QAbstractSpinBox
+
+    spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.PlusMinus)
+    spin.setMinimumHeight(32)
+    spin.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
 
 def enhance_page_stylesheet() -> str:

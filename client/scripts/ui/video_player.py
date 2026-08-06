@@ -15,7 +15,7 @@ from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QSurfaceFormat
 
 from PySide6.QtWidgets import (
-    QComboBox, QFileDialog, QHBoxLayout, QLabel, QPushButton,
+    QComboBox, QFileDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton,
     QSlider, QVBoxLayout, QWidget,
 )
 
@@ -126,6 +126,11 @@ class VideoPlayerWidget(QWidget):
         self._hw_decode_active = False
         self._audio_only = False
         self._audio_viz_token = 0
+        # 音画双时钟：仅大偏差时软校正（常态 200~300ms 解码滞后不触发）
+        self._drift_streak = 0
+        self._last_soft_resync_wall = 0.0
+        self._play_started_wall = 0.0
+        self._info_busy = False
 
 
 
@@ -144,6 +149,9 @@ class VideoPlayerWidget(QWidget):
         self._btn_pause = QPushButton("暂停")
 
         self._btn_stop = QPushButton("停止")
+        self._btn_info = QPushButton("信息")
+        self._btn_info.setToolTip("ffprobe 查看封装 / 编码 / 分辨率 / 码率（VideoEye 精简）")
+        self._btn_info.setEnabled(False)
 
         self._waveform = WaveformWidget()
         self._waveform.setToolTip(
@@ -204,6 +212,7 @@ class VideoPlayerWidget(QWidget):
         ctrl.addWidget(self._btn_pause)
 
         ctrl.addWidget(self._btn_stop)
+        ctrl.addWidget(self._btn_info)
 
         ctrl.addWidget(self._filter_combo)
 
@@ -252,6 +261,7 @@ class VideoPlayerWidget(QWidget):
         self._btn_pause.clicked.connect(self.pause)
 
         self._btn_stop.clicked.connect(self.stop)
+        self._btn_info.clicked.connect(self._on_media_info)
 
 
         self._waveform.seekRequested.connect(self._on_waveform_seek)
@@ -342,6 +352,159 @@ class VideoPlayerWidget(QWidget):
         show_pause = (not playing) and bool(self._current_path)
         self._display.set_paused_overlay(show_pause)
 
+    def _set_media_loaded(self, loaded: bool):
+        self._btn_info.setEnabled(bool(loaded) and not self._info_busy)
+
+    @Slot()
+    def _on_media_info(self):
+        """异步 ffprobe，弹出媒体信息对话框。"""
+        path = self._current_path
+        if not path or not os.path.isfile(path) or self._info_busy:
+            return
+        self._info_busy = True
+        self._btn_info.setEnabled(False)
+        self._btn_info.setText("探测…")
+
+        from PySide6.QtCore import QObject
+
+        class _Sig(QObject):
+            done = Signal(object)
+            fail = Signal(str)
+
+        sig = _Sig(self)
+
+        def on_ok(result):
+            self._info_busy = False
+            self._btn_info.setText("信息")
+            self._set_media_loaded(bool(self._current_path))
+            tip = getattr(result, "tooltip_line", lambda: "")()
+            if tip:
+                self._title.setToolTip(tip)
+            from ui.media_info_dialog import MediaInfoDialog
+            MediaInfoDialog(result, self).exec()
+
+        def on_fail(msg: str):
+            self._info_busy = False
+            self._btn_info.setText("信息")
+            self._set_media_loaded(bool(self._current_path))
+            QMessageBox.warning(self, "媒体信息", msg or "探测失败")
+
+        sig.done.connect(on_ok)
+        sig.fail.connect(on_fail)
+
+        def work():
+            try:
+                from core.media_probe import probe_media
+                sig.done.emit(probe_media(path))
+            except Exception as e:
+                sig.fail.emit(str(e))
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+
+    def _refresh_media_tooltip_async(self, path: str):
+        """打开文件后后台写标题 Tooltip，不弹窗。"""
+        if not path:
+            return
+        token_path = path
+
+        from PySide6.QtCore import QObject
+
+        class _Sig(QObject):
+            done = Signal(str, str)  # path, tip
+
+        sig = _Sig(self)
+
+        def on_done(p: str, tip: str):
+            if p == self._current_path and tip:
+                self._title.setToolTip(tip)
+
+        sig.done.connect(on_done)
+
+        def work():
+            try:
+                from core.media_probe import probe_media
+                r = probe_media(token_path)
+                sig.done.emit(token_path, r.tooltip_line())
+            except Exception:
+                pass
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+
+    def _maybe_soft_resync(self, audio_sec: float) -> bool:
+        """仅在大偏差时把画面追到音频时钟；不碰音轨，避免「咔」一下。
+
+        双通道常态会有约 150~300ms 解码/显示滞后，属正常，靠跳帧追赶即可。
+        旧逻辑 120ms 就 seek 音+画 → 开播即抖、每隔约 2s 卡顿。
+        """
+        if self._seeking or self._audio_only or not self._backend:
+            return False
+        if self._last_shown_frame_ts < 0:
+            return False
+        now = time.monotonic()
+        # 开播宽限期：时钟尚未稳态
+        if self._play_started_wall > 0 and (now - self._play_started_wall) < 4.0:
+            self._drift_streak = 0
+            return False
+        if now - self._last_soft_resync_wall < 6.0:
+            return False
+
+        video_ts = self._last_shown_frame_ts
+        drift = video_ts - audio_sec  # >0 画面超前；<0 画面落后
+        abs_drift = abs(drift)
+
+        # 画面略落后：交给 next_frame(min_ts) 跳帧，不 seek
+        if drift < 0 and abs_drift < 0.45:
+            self._drift_streak = 0
+            return False
+        # 画面略超前：等音频追上即可
+        if drift > 0 and abs_drift < 0.35:
+            self._drift_streak = 0
+            return False
+
+        self._drift_streak += 1
+        if self._drift_streak < 20:
+            return False
+
+        log.info(
+            "音画软校正(仅视频) drift=%+.0fms audio=%.3f video=%.3f",
+            drift * 1000.0, audio_sec, video_ts,
+        )
+        self._drift_streak = 0
+        self._last_soft_resync_wall = now
+        # 只把画面对齐到音频，绝不 seek 音轨（seek 音频会出爆音/卡顿感）
+        self._soft_resync_video_only(audio_sec)
+        return True
+
+    def _soft_resync_video_only(self, audio_sec: float) -> None:
+        """仅 seek 视频解码位置到音频时钟；音轨保持播放。"""
+        target = max(0.0, float(audio_sec))
+        if self._duration_sec > 0:
+            target = min(target, self._duration_sec)
+        self._decode_token += 1
+        self._decode_future = None
+        self._last_shown_frame_ts = -1.0
+        try:
+            if not self._backend:
+                return
+            self._backend.seek(target)
+            frame = self._backend.next_frame(
+                min_ts=max(0.0, target - self._frame_interval * 0.5),
+                apply_filter=None,
+            )
+            if frame:
+                ts, rgb, w, h = frame
+                self._show_frame(ts, rgb, w, h, update_progress=False)
+            if self._playing:
+                self._backend.resume()
+        except RuntimeError as e:
+            log.warning("视频软校正失败: %s", e)
+
+    def _soft_resync_to(self, sec: float) -> None:
+        """兼容旧名：改为仅校正视频。"""
+        self._soft_resync_video_only(sec)
+
     @Slot()
     def _on_display_clicked(self):
         """点击画面：未加载时与「打开文件」相同；已加载则暂停/继续。"""
@@ -428,6 +591,8 @@ class VideoPlayerWidget(QWidget):
         self._title.setText(
             f"{os.path.basename(path)}  ·  音乐  ·  Qt 音频  ·  点击画面暂停/继续"
         )
+        self._set_media_loaded(True)
+        self._refresh_media_tooltip_async(self._current_path)
         self._show_music_cover(playing=False)
         self._display.set_paused_overlay(True)
         log.info("音乐已打开 %s", path)
@@ -493,6 +658,10 @@ class VideoPlayerWidget(QWidget):
             if tag:
                 title_parts.append(tag)
         self._title.setText("  ·  ".join(title_parts))
+        self._set_media_loaded(True)
+        self._drift_streak = 0
+        self._last_soft_resync_wall = 0.0
+        self._refresh_media_tooltip_async(self._current_path)
         log.info(
             "视频已打开 %s %dx%d %s hw=%s",
             os.path.basename(path), info.width, info.height, decode_hint, info.hw_decode,
@@ -625,10 +794,48 @@ class VideoPlayerWidget(QWidget):
             return -1
         return int(math.floor(sec / self._frame_interval + 1e-9))
 
+    def _at_playback_end(self) -> bool:
+        """是否已播到结尾（再点播放应从头开始）。"""
+        if self._duration_sec <= 0:
+            return False
+        # 进度条已到头，或时钟贴近片尾
+        if self._progress.maximum() > 0 and self._progress.value() >= self._progress.maximum() - 1:
+            return True
+        return self._position_sec >= self._duration_sec - 0.15
+
+    def _prepare_restart_from_start(self) -> None:
+        """播完后重播前：seek 到 0，避免卡在 EOF。"""
+        self._position_sec = 0.0
+        self._last_shown_frame_ts = -1.0
+        self._progress.setValue(0)
+        self._decode_token += 1
+        self._decode_future = None
+        if self._audio_only:
+            self._audio.seek(0.0)
+            self._update_time_label()
+            return
+        if not self._backend:
+            return
+        try:
+            self._backend.seek(0.0)
+            if self._has_audio:
+                self._audio.seek(0.0)
+            frame = self._backend.next_frame(min_ts=0.0, apply_filter=None)
+            if frame:
+                ts, rgb, w, h = frame
+                self._show_frame(ts, rgb, w, h)
+        except RuntimeError:
+            pass
+        self._update_time_label()
+
     def play(self):
 
         if not self._current_path:
             return
+
+        # 播放完成后点「播放」/点画面：从头开始，而不是停在片尾无反应
+        if self._at_playback_end():
+            self._prepare_restart_from_start()
 
         if self._audio_only:
             if self._duration_sec <= 0:
@@ -663,6 +870,8 @@ class VideoPlayerWidget(QWidget):
             self._audio.play(self._position_sec)
 
         self._last_shown_frame_ts = self._position_sec - self._frame_interval
+        self._drift_streak = 0
+        self._play_started_wall = time.monotonic()
 
         self._playing = True
         self._reset_transport_controls(playing=True)
@@ -775,6 +984,7 @@ class VideoPlayerWidget(QWidget):
         self._decode_token += 1
         self._decode_future = None
         self._last_shown_frame_ts = -1.0
+        self._drift_streak = 0
         if self._audio_only:
             self._audio.seek(self._position_sec)
             self._update_time_label()
@@ -910,6 +1120,11 @@ class VideoPlayerWidget(QWidget):
 
         if result is None:
 
+            # 记为片尾，便于下次点播放从头开始
+            if self._duration_sec > 0:
+                self._position_sec = self._duration_sec
+                self._progress.setValue(self._progress.maximum())
+                self._update_time_label()
             self.pause()
             return
 
@@ -945,6 +1160,10 @@ class VideoPlayerWidget(QWidget):
         now = time.monotonic()
         fi = self._frame_interval
         audio_idx = self._frame_index(audio_sec)
+
+        # 双时钟长期漂移 → 软校正（冷却 2s，连续约 10 次超阈值）
+        if self._maybe_soft_resync(audio_sec):
+            return True
 
         if now - self._last_progress_wall >= 0.15:
             self._position_sec = audio_sec
@@ -1089,6 +1308,8 @@ class VideoPlayerWidget(QWidget):
         self._playing = False
         self._has_audio = False
         self._current_path = ""
+        self._set_media_loaded(False)
+        self._title.setToolTip("")
         self._decode_token += 1
         self._decode_future = None
         try:

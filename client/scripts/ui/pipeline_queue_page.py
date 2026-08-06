@@ -42,6 +42,7 @@ from ui.theme import (
     TEXT,
     TEXT_DIM,
     TEXT_MUTED,
+    style_spinbox,
 )
 from viewmodels.main_vm import MainViewModel
 
@@ -210,7 +211,12 @@ QLabel#PipelineStatus {{
     font-size: 12px;
 }}
 QComboBox, QDoubleSpinBox {{
-    min-height: 28px;
+    min-height: 32px;
+}}
+QDoubleSpinBox {{
+    padding-right: 40px;
+    font-size: 13px;
+    font-weight: 600;
 }}
 """
 
@@ -247,6 +253,23 @@ class PipelineQueuePage(QWidget):
         vm.pipelineFinished.connect(self._on_finished)
         vm.pipelineStatusChanged.connect(self._on_status)
         vm.errorOccurred.connect(self._on_error)
+        vm.authTypeChanged.connect(lambda _a: self._refresh_license_gates())
+        self._refresh_license_gates()
+
+    def _refresh_license_gates(self):
+        licensed = bool(getattr(self._vm, "is_licensed", False))
+        btn = getattr(self, "_btn_start", None)
+        if btn is None:
+            return
+        # 运行中的启用状态由 _set_running 管；此处只管试用门禁
+        if not self._vm.pipeline_running:
+            btn.setEnabled(licensed)
+        tip = (
+            ""
+            if licensed
+            else "正式版可用 · 请到「个人中心」兑换卡密"
+        )
+        btn.setToolTip(tip)
         self._sync_step_enabled()
 
     # ── 结构 ──────────────────────────────────────────────
@@ -362,11 +385,13 @@ class PipelineQueuePage(QWidget):
         self._min_dur = QDoubleSpinBox()
         self._min_dur.setRange(1.0, 120.0)
         self._min_dur.setValue(3.0)
+        style_spinbox(self._min_dur)
         g.addWidget(self._min_dur, 1, 1)
         g.addWidget(self._field_label("最长秒"), 1, 2)
         self._max_dur = QDoubleSpinBox()
         self._max_dur.setRange(3.0, 300.0)
         self._max_dur.setValue(60.0)
+        style_spinbox(self._max_dur)
         g.addWidget(self._max_dur, 1, 3)
         col.addWidget(self._wrap_section(self._slice_box))
 
@@ -391,6 +416,7 @@ class PipelineQueuePage(QWidget):
         self._enh_max_sec.setValue(0.0)
         self._enh_max_sec.setSpecialValueText("全程")
         self._enh_max_sec.setToolTip("0 = 全程；大于 0 仅超分前 N 秒，适合试跑")
+        style_spinbox(self._enh_max_sec)
         eg.addWidget(self._enh_max_sec, 1, 1, 1, 3)
         col.addWidget(self._wrap_section(self._enh_box))
 
@@ -559,6 +585,10 @@ class PipelineQueuePage(QWidget):
         if not found:
             QMessageBox.information(self, "提示", "该文件夹下没有常见视频文件。")
 
+    def enqueue_paths(self, paths: list[str]) -> None:
+        """供素材库等外部入口追加路径。"""
+        self._append_paths(list(paths or []))
+
     def _append_paths(self, paths: list[str]):
         existing = {os.path.normcase(os.path.abspath(p)) for p in self._paths}
         for p in paths:
@@ -695,7 +725,8 @@ class PipelineQueuePage(QWidget):
             QMessageBox.information(self, "提示", "尚无结果文件可打开。")
 
     def _set_running_ui(self, running: bool):
-        self._btn_start.setEnabled(not running)
+        licensed = bool(getattr(self._vm, "is_licensed", False))
+        self._btn_start.setEnabled((not running) and licensed)
         self._btn_pause.setEnabled(running)
         self._btn_skip.setEnabled(running)
         self._btn_cancel.setEnabled(running)
@@ -705,6 +736,7 @@ class PipelineQueuePage(QWidget):
         self._btn_clear.setEnabled(not running)
         if not running:
             self._btn_pause.setText("暂停")
+            self._refresh_license_gates()
 
     @Slot(int, object)
     def _on_item_updated(self, index: int, job: object):

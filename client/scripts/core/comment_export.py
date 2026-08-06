@@ -106,6 +106,40 @@ def export_comments_ass(
     seconds_per_comment: float = 3.0,
     play_res_x: int = 1080,
     play_res_y: int = 1920,
+    style: str = "ass_caption",
+) -> str:
+    """按风格写出 ASS。style: ass_caption | danmaku | cards。"""
+    st = (style or "ass_caption").strip().lower()
+    if st == "danmaku":
+        return _export_ass_danmaku(
+            package, output_path,
+            seconds_per_comment=seconds_per_comment,
+            play_res_x=play_res_x, play_res_y=play_res_y,
+        )
+    if st == "cards":
+        return _export_ass_cards(
+            package, output_path,
+            seconds_per_comment=seconds_per_comment,
+            play_res_x=play_res_x, play_res_y=play_res_y,
+        )
+    return _export_ass_caption(
+        package, output_path,
+        seconds_per_comment=seconds_per_comment,
+        play_res_x=play_res_x, play_res_y=play_res_y,
+    )
+
+
+def _escape_ass_text(text: str) -> str:
+    return (text or "").replace("\n", " ").replace("{", "(").replace("}", ")")
+
+
+def _export_ass_caption(
+    package: CommentExportPackage,
+    output_path: str,
+    *,
+    seconds_per_comment: float = 3.0,
+    play_res_x: int = 1080,
+    play_res_y: int = 1920,
 ) -> str:
     """按顺序排出 ASS 字幕（底部居中），可供竖屏短视频烧录。"""
     if not package.comments:
@@ -131,7 +165,7 @@ def export_comments_ass(
     ]
     t = 0.0
     for c in package.comments:
-        text = (c.display_text() or "").replace("\n", " ").replace("{", "(").replace("}", ")")
+        text = _escape_ass_text(c.display_text())
         if not text.strip():
             continue
         start = _ass_timestamp(t)
@@ -145,12 +179,124 @@ def export_comments_ass(
     return str(path.resolve())
 
 
+def _export_ass_danmaku(
+    package: CommentExportPackage,
+    output_path: str,
+    *,
+    seconds_per_comment: float = 3.0,
+    play_res_x: int = 1080,
+    play_res_y: int = 1920,
+) -> str:
+    """滚动弹幕风：\\move 多轨道错峰。"""
+    if not package.comments:
+        raise ValueError("没有可导出的评论")
+    w, h = int(play_res_x), int(play_res_y)
+    # 弹幕飞过时长；条目间隔略短以叠屏
+    fly = max(4.0, float(seconds_per_comment) + 1.5)
+    gap = max(0.45, float(seconds_per_comment) * 0.55)
+    tracks = 8
+    top_margin = int(h * 0.08)
+    track_h = max(48, int(h * 0.055))
+    lines = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        f"PlayResX: {w}",
+        f"PlayResY: {h}",
+        "WrapStyle: 2",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding",
+        "Style: Danmaku,Microsoft YaHei,42,&H00FFFFFF,&H000000FF,"
+        "&H64000000,&H64000000,-1,0,0,0,100,100,0,0,1,2,0,8,20,20,20,1",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+    t = 0.0
+    for i, c in enumerate(package.comments):
+        text = _escape_ass_text(c.display_text())
+        if not text.strip():
+            continue
+        track = i % tracks
+        y = top_margin + track * track_h
+        start = _ass_timestamp(t)
+        end = _ass_timestamp(t + fly)
+        # 从右外侧飞到左外侧
+        move = f"{{\\move({w + 40},{y},{-40},{y})}}"
+        lines.append(f"Dialogue: 0,{start},{end},Danmaku,,0,0,0,,{move}{text}")
+        t += gap
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
+    return str(path.resolve())
+
+
+def _export_ass_cards(
+    package: CommentExportPackage,
+    output_path: str,
+    *,
+    seconds_per_comment: float = 3.0,
+    play_res_x: int = 1080,
+    play_res_y: int = 1920,
+) -> str:
+    """底栏卡片风：昵称 + 点赞 + 正文，逐条停留。"""
+    if not package.comments:
+        raise ValueError("没有可导出的评论")
+    w, h = int(play_res_x), int(play_res_y)
+    dur = max(1.2, float(seconds_per_comment))
+    lines = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        f"PlayResX: {w}",
+        f"PlayResY: {h}",
+        "WrapStyle: 0",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding",
+        # BorderStyle=3 = 不透明底盒
+        "Style: CardNick,Microsoft YaHei,36,&H0000D7FF,&H000000FF,"
+        "&H00101010,&HEE101018,-1,0,0,0,100,100,0,0,3,0,0,2,48,48,220,1",
+        "Style: CardBody,Microsoft YaHei,48,&H00FFFFFF,&H000000FF,"
+        "&H00101010,&HEE101018,0,0,0,0,100,100,0,0,3,0,0,2,48,48,140,1",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+    t = 0.0
+    for c in package.comments:
+        nick = _escape_ass_text(c.nickname or "用户")
+        likes = int(c.liked_count or 0)
+        body = _escape_ass_text(c.content or c.display_text())
+        if not body.strip():
+            continue
+        start = _ass_timestamp(t)
+        end = _ass_timestamp(t + dur)
+        meta = f"{nick}  ·  ♥ {likes}"
+        lines.append(f"Dialogue: 1,{start},{end},CardNick,,0,0,0,,{meta}")
+        lines.append(f"Dialogue: 0,{start},{end},CardBody,,0,0,0,,{body}")
+        t += dur
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
+    return str(path.resolve())
+
+
 @dataclass
 class CommentShortVideoRequest:
     """热评短视频成片请求。
 
     style:
-      - ass_caption / danmaku / cards：当前均走 ASS + 竖屏烧录最小管线
+      - ass_caption：底部顺序字幕
+      - danmaku：滚动弹幕
+      - cards：底栏卡片
     """
 
     media_path: str
@@ -215,10 +361,7 @@ def render_comment_short_video(
     bridge=None,
     on_progress=None,
 ) -> str:
-    """将媒体 + 热评渲染为竖屏短视频（ASS 字幕烧录）。
-
-    danmaku / cards 暂与 ass_caption 共用最小管线，保证可导出可播。
-    """
+    """将媒体 + 热评渲染为竖屏短视频（按 style 生成不同 ASS 后烧录）。"""
     if not req.media_path or not os.path.isfile(req.media_path):
         raise FileNotFoundError(f"媒体不存在: {req.media_path}")
     if not req.comments:
@@ -255,6 +398,7 @@ def render_comment_short_video(
             seconds_per_comment=spc,
             play_res_x=int(req.width) or 1080,
             play_res_y=int(req.height) or 1920,
+            style=req.style or "ass_caption",
         )
 
         media_in = req.media_path
