@@ -98,9 +98,10 @@ python scripts\publish_update_manifest.py --version 0.2.0 --notes "说明" --bas
 # 客户端 app.conf: update_manifest_url=…/musicediting_update.json
 # 可选: update_check_on_startup=true
 # 本地联调: python scripts\serve_update_channel.py
+# 发版包勿留下 127.0.0.1 联调地址
 ```
 
-详见 [distribution.md](distribution.md) §5。
+完整 P0→P3 跑通表见 [distribution.md](distribution.md) §6。
 
 ## 4. 手工冒烟（建议 10 分钟）
 

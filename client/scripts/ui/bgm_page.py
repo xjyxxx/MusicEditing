@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 from core.bgm_mix import MIX_MODES
 from core.demucs_sep import probe_demucs
 from ui.elided_label import ElidedPathLabel
+from ui.studio_kit import wrap_tab_scroll
 from ui.theme import style_spinbox
 from viewmodels.main_vm import MainViewModel
 
@@ -37,11 +38,13 @@ class BgmPage(QWidget):
         )
         tip.setWordWrap(True)
         tip.setObjectName("MutedText")
+        tip.setMaximumHeight(tip.fontMetrics().lineSpacing() * 3 + 4)
+        tip.setToolTip(tip.text())
         root.addWidget(tip)
 
         self._tabs = QTabWidget()
-        self._tabs.addTab(self._build_mix_tab(), "BGM 混音")
-        self._tabs.addTab(self._build_sep_tab(), "人声分离")
+        self._tabs.addTab(wrap_tab_scroll(self._build_mix_tab()), "BGM 混音")
+        self._tabs.addTab(wrap_tab_scroll(self._build_sep_tab()), "人声分离")
         root.addWidget(self._tabs, 1)
 
         self._progress = QProgressBar()

@@ -116,6 +116,19 @@ QPushButton#StudioGhost:hover {{
 """
 
 
+def wrap_tab_scroll(inner: QWidget) -> QScrollArea:
+    """把单个 Tab 内容包进可滚动区，避免矮窗口裁成半截。"""
+    scroll = QScrollArea()
+    scroll.setObjectName("StudioScroll")
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+    inner.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+    scroll.setWidget(inner)
+    return scroll
+
+
 def wrap_studio_scroll(page: QWidget) -> tuple[QVBoxLayout, QWidget, QVBoxLayout]:
     """
     把 page 变成：外层铺满 → Scroll → Body。

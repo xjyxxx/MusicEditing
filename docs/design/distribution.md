@@ -130,8 +130,58 @@ REM   update_check_on_startup=true
 
 上线：把 `dist/update/` 整目录上传 CDN/静态站，再把客户端 `update_manifest_url` 指到该 JSON。
 
+**注意：** 仓库默认 `app.conf` 不要保留 `127.0.0.1` 联调地址（发版/给别人用会误弹更新）。本地联调时临时取消注释即可。
+
 ---
 
-## 6. 试用策略（客户端）
+## 6. 上线跑通清单（P0→P3）
+
+| 级别 | 项 | 本仓库能否代劳 | 操作 |
+|------|----|----------------|------|
+| P0 | 关掉本地更新 URL | ✅ | `app.conf` 注释掉 `update_manifest_url` / `update_check_on_startup` |
+| P0 | 干净机手测 | ⚠ 需人手 | 见下「6.1」；本机可先 `accept_portable.py` |
+| P1 | 长页不裁半 | ✅ | 封面工厂整页滚动；音频/BGM/溯源 Tab 滚动；队列右侧参数滚动 |
+| P1 | 更新真通道 | ⚠ 需 CDN | Setup/zip → `publish_update_manifest.py --base-url …` → 上传 `dist/update/` → 客户端填正式 URL |
+| P2 | 代码签名 | ⚠ 需证书 | `$env:MUSIC_CODE_SIGN_THUMBPRINT=…` + `pack … --sign` |
+| P2 | 外部收银台 | ⚠ 需商店 | 支付成功后发卡；客户端 `license_purchase_url` + 可选 `license_server_url` |
+| P3 | 真 game_event | ⏸ 需数据 | 现为 stub ONNX，非真击杀模型 |
+| P3 | AI 超分再抠 | ⏸ 可选 | 已有 tile≈640 / JPEG / CUDA EP；收益递减 |
+
+### 6.1 干净机手测（必须你自己做）
+
+1. 另找一台未装本项目依赖的 Win10/11 x64  
+2. 解压 `MusicEditing_Portable_*.zip` 或跑 `MusicEditing_Setup_*.exe`  
+3. 若 SmartScreen：更多信息 → 仍要运行  
+4. 缺 VC++：装 [VC++ 2015–2022 x64](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)  
+5. 双击 `MusicEditing.exe`：打开 `tests\test_video.mp4`（包内若有）→ 播放 / Seek  
+6. 个人中心看试用配额；帮助「检查更新」在未配置 URL 时应提示未配置（勿指 127.0.0.1）
+
+本机预检：
+
+```powershell
+python scripts\accept_portable.py
+```
+
+### 6.2 更新通道一次上线（需你的 CDN）
+
+```powershell
+python scripts\pack_portable.py --profile standard --zip
+.\scripts\build_installer.bat
+python scripts\publish_update_manifest.py --version 0.2.0 --notes "说明" --base-url https://你的CDN/me/
+# 上传 dist\update\ 全部文件
+# 正式包内 app.conf（或发布渠道配置）:
+#   update_manifest_url=https://你的CDN/me/musicediting_update.json
+#   update_check_on_startup=true
+```
+
+### 6.3 收银台（店外）
+
+1. 用户在商店付完款 → 你的后端调 `scripts/license_server/gen_keys.py`（或自建发卡 API）把卡密发给用户  
+2. `app.conf`：`license_purchase_url=https://商店页`  
+3. 可选联网激活：`license_server_url=https://激活服`（`POST /v1/activate`），演示服见 `scripts/license_server/`
+
+---
+
+## 7. 试用策略（客户端）
 
 见 [feature_flows.md](feature_flows.md) §5.17：`trial_policy` 门禁 + 高光/竖屏次数 + ≤720p。

@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from models.pipeline_model import PipelineJob, PipelineJobState, PipelineSettings
+from ui.studio_kit import wrap_tab_scroll
 from ui.theme import (
     ACCENT,
     ACCENT_PRESSED,
@@ -508,7 +509,7 @@ class PipelineQueuePage(QWidget):
         col.addWidget(self._wrap_section(out_wrap))
 
         col.addStretch(1)
-        return panel
+        return wrap_tab_scroll(panel)
 
     def _build_footer(self) -> QWidget:
         footer = QFrame()

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 from core.audio_fx import PRESETS, AudioFxParams, describe_params
 from core.sfx_overlay import SfxOverlayParams, list_sfx_library, sfx_dirs
 from ui.elided_label import ElidedPathLabel
+from ui.studio_kit import wrap_tab_scroll
 from ui.theme import style_spinbox
 from viewmodels.main_vm import MainViewModel
 
@@ -32,8 +33,8 @@ class AudioFunPage(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         tabs = QTabWidget()
-        tabs.addTab(self._build_track_tab(), "整轨趣味")
-        tabs.addTab(self._build_sfx_tab(), "梗音叠加")
+        tabs.addTab(wrap_tab_scroll(self._build_track_tab()), "整轨趣味")
+        tabs.addTab(wrap_tab_scroll(self._build_sfx_tab()), "梗音叠加")
         root.addWidget(tabs)
 
         vm.audioFxProgress.connect(self._on_progress)

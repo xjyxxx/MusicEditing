@@ -18,6 +18,7 @@ from core.echo_watermark import (
 from core.exif_stamp import ExifStamp, stamp_exif
 from core.stego_lsb import capacity_hint, embed_text, extract_text
 from ui.elided_label import ElidedPathLabel
+from ui.studio_kit import wrap_tab_scroll
 
 
 class StegoPage(QWidget):
@@ -35,13 +36,15 @@ class StegoPage(QWidget):
         )
         tip.setWordWrap(True)
         tip.setObjectName("MutedText")
+        tip.setMaximumHeight(tip.fontMetrics().lineSpacing() * 3 + 4)
+        tip.setToolTip(tip.text())
         root.addWidget(tip)
 
         tabs = QTabWidget()
-        tabs.addTab(self._build_dct_tab(), "频域封面")
-        tabs.addTab(self._build_echo_tab(), "回声水印")
-        tabs.addTab(self._build_lsb_tab(), "LSB（PNG）")
-        tabs.addTab(self._build_exif_tab(), "EXIF 署名")
+        tabs.addTab(wrap_tab_scroll(self._build_dct_tab()), "频域封面")
+        tabs.addTab(wrap_tab_scroll(self._build_echo_tab()), "回声水印")
+        tabs.addTab(wrap_tab_scroll(self._build_lsb_tab()), "LSB（PNG）")
+        tabs.addTab(wrap_tab_scroll(self._build_exif_tab()), "EXIF 署名")
         root.addWidget(tabs, 1)
         self._status = ElidedPathLabel("", object_name="MutedText")
         root.addWidget(self._status)

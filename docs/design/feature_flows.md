@@ -774,9 +774,11 @@ scripts/run_regression_short.bat
   └─ tests/regression/test_update_check.py        自动更新 manifest
 ```
 
-发版前清单见 [release_checklist.md](release_checklist.md)；分发/安装/卡密/自动更新见 [distribution.md](distribution.md)。
+发版前清单见 [release_checklist.md](release_checklist.md)；分发/安装/卡密/自动更新见 [distribution.md](distribution.md)（含 §6 上线跑通表）。
 
-**自动更新上线：** `publish_update_manifest.py` 生成 `dist/update/musicediting_update.json`；`serve_update_channel.py` 本地联调；客户端 `update_manifest_url` + 可选 `update_check_on_startup`（同版本只弹一次）。
+**自动更新上线：** `publish_update_manifest.py` 生成 `dist/update/musicediting_update.json`；`serve_update_channel.py` 本地联调；客户端 `update_manifest_url` + 可选 `update_check_on_startup`（同版本只弹一次）。发版包勿留 `127.0.0.1` 联调地址。
+
+**长页滚动：** 封面工厂整页可滚；音频趣味 / BGM / 溯源各 Tab、队列右侧参数区用 `wrap_tab_scroll`，避免矮窗裁半。
 
 **便携分发：** `pack_portable.py --profile slim|standard|full`；`accept_portable.py` 验收；`build_installer.bat` 打 Inno 安装包；可选 `--sign`。
 
