@@ -388,17 +388,21 @@ QGroupBox {{
     background: {SURFACE_2};
     border: 1px solid {BORDER};
     border-radius: 12px;
-    margin-top: 14px;
-    padding: 14px 12px 12px 12px;
+    /* 标题画在 margin 带；加大上下留白，避免标题压住组内第一行控件 */
+    margin-top: 20px;
+    padding: 22px 12px 12px 12px;
     font-family: {FONT_UI};
     font-weight: 600;
     color: {TEXT};
 }}
 QGroupBox::title {{
     subcontrol-origin: margin;
+    subcontrol-position: top left;
     left: 14px;
-    padding: 0 8px;
+    top: 2px;
+    padding: 2px 8px;
     color: {SIGNAL};
+    background: {SURFACE_2};
 }}
 QListWidget, QTreeWidget, QTableWidget {{
     background: {SURFACE_2};
@@ -599,7 +603,7 @@ QTabWidget#EnhanceInnerTabs::pane {{
     background: {SURFACE};
     border: 1px solid {BORDER};
     border-radius: 12px;
-    top: -1px;
+    top: 0px;
     padding: 8px;
 }}
 QTabWidget#EnhanceInnerTabs QTabBar::tab {{
@@ -660,10 +664,18 @@ QPushButton#PresetBtn {{
 QPushButton#PresetBtn:hover {{ background: {ELEVATED}; color: {TEXT}; border-color: {ACCENT}; }}
 QGroupBox {{
     border: 1px solid {BORDER}; border-radius: 12px;
-    margin-top: 10px; padding-top: 12px; font-weight: 600; color: {TEXT};
+    margin-top: 20px; padding: 22px 12px 12px 12px; font-weight: 600; color: {TEXT};
     background: {SURFACE_2};
 }}
-QGroupBox::title {{ subcontrol-origin: margin; left: 12px; padding: 0 6px; color: {SIGNAL}; }}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 12px;
+    top: 2px;
+    padding: 2px 6px;
+    color: {SIGNAL};
+    background: {SURFACE_2};
+}}
 QProgressBar {{
     border: 1px solid {BORDER}; border-radius: 8px; text-align: center;
     min-height: 18px; background: {SURFACE_2}; color: {TEXT_MUTED};
@@ -989,13 +1001,14 @@ QGroupBox#HotAdvanced {{
     background: {SURFACE};
     border: 1px solid {BORDER};
     border-radius: 12px;
-    margin-top: 10px;
-    padding-top: 8px;
+    margin-top: 12px;
+    padding: 14px 10px 10px 10px;
     font-size: 12px;
     color: {TEXT_MUTED};
 }}
 QGroupBox#HotAdvanced::title {{
     subcontrol-origin: margin;
+    subcontrol-position: top left;
     left: 12px;
     padding: 0 6px;
     color: {SIGNAL};

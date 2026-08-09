@@ -1,0 +1,6 @@
+{
+  "version": "0.2.0",
+  "url": "https://example.com/downloads/MusicEditing_Setup_0.2.0.exe",
+  "notes": "示例更新说明：修复个人中心抖动；超分 tile 自动加大。",
+  "min_version": "0.1.0"
+}

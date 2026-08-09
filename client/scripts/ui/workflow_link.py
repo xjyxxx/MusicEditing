@@ -24,6 +24,9 @@ TAB_PROFILE = 9
 TAB_LIBRARY = 10
 TAB_STEGO = 11
 
+# ask_video_handoff 特殊返回：打开所在文件夹（非页面索引）
+OPEN_FOLDER = -100
+
 PAGE_TITLES: dict[int, str] = {
     TAB_HOME: "首页",
     TAB_SLICE: "智能切片",
@@ -83,11 +86,13 @@ def ask_video_handoff(
     title: str,
     message: str,
     choices: List[Tuple[str, int]],
+    *,
+    offer_open_folder: bool = True,
 ) -> Optional[int]:
     """
     完成后询问是否送去其它功能。
-    choices: (按钮文案, page_index)；另自动加「关闭」。
-    返回选中的 page_index，关闭则 None。
+    choices: (按钮文案, page_index)；另自动加「打开文件夹」（可选）与「关闭」。
+    返回选中的 page_index；打开文件夹返回 OPEN_FOLDER；关闭则 None。
     """
     box = QMessageBox(parent)
     box.setIcon(QMessageBox.Information)
@@ -97,6 +102,9 @@ def ask_video_handoff(
     for label, tab in choices:
         btn = box.addButton(label, QMessageBox.AcceptRole)
         mapping[btn] = tab
+    if offer_open_folder:
+        folder_btn = box.addButton("打开文件夹", QMessageBox.ActionRole)
+        mapping[folder_btn] = OPEN_FOLDER
     close_btn = box.addButton("关闭", QMessageBox.RejectRole)
     box.setDefaultButton(close_btn)
     box.exec()

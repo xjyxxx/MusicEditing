@@ -61,7 +61,8 @@ class SetupWizardDialog(QDialog):
 
         trial_box = QVBoxLayout()
         trial_tip = QLabel(
-            "建议：依赖就绪后点「试跑 15 秒成片」，用 tests 样例走通切片→竖屏，确认不是「点了没反应」。"
+            "建议：依赖就绪后点「试跑 15 秒成片」，用 tests 样例走通切片→竖屏。"
+            "便携版闪退请先装 VC++ 2015–2022 x64 运行库。"
         )
         trial_tip.setWordWrap(True)
         trial_tip.setObjectName("MutedText")

@@ -39,32 +39,79 @@
 
 ```powershell
 .\scripts\pack_portable.bat
-# 或: python scripts\pack_portable.py --zip
+# 演示包（无大 ONNX）:
+python scripts\pack_portable.py --profile slim --zip
+# 默认可卖:
+python scripts\pack_portable.py --profile standard --zip
+# 含 LLM/vosk:
+python scripts\pack_portable.py --profile full --zip
+# 有代码签名证书时:
+$env:MUSIC_CODE_SIGN_THUMBPRINT="你的证书SHA1"; python scripts\pack_portable.py --zip --sign
 ```
 
-输出：`dist/MusicEditing_Portable_YYYYMMDD/`（可选同名 `.zip`）。
+输出：`dist/MusicEditing_Portable_YYYYMMDD[_slim|_full]/`（可选同名 `.zip`）。打包结束会做**验收**（exe/pyc/runtime/引擎）。
 
 | 选项 | 含义 |
 |------|------|
+| `--profile slim\|standard\|full` | 体积档：演示 / 默认可卖 / 含语音模型 |
 | `--zip` | 额外打 zip |
-| `--skip-models` | 不带 lama/超分 ONNX（更小） |
+| `--skip-models` | 不带 lama/超分 ONNX（覆盖 profile） |
 | `--with-cuda-ort` | 带 CUDA ORT EP（约 +300MB） |
 | `--with-llm` | 额外带 `.gguf` / vosk |
+| `--sign` | 尝试 `signtool` 签 `MusicEditing.exe` |
 | `--ship-source` | **调试用**：保留可读 `.py`（默认删除，外发勿开） |
 | `--no-scenedetect` | 不带 PySceneDetect |
 
-对方解压后双击 **MusicEditing.exe**（推荐）。包内另有备用 `.bat`。**默认已内嵌 `runtime\`，对方不用再装 Python**；仅 Windows 10/11 x64。若闪退再装 VC++ x64 运行库。详见包内 `使用说明.txt`。
+对方解压后双击 **MusicEditing.exe**（推荐）。包内另有备用 `.bat`。**默认已内嵌 `runtime\`，对方不用再装 Python**；仅 Windows 10/11 x64。
+
+**闪退 / SmartScreen：** 先装 VC++ 2015–2022 x64；未签名时点「更多信息 → 仍要运行」。详见包内 `使用说明.txt`。
 
 打包机需有 VS C++ 工具链（用于编译无黑框启动器）；脚本写临时 `build_launcher.bat` 调 `vcvars64`，避免 `cmd /c` 嵌套引号导致 exe 编译失败。
+
+## 3.1 试用与购买（商业）
+
+- 试用：AI 4× / 队列 / LaMa 门禁；高光≤20、竖屏≤10、最长边≤720p（`trial_policy`）
+- `app.conf`：`license_purchase_url`、`license_server_url`（`POST /v1/activate`）
+- 演示服务：`python scripts\license_server\server.py` + `gen_keys.py`（详见 [distribution.md](distribution.md)）
+- 个人中心：「打开购买页」+ 卡密兑换
+
+## 3.2 安装包（Inno）
+
+```powershell
+.\scripts\build_installer.bat
+```
+
+需本机安装 Inno Setup 6。输出 `dist\MusicEditing_Setup_*.exe`。
+
+## 3.3 干净机验收
+
+```powershell
+python scripts\accept_portable.py
+# 然后按打印出的 SmartScreen / VC++ 步骤在另一台电脑手测
+```
+
+## 3.4 自动更新通道（可选上线）
+
+```powershell
+python scripts\publish_update_manifest.py --version 0.2.0 --notes "说明" --base-url https://cdn.example.com/me/
+# 上传 dist\update\ 到 CDN
+# 客户端 app.conf: update_manifest_url=…/musicediting_update.json
+# 可选: update_check_on_startup=true
+# 本地联调: python scripts\serve_update_channel.py
+```
+
+详见 [distribution.md](distribution.md) §5。
 
 ## 4. 手工冒烟（建议 10 分钟）
 
 - [ ] `.\run_ui_x64.bat` 启动不卡死；首屏约 1s 内可点
 - [ ] 首页打开 `tests\test_video.mp4`，播放 / Seek 正常
-- [ ] 切片页：手动加一段 → 竖屏短视频出片
+- [ ] 切片页：手动加一段 → 竖屏短视频出片（试用应≤720p 长边）
 - [ ] 下载页：无 Cookie 拉抖音 → 弹「换 Cookie」类提示
-- [ ] 全流程队列：选成片模板跑 1 条样例（可关超分）
+- [ ] 全流程队列：正式版或确认试用拦截
 - [ ] 开箱向导「试跑 15 秒」能出竖屏（若依赖齐）
+- [ ] 个人中心可见试用剩余次数；购买页未配置时有说明
+- [ ] （发版）`accept_portable` PASS；干净机双击 exe 能开
 
 ## 5. 诊断包（可选）
 

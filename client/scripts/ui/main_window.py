@@ -42,6 +42,7 @@ from ui.video_player import VideoPlayerWidget, _is_audio_file
 from ui.watermark_page import WatermarkPage
 from ui.workflow_link import (
     MENU_GROUPS,
+    OPEN_FOLDER,
     PAGE_TITLES,
     TAB_AUDIO_FUN,
     TAB_BGM,
@@ -78,6 +79,9 @@ class HomePage(QWidget):
 
         player_box = QGroupBox("本地预览")
         player_layout = QVBoxLayout(player_box)
+        # 再给标题下方一点内容边距，防止高 DPI 下标题压住播放器顶栏
+        player_layout.setContentsMargins(10, 8, 10, 10)
+        player_layout.setSpacing(8)
         self._player_stage = QWidget()
         stage_layout = QVBoxLayout(self._player_stage)
         stage_layout.setContentsMargins(0, 0, 0, 0)
@@ -794,6 +798,10 @@ class SlicePage(QWidget):
             "可直接送去画质增强或去水印（无需重新导入）。",
             [("送去超分", TAB_ENHANCE), ("送去去水印", TAB_WATERMARK)],
         )
+        if tab == OPEN_FOLDER:
+            from core.os_util import reveal_in_explorer
+            reveal_in_explorer(path)
+            return
         if tab is not None and self._handoff:
             self._handoff(path, tab)
 
@@ -807,6 +815,10 @@ class SlicePage(QWidget):
             f"紧凑口播已保存：\n{path}\n\n可继续送去超分或去水印。",
             [("送去超分", TAB_ENHANCE), ("送去去水印", TAB_WATERMARK)],
         )
+        if tab == OPEN_FOLDER:
+            from core.os_util import reveal_in_explorer
+            reveal_in_explorer(path)
+            return
         if tab is not None and self._handoff:
             self._handoff(path, tab)
 
@@ -851,6 +863,10 @@ class SlicePage(QWidget):
             "可继续送去超分或去水印。",
             [("送去超分", TAB_ENHANCE), ("送去去水印", TAB_WATERMARK)],
         )
+        if tab == OPEN_FOLDER:
+            from core.os_util import reveal_in_explorer
+            reveal_in_explorer(path)
+            return
         if tab is not None and self._handoff:
             self._handoff(path, tab)
 
@@ -932,6 +948,12 @@ class MainWindow(QMainWindow):
         self._page_label = QLabel(PAGE_TITLES[TAB_HOME])
         self._page_label.setObjectName("ChromePage")
         self._page_label.setToolTip("当前功能页（由菜单切换）")
+        # 固定胶囊最小宽度，避免切到「个人中心」等长标题时顶栏挤动下方内容
+        _pill_w = max(
+            (self._page_label.fontMetrics().horizontalAdvance(t) for t in PAGE_TITLES.values()),
+            default=80,
+        )
+        self._page_label.setMinimumWidth(_pill_w + 28)
 
         status_bar.addWidget(brand)
         status_bar.addSpacing(8)
@@ -990,6 +1012,62 @@ class MainWindow(QMainWindow):
         from core.app_logic import AppLogic
         app = AppLogic()
         QTimer.singleShot(500, lambda: self._post_show_setup(app))
+        # 空闲时预热常用页，避免第一次点开现场建页抖动
+        QTimer.singleShot(1200, lambda: self._prewarm_pages(
+            [TAB_PROFILE, TAB_SLICE, TAB_ENHANCE, TAB_DOWNLOAD]
+        ))
+        # 配置了 update_manifest_url 且开启 startup 时，空闲静默检查（不打断首屏）
+        QTimer.singleShot(3500, self._startup_update_check)
+
+    def _startup_update_check(self) -> None:
+        try:
+            from core.update_check import (
+                check_for_update,
+                check_on_startup_enabled,
+                remember_notified_version,
+                should_prompt_startup,
+            )
+            if not check_on_startup_enabled():
+                return
+            info = check_for_update(self._vm.version, timeout=5.0)
+            if not should_prompt_startup(info):
+                if info.configured and info.message:
+                    self._status_label.setText(info.message)
+                return
+            remember_notified_version(info.remote_version)
+            if info.url:
+                from PySide6.QtGui import QDesktopServices
+                from PySide6.QtCore import QUrl
+
+                r = QMessageBox.question(
+                    self,
+                    "发现新版本",
+                    f"{info.message}\n\n{info.notes}\n\n是否打开下载页？",
+                )
+                if r == QMessageBox.StandardButton.Yes:
+                    QDesktopServices.openUrl(QUrl(info.url))
+            else:
+                QMessageBox.information(self, "发现新版本", f"{info.message}\n\n{info.notes}")
+        except Exception:
+            pass
+
+    def _prewarm_pages(self, indices: list[int]) -> None:
+        """错开创建，避免一次卡死 UI。"""
+        pending = [i for i in indices if self._page_by_tab.get(i) is None]
+        if not pending:
+            return
+        idx = pending[0]
+
+        def _one():
+            try:
+                self._ensure_page(idx)
+            except Exception:
+                pass
+            rest = pending[1:]
+            if rest:
+                QTimer.singleShot(400, lambda: self._prewarm_pages(rest))
+
+        QTimer.singleShot(0, _one)
 
     def _create_page(self, index: int) -> QWidget:
         """按 TAB_* 索引创建功能页（仅首次）。"""
@@ -1025,6 +1103,11 @@ class MainWindow(QMainWindow):
         if existing is not None:
             return existing
         page = self._create_page(index)
+        if hasattr(page, "prepare_for_size"):
+            try:
+                page.prepare_for_size(self._stack.size())
+            except Exception:
+                pass
         old = self._stack.widget(index)
         self._stack.removeWidget(old)
         self._stack.insertWidget(index, page)
@@ -1272,6 +1355,9 @@ class MainWindow(QMainWindow):
 
         if help_menu is not None:
             help_menu.addSeparator()
+            act_upd = QAction("检查更新…", self)
+            act_upd.triggered.connect(self._on_check_update)
+            help_menu.addAction(act_upd)
             act_about = QAction("关于 MusicEditing", self)
             act_about.triggered.connect(self._on_about)
             help_menu.addAction(act_about)
@@ -1280,14 +1366,19 @@ class MainWindow(QMainWindow):
         """切换功能页（菜单 / 接力 / 下载完成共用）；首次进入时懒创建。"""
         if index < 0 or index > TAB_STEGO:
             return
-        self._ensure_page(index)
-        self._stack.setCurrentIndex(index)
-        title = PAGE_TITLES.get(index, f"页面 {index}")
-        self._page_label.setText(title)
-        act = self._nav_actions.get(index)
-        if act is not None and not act.isChecked():
-            act.setChecked(True)
-        self.setWindowTitle(f"MusicEditing · {title}")
+        # 首次建页较重：关掉更新再切，减少「整窗闪一下/抖一下」
+        self.setUpdatesEnabled(False)
+        try:
+            self._ensure_page(index)
+            self._stack.setCurrentIndex(index)
+            title = PAGE_TITLES.get(index, f"页面 {index}")
+            self._page_label.setText(title)
+            act = self._nav_actions.get(index)
+            if act is not None and not act.isChecked():
+                act.setChecked(True)
+            self.setWindowTitle(f"MusicEditing · {title}")
+        finally:
+            self.setUpdatesEnabled(True)
 
     @Slot()
     def _goto_hot_comments_tab(self):
@@ -1299,6 +1390,38 @@ class MainWindow(QMainWindow):
     def _on_menu_open_media(self):
         self._goto_page(TAB_HOME)
         self._ensure_page(TAB_HOME).prompt_open_media()
+
+    @Slot()
+    def _on_check_update(self):
+        info = self._vm.check_for_update()
+        if info.has_update and info.remote_version:
+            try:
+                from core.update_check import remember_notified_version
+                remember_notified_version(info.remote_version)
+            except Exception:
+                pass
+        if not info.configured:
+            from core.update_check import setup_help_text
+
+            QMessageBox.information(
+                self,
+                "检查更新",
+                f"{info.message}\n\n{setup_help_text()}",
+            )
+            return
+        if info.has_update and info.url:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+
+            r = QMessageBox.question(
+                self,
+                "发现新版本",
+                f"{info.message}\n\n{info.notes}\n\n是否打开下载页？",
+            )
+            if r == QMessageBox.StandardButton.Yes:
+                QDesktopServices.openUrl(QUrl(info.url))
+            return
+        QMessageBox.information(self, "检查更新", info.message)
 
     @Slot()
     def _on_about(self):

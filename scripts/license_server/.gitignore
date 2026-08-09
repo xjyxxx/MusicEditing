@@ -1,0 +1,5 @@
+# License server local data
+keys.json
+bindings.json
+__pycache__/
+*.pyc

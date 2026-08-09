@@ -170,6 +170,10 @@ class AppLogic:
         self.version = "0.1.0"
         self.output_dir = ""
         self.license_fp = ""
+        self.trial_highlight_exports = 0
+        self.trial_vertical_exports = 0
+        self.license_purchase_url = ""
+        self.license_server_url = ""
 
         cfg = load_app_config()
         self.llm_model_path = cfg.get("llm_model_path", "")
@@ -187,6 +191,13 @@ class AppLogic:
             self.auth_type = "正式版"
         else:
             self.auth_type = "试用版"
+        self.license_purchase_url = (cfg.get("license_purchase_url") or "").strip()
+        self.license_server_url = (cfg.get("license_server_url") or "").strip()
+        try:
+            from core.trial_policy import load_quota_from_config
+            load_quota_from_config(self, cfg)
+        except Exception:
+            pass
 
         # 解析并校验 Vosk 目录（避免空串/「.」被当成模型路径）
         try:
@@ -271,18 +282,24 @@ class AppLogic:
         return p
 
     def redeem_license(self, key: str) -> tuple[bool, str]:
-        from core.network import license_fingerprint, validate_license_key
+        from core.network import license_fingerprint, redeem_license_key
 
-        if not validate_license_key(key):
-            return False, "卡密无效：需至少 16 位，且同时包含字母与数字"
+        ok, msg, mode = redeem_license_key(key)
+        if not ok:
+            return False, msg
         self.license_fp = license_fingerprint(key)
         self.auth_type = "正式版"
         try:
             update_app_config_value("license_fp", self.license_fp)
             update_app_config_value("auth_type", "正式版")
+            update_app_config_value("license_activate_mode", mode)
         except Exception:
             pass
-        return True, "已激活为正式版（本地校验）"
+        if mode == "online":
+            return True, msg if "激活" in msg else f"{msg}（联网）"
+        if mode == "local_fallback":
+            return True, msg
+        return True, msg
 
     def clear_license(self) -> tuple[bool, str]:
         self.license_fp = ""

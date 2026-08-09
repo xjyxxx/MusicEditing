@@ -100,6 +100,15 @@ run_test_x64.bat
 
 > PowerShell 中运行 bat 需加 `.\` 前缀，例如 `.\build.bat` 而不是 `build.bat`。
 
+## 发版给别人用
+
+```powershell
+.\scripts\release_oneclick.bat
+# 或: python scripts\release_oneclick.py --profile standard
+```
+
+详见 [docs/design/distribution.md](docs/design/distribution.md)（便携包 / Inno / 签名 / 卡密 / 更新检查）。
+
 ## 项目结构
 
 ```

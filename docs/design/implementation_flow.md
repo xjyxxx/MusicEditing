@@ -17,6 +17,8 @@
 | [feature_flows.md](feature_flows.md) | 各业务端到端链路 |
 | [deps_and_extending.md](deps_and_extending.md) | 模块依赖树、扩展与路线图 |
 | [player_decode_flow.md](player_decode_flow.md) | 首页播放器解码 / IPC |
+| [release_checklist.md](release_checklist.md) | 发版前短测 / 冒烟 |
+| [distribution.md](distribution.md) | 便携验收、签名、Inno、卡密服务 |
 | [流程图/README.md](../流程图/README.md) | 播放器分层 mermaid 总览 |
 
 **推荐阅读：** §1–§2 → 按任务读专文 → 查进度用 §3 → 跑命令用 §4。
@@ -206,18 +208,23 @@ MainWindow.shutdown()
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
-| 回归短测 | ✅ | SHM/Seek、OpenCV 超分、队列并行、**竖屏导出**、**Cookie 提示**（§5.23） |
-| 发版 checklist | ✅ | [release_checklist.md](release_checklist.md) |
-| 便携打包 | ✅ | `pack_portable.py` 内嵌 `runtime\`；对方免装 Python |
+| 回归短测 | ✅ | SHM/Seek、超分、队列、竖屏、Cookie、试用、**激活服务**、**打包验收** |
+| 发版 checklist | ✅ | [release_checklist.md](release_checklist.md) · [distribution.md](distribution.md) |
+| 便携打包 | ✅ | `--profile` + 验收 + 可选 `--sign`；`accept_portable.py` |
+| Inno 安装包 | ✅ | `scripts/build_installer.bat` + `scripts/inno/MusicEditing.iss` |
+| 一键发版 | ✅ | `release_oneclick.py`：回归→pack→accept→Inno→清单 |
+| 自动更新检查 | ✅ | `update_check.py`；`publish_update_manifest` / `serve_update_channel`；启动静默检查；帮助/个人中心 |
+| 卡密激活服务 | ✅ | `scripts/license_server/`（签发 + POST /v1/activate + 演示购买页） |
 | llama.cpp GPU 推理 | ✅ | 推荐 Vulkan（免 Toolkit）；或 CUDA；`MUSIC_LLM_N_GPU_LAYERS`；`setup_llama_gpu.py` |
 | 开箱依赖向导 | ✅ | 缺啥摘要 + **试跑 15 秒成片**；模型/GPU/Cookie/yt-dlp/场景/LLM（§5.18） |
 | 长任务进度 ETA | ✅ | 超分/去水印/补帧/队列线性外推「剩余约…」（§5.18） |
 | 诊断日志打包 | ✅ | 个人中心一键 zip：player/cli/ORT EP（§5.23） |
 | 临时帧/产物配额 | ✅ | 启动后台清理残留；队列 `max_output_gb`（§5.23） |
-| UI 启动流畅 | ✅ | 页懒创建；`media_player` 延迟到开文件；依赖扫描延后 |
+| UI 启动流畅 | ✅ | 页懒创建 + **空闲预热**（个人中心/切片/增强/下载）；`media_player` 延迟到开文件 |
+| 导出完成体验 | ✅ | 完成后可「打开文件夹」选中成片（`os_util.reveal_in_explorer`） |
 | Studio 页一致性 | ✅ | `studio_kit`：切片/增强/队列/个人中心 Hero+Card 全宽 |
-| 授权/卡密 | ✅ | 本地卡密 + **功能门禁**（AI4× / 队列 / LaMa）；联网支付未接 |
-| 个人中心 | ✅ | 卡密、GPU、输出目录、开箱向导、诊断打包、清理临时帧（§5.17/§5.23） |
+| 授权/卡密 | ✅ | 本地卡密 + **试用配额/720p** + 可选联网激活/购买页；收银台在外部站点 |
+| 个人中心 | ✅ | 卡密、配额、购买页、GPU、输出目录、开箱向导、诊断打包、清理临时帧（§5.17/§5.23） |
 
 ---
 
@@ -236,8 +243,13 @@ MainWindow.shutdown()
 .\scripts\download_exiftool.bat            # 图片 EXIF：exiftool.exe + exiftool_files → third_party/exiftool/
 .\scripts\download_vosk_model.bat          # 演讲金句 ASR：vosk-model-small-cn-0.22 → models/
 .\scripts\install_scenedetect.bat          # 游戏高光：安装 PySceneDetect（scenedetect）
+.\scripts\release_oneclick.bat       # 一键发版：回归→pack→accept→Inno→清单
 .\scripts\pack_portable.bat          # 打便携包 → dist\（可加 --zip）
 python .\scripts\pack_portable.py --zip
+python .\scripts\accept_portable.py  # 验收便携包关键文件 + 干净机清单
+.\scripts\build_installer.bat        # Inno 安装包（需 Inno Setup 6）
+python .\scripts\license_server\gen_keys.py --count 5
+python .\scripts\license_server\server.py --port 8765
 python .\scripts\setup_llama_gpu.py       # llama GPU：推荐 Vulkan；可选 CUDA
-.\scripts\run_regression_short.bat        # 工程质量短测：SHM/Seek、OpenCV 超分、队列并行
+.\scripts\run_regression_short.bat        # 工程质量短测
 ```

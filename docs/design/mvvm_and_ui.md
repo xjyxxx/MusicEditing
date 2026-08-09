@@ -66,7 +66,7 @@
 | BGM 混音 | `BgmPage` | 工作流 | FFmpeg 叠 BGM；Demucs 可选分轨（[feature_flows](feature_flows.md) §5.16） |
 | 封面工厂 | `CoverPage` | 趣味 | 最清晰帧 + 标题 PNG（[feature_flows](feature_flows.md) §5.14） |
 | 音频趣味 | `AudioFunPage` | 趣味 | 整轨趣味 + 梗音叠加/倍数（[feature_flows](feature_flows.md) §5.15） |
-| 个人中心 | `ProfilePage` | 帮助 | 卡密本地校验、GPU 开关、输出目录、关于 |
+| 个人中心 | `ProfilePage` | 帮助 | 卡密/联网激活、试用配额、购买页、GPU、输出目录、诊断 |
 
 播放器组件：`client/scripts/ui/video_player.py`（`GlVideoWidget` OpenGL + `PlayerBackend` → `media_player.exe`）
 

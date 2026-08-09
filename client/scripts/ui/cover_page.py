@@ -9,14 +9,15 @@ from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QProgressBar, QPushButton, QSpinBox, QTextEdit, QVBoxLayout,
-    QWidget,
+    QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSpinBox, QTextEdit,
+    QVBoxLayout, QWidget,
 )
 
 from core.blind_watermark_dct import embed_text_dct
 from core.cover_factory import COVER_SIZES
 from core.exif_stamp import ExifStamp, stamp_exif
 from ui.elided_label import ElidedPathLabel
+from ui.studio_kit import wrap_studio_scroll
 from ui.theme import style_spinbox
 from viewmodels.main_vm import MainViewModel
 
@@ -29,17 +30,24 @@ class CoverPage(QWidget):
         self._result_path = ""
         self._busy = False
 
-        root = QVBoxLayout(self)
+        # 外层：可滚动正文 + 底栏按钮（避免预览框被窗口裁成半截）
+        outer, _body, root = wrap_studio_scroll(self)
+        root.setSpacing(12)
+
         tip = QLabel(
             "在已有缩略图抽取之上，均匀抽样多帧，用 Laplacian 锐度选最清晰画面，"
             "再叠加大字标题导出 PNG（默认竖屏 9:16 短视频封面）。"
         )
         tip.setWordWrap(True)
         tip.setObjectName("MutedText")
+        tip.setMaximumHeight(tip.fontMetrics().lineSpacing() * 3 + 4)
+        tip.setToolTip(tip.text())
         root.addWidget(tip)
 
         src_box = QGroupBox("视频")
         src_lay = QVBoxLayout(src_box)
+        src_lay.setContentsMargins(10, 8, 10, 10)
+        src_lay.setSpacing(8)
         row = QHBoxLayout()
         self._path_label = ElidedPathLabel("未选择文件", object_name="InfoText")
         btn_open = QPushButton("打开视频…")
@@ -56,6 +64,8 @@ class CoverPage(QWidget):
 
         opt_box = QGroupBox("封面参数")
         opt = QVBoxLayout(opt_box)
+        opt.setContentsMargins(10, 8, 10, 10)
+        opt.setSpacing(8)
         title_row = QHBoxLayout()
         title_row.addWidget(QLabel("大标题"))
         self._title = QLineEdit()
@@ -88,6 +98,8 @@ class CoverPage(QWidget):
 
         stamp_box = QGroupBox("导出后溯源（可选）")
         stamp_lay = QVBoxLayout(stamp_box)
+        stamp_lay.setContentsMargins(10, 8, 10, 10)
+        stamp_lay.setSpacing(6)
         self._chk_exif = QCheckBox("写入 EXIF 署名（作者=大标题，备注含 MusicEditing）")
         self._chk_dct = QCheckBox("嵌入频域隐形水印（文字=大标题）")
         self._chk_exif.setChecked(False)
@@ -101,10 +113,16 @@ class CoverPage(QWidget):
         root.addWidget(stamp_box)
 
         preview_box = QGroupBox("预览")
+        preview_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         prev = QHBoxLayout(preview_box)
+        prev.setContentsMargins(10, 8, 10, 10)
+        prev.setSpacing(10)
         self._preview = QLabel("生成后显示封面")
         self._preview.setAlignment(Qt.AlignCenter)
-        self._preview.setMinimumHeight(320)
+        # 完整预览高度；窗口矮时靠外层滚动，不再被裁成半截
+        self._preview.setMinimumHeight(360)
+        self._preview.setMinimumWidth(200)
+        self._preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self._preview.setStyleSheet(
             "background: #080A0E; border: 1px solid #2A3140; border-radius: 8px; color: #8B95A8;"
         )
@@ -113,9 +131,10 @@ class CoverPage(QWidget):
         self._meta = QTextEdit()
         self._meta.setReadOnly(True)
         self._meta.setMaximumWidth(280)
+        self._meta.setMinimumHeight(360)
         self._meta.setPlaceholderText("锐度 / 时间点 / 尺寸…")
         prev.addWidget(self._meta)
-        root.addWidget(preview_box, 1)
+        root.addWidget(preview_box, 0)
 
         self._progress = QProgressBar()
         self._progress.setVisible(False)
@@ -124,8 +143,13 @@ class CoverPage(QWidget):
         self._status = QLabel("")
         self._status.setObjectName("MutedText")
         root.addWidget(self._status)
+        root.addStretch(1)
 
-        btn_row = QHBoxLayout()
+        # 底栏固定在滚动区外，始终可见
+        footer = QWidget()
+        btn_row = QHBoxLayout(footer)
+        btn_row.setContentsMargins(12, 8, 12, 10)
+        btn_row.setSpacing(10)
         self._btn_run = QPushButton("生成封面")
         self._btn_run.setObjectName("primaryButton")
         self._btn_run.clicked.connect(self._on_run)
@@ -139,7 +163,7 @@ class CoverPage(QWidget):
         btn_row.addWidget(self._btn_open_out)
         btn_row.addWidget(self._btn_folder)
         btn_row.addStretch()
-        root.addLayout(btn_row)
+        outer.addWidget(footer, 0)
 
         vm.coverProgress.connect(self._on_progress)
         vm.coverFinished.connect(self._on_finished)

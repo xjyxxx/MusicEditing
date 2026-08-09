@@ -445,10 +445,10 @@ class VideoPlayerWidget(QWidget):
             return False
         now = time.monotonic()
         # 开播宽限期：时钟尚未稳态（略缩短，更快进入可校正）
-        if self._play_started_wall > 0 and (now - self._play_started_wall) < 2.5:
+        if self._play_started_wall > 0 and (now - self._play_started_wall) < 2.0:
             self._drift_streak = 0
             return False
-        if now - self._last_soft_resync_wall < 3.5:
+        if now - self._last_soft_resync_wall < 2.8:
             return False
 
         video_ts = self._last_shown_frame_ts
@@ -456,16 +456,16 @@ class VideoPlayerWidget(QWidget):
         abs_drift = abs(drift)
 
         # 画面略落后：交给 next_frame(min_ts) 跳帧，不 seek
-        if drift < 0 and abs_drift < 0.38:
+        if drift < 0 and abs_drift < 0.35:
             self._drift_streak = 0
             return False
         # 画面略超前：等音频追上即可
-        if drift > 0 and abs_drift < 0.30:
+        if drift > 0 and abs_drift < 0.28:
             self._drift_streak = 0
             return False
 
         self._drift_streak += 1
-        if self._drift_streak < 12:
+        if self._drift_streak < 8:
             return False
 
         log.info(
@@ -1028,7 +1028,7 @@ class VideoPlayerWidget(QWidget):
             )
 
         self._decode_future = self._decode_pool.submit(_job)
-        QTimer.singleShot(10, self._poll_seek_result)
+        QTimer.singleShot(5, self._poll_seek_result)
 
     @Slot()
     def _poll_seek_result(self):
@@ -1041,7 +1041,7 @@ class VideoPlayerWidget(QWidget):
             self._seek_busy = False
             return
         if not fut.done():
-            QTimer.singleShot(10, self._poll_seek_result)
+            QTimer.singleShot(5, self._poll_seek_result)
             return
 
         self._decode_future = None

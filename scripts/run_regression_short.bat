@@ -19,6 +19,18 @@ if errorlevel 1 set FAIL=1
 python tests\regression\test_cookie_probe_hint.py
 if errorlevel 1 set FAIL=1
 
+python tests\regression\test_trial_policy.py
+if errorlevel 1 set FAIL=1
+
+python tests\regression\test_license_activate.py
+if errorlevel 1 set FAIL=1
+
+python tests\regression\test_pack_verify.py
+if errorlevel 1 set FAIL=1
+
+python tests\regression\test_update_check.py
+if errorlevel 1 set FAIL=1
+
 echo.
 if "%FAIL%"=="0" (
   echo ALL PASS

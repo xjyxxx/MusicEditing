@@ -8,14 +8,15 @@ import tempfile
 from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot, QObject
 from PySide6.QtWidgets import (
     QButtonGroup, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QListWidget,
-    QMessageBox, QProgressBar, QPushButton, QRadioButton, QSlider, QTabWidget,
-    QVBoxLayout, QWidget,
+    QMessageBox, QProgressBar, QPushButton, QRadioButton, QSlider, QSizePolicy,
+    QTabWidget, QVBoxLayout, QWidget,
 )
 
 from core.image_loader import load_preview
 from ui.elided_label import ElidedPathLabel
 from ui.exif_panel import ExifPanel, attach_exif_overlay
 from ui.region_selector import RegionSelectorWidget
+from ui.studio_kit import make_fixed_ai_hint, set_ai_hint_text
 from ui.workflow_link import TAB_ENHANCE, ask_video_handoff
 from viewmodels.main_vm import MainViewModel
 
@@ -72,17 +73,18 @@ class WatermarkPage(QWidget):
         )
         hint.setWordWrap(True)
         hint.setObjectName("MutedText")
+        hint.setToolTip(hint.text())
+        # 限高，避免长说明盖住下方 AI 状态条 / Tab
+        hint.setMaximumHeight(hint.fontMetrics().lineSpacing() * 3 + 6)
+        hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         root.addWidget(hint)
 
-        self._ai_hint = QLabel("")
-        self._ai_hint.setObjectName("MutedText")
-        self._ai_hint.setWordWrap(True)
+        self._ai_hint = make_fixed_ai_hint()
         root.addWidget(self._ai_hint)
         fn = getattr(vm, "ai_runtime_hint", None)
-        if callable(fn):
-            self._ai_hint.setText(fn())
+        set_ai_hint_text(self._ai_hint, fn() if callable(fn) else "")
         vm.gpuNameChanged.connect(
-            lambda _n: self._ai_hint.setText(self._vm.ai_runtime_hint())
+            lambda _n: set_ai_hint_text(self._ai_hint, self._vm.ai_runtime_hint())
         )
 
         self._tabs = QTabWidget()

@@ -504,6 +504,7 @@ class MediaBridge:
         self._watermark_backend = "lama"
         self._upscale_backend = "realesrgan"
         self._last_upscale_ep = ""
+        self._ort_cuda_cache: tuple[bool, str] | None = None
         self.set_prefer_cuda(False)
         self.set_prefer_hw_decode(True)
         self.set_watermark_backend("lama")
@@ -587,26 +588,36 @@ class MediaBridge:
         self._env["MUSIC_ORT_CUDA"] = "1" if self._prefer_cuda else "0"
         # -1 = 尽量全部层上 GPU（需用 GGML_CUDA 编译的 llama）；0 = 纯 CPU
         self._env["MUSIC_LLM_N_GPU_LAYERS"] = "-1" if self._prefer_cuda else "0"
+        # GPU 开关变化后重探 EP
+        self._ort_cuda_cache = None
 
     def set_upscale_tile(self, tile: int) -> None:
-        """超分 tile（128–1024）；0=自动（CUDA EP→512，否则 384）。"""
+        """超分 tile（128–1024）；0=自动（CUDA EP→640，否则 384）。"""
         t = int(tile or 0)
         if t <= 0:
             ok, _ = self.probe_ort_cuda()
-            self._env["MUSIC_UPSCALE_TILE"] = "512" if ok else "384"
+            # 更大 tile → 更少 Session::Run；CUDA 收益明显
+            self._env["MUSIC_UPSCALE_TILE"] = "640" if ok else "384"
         else:
             self._env["MUSIC_UPSCALE_TILE"] = str(max(128, min(1024, t)))
 
     def probe_ort_cuda(self) -> tuple[bool, str]:
-        """探测 ONNX Runtime 是否提供 CUDA EP。"""
+        """探测 ONNX Runtime 是否提供 CUDA EP（结果缓存，避免反复 import）。"""
+        if self._ort_cuda_cache is not None:
+            return self._ort_cuda_cache
         try:
             import onnxruntime as ort
             providers = list(ort.get_available_providers() or [])
             if "CUDAExecutionProvider" in providers:
-                return True, "CUDA EP✓"
-            return False, "超分/LaMa 将用 CPU（无 CUDA EP；可装 CUDA 运行库或关 GPU）"
+                self._ort_cuda_cache = (True, "CUDA EP✓")
+            else:
+                self._ort_cuda_cache = (
+                    False,
+                    "超分/LaMa 将用 CPU（无 CUDA EP；可装 CUDA 运行库或关 GPU）",
+                )
         except Exception as e:
-            return False, f"超分/LaMa 将用 CPU（ORT: {e}）"
+            self._ort_cuda_cache = (False, f"超分/LaMa 将用 CPU（ORT: {e}）")
+        return self._ort_cuda_cache
 
     def set_prefer_hw_decode(self, enabled: bool) -> None:
         """批处理 iterate / 缩略图是否请求 D3D11VA（CLI --hw）。"""
@@ -1059,7 +1070,9 @@ class MediaBridge:
 
         try:
             report(2.0, "正在提取视频帧…")
-            extract_cmd = [str(ffmpeg), "-y"]
+            # OpenCV 快路径用 JPEG（读写更快）；LaMa 精修仍用 PNG
+            frame_ext = "png" if use_lama else "jpg"
+            extract_cmd = [str(ffmpeg), "-y", "-threads", "0"]
             if start_sec > 0:
                 extract_cmd.extend(["-ss", f"{start_sec:.3f}"])
             extract_cmd.extend(["-i", input_path])
@@ -1069,9 +1082,11 @@ class MediaBridge:
                 extract_cmd.extend(["-t", f"{duration:.3f}"])
             if max_frames > 0:
                 extract_cmd.extend(["-vframes", str(max_frames)])
+            if frame_ext == "jpg":
+                extract_cmd.extend(["-q:v", "2"])
             extract_cmd.extend([
                 "-vsync", "0",
-                os.path.join(frames_in, "frame_%06d.png"),
+                os.path.join(frames_in, f"frame_%06d.{frame_ext}"),
             ])
             result = subprocess.run(
                 extract_cmd, capture_output=True, text=True,
@@ -1080,7 +1095,11 @@ class MediaBridge:
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.strip() or "帧提取失败")
 
-            frame_files = sorted(glob.glob(os.path.join(frames_in, "*.png")))
+            frame_files = sorted(
+                glob.glob(os.path.join(frames_in, "*.png"))
+                + glob.glob(os.path.join(frames_in, "*.jpg"))
+                + glob.glob(os.path.join(frames_in, "*.jpeg"))
+            )
             if not frame_files:
                 raise RuntimeError("未提取到任何视频帧")
 
@@ -1109,7 +1128,7 @@ class MediaBridge:
             encode_cmd = [
                 str(ffmpeg), "-y",
                 "-framerate", f"{fps:.3f}",
-                "-i", os.path.join(frames_out, "frame_%06d.png"),
+                "-i", os.path.join(frames_out, f"frame_%06d.{frame_ext}"),
                 *_video_encoder_args(),
                 silent_mp4,
             ]
@@ -1357,6 +1376,12 @@ class MediaBridge:
             mode_label = "Real-ESRGAN" if use_ai else "OpenCV 双三次"
             ok_ep, ep_msg = self.probe_ort_cuda() if use_ai else (False, "")
             if use_ai and self._prefer_cuda and not ok_ep:
+                report(
+                    5.0,
+                    f"提示：已开 GPU 但无 CUDA EP，超分走 CPU（较慢）。{ep_msg}",
+                )
+            if use_ai:
+                self.set_upscale_tile(0)
                 report(8.0, f"共 {total} 帧，{mode_label} {scale}x · {ep_msg}")
             else:
                 report(8.0, f"共 {total} 帧，{mode_label} {scale}x 强度{strength}%…")

@@ -1,14 +1,13 @@
 """个人中心：卡密、GPU、输出目录、诊断与关于。
 
-适配最大化 / 全屏 / 窗口缩放：内容铺满可用区域，窄屏自动改单列。
+铺满可用区域；固定双列卡片网格（不随宽度拆装），减少进入时布局跳动。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Slot
-from PySide6.QtGui import QResizeEvent
+from PySide6.QtCore import Qt, QTimer, Slot
 from PySide6.QtWidgets import (
     QCheckBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
@@ -21,9 +20,6 @@ from ui.theme import (
     TEXT_MUTED,
 )
 from viewmodels.main_vm import MainViewModel
-
-# 低于此宽度（逻辑像素）改为单列，便于缩小窗口 / 高 DPI 缩放
-_NARROW_BREAKPOINT = 860
 
 
 def _profile_stylesheet() -> str:
@@ -179,7 +175,8 @@ QLabel#ProfileGpuOk {{
 def _make_card(title: str, hint: str = "") -> tuple[QFrame, QVBoxLayout]:
     card = QFrame()
     card.setObjectName("ProfileCard")
-    card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+    # Preferred：避免进入页面时随网格被纵向撑开造成「整页在动」
+    card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
     lay = QVBoxLayout(card)
     lay.setContentsMargins(14, 12, 14, 12)
     lay.setSpacing(10)
@@ -211,7 +208,7 @@ class ProfilePage(QWidget):
     def __init__(self, vm: MainViewModel, parent=None):
         super().__init__(parent)
         self._vm = vm
-        self._narrow = False
+        self._first_show = True
         self.setObjectName("ProfilePage")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(_profile_stylesheet())
@@ -226,23 +223,26 @@ class ProfilePage(QWidget):
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # AsNeeded：不占常驻槽；右边距预留与滚动条同宽，避免条出现/消失时内容左右晃
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         outer.addWidget(self._scroll)
 
         self._body = QWidget()
         self._body.setObjectName("ProfileBody")
-        self._body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self._scroll.setWidget(self._body)
 
+        _sb = max(12, self._scroll.verticalScrollBar().sizeHint().width())
         self._root = QVBoxLayout(self._body)
-        self._root.setContentsMargins(12, 10, 12, 12)
+        self._root.setContentsMargins(12, 10, 12 + _sb, 12)
         self._root.setSpacing(10)
 
         hero = self._build_hero(vm)
         hero.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         self._root.addWidget(hero, 0)
 
-        # 主网格：宽屏双列，窄屏单列（resizeEvent 切换）
+        # 固定双列网格（不再随宽度拆装控件，避免进入页时「整页挪一下」）
         self._grid = QGridLayout()
         self._grid.setContentsMargins(0, 0, 0, 0)
         self._grid.setHorizontalSpacing(10)
@@ -257,10 +257,21 @@ class ProfilePage(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum,
         )
 
-        self._root.addLayout(self._grid, 1)
-        self._root.addWidget(self._about_card, 0)
+        # 左：授权跨两行；右：GPU / 输出；底：开箱 | 诊断。布局一次定死。
+        self._grid.addWidget(self._auth_card, 0, 0, 2, 1)
+        self._grid.addWidget(self._gpu_card, 0, 1)
+        self._grid.addWidget(self._out_card, 1, 1)
+        self._grid.addWidget(self._setup_card, 2, 0)
+        self._grid.addWidget(self._diag_card, 2, 1)
+        self._grid.setRowStretch(0, 0)
+        self._grid.setRowStretch(1, 0)
+        self._grid.setRowStretch(2, 0)
+        self._grid.setColumnStretch(0, 3)
+        self._grid.setColumnStretch(1, 2)
 
-        self._apply_layout(narrow=False)
+        # 滚动区内容不要 addStretch：widgetResizable 下 stretch 会先吃满视口再被内容顶回去 → 肉眼可见跳动
+        self._root.addLayout(self._grid, 0)
+        self._root.addWidget(self._about_card, 0)
 
         vm.authTypeChanged.connect(self._on_auth_changed)
         vm.gpuNameChanged.connect(self._on_gpu_name)
@@ -268,46 +279,28 @@ class ProfilePage(QWidget):
         self._sync_gpu_check()
         self._refresh_auth_badge(vm.auth_type)
 
-    def _clear_grid(self) -> None:
-        while self._grid.count():
-            item = self._grid.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                self._grid.removeWidget(w)
-                w.setParent(self._body)
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        # 首帧布局未稳态前不刷新，避免「整页挪一下」
+        if self._first_show:
+            self._first_show = False
+            self.setUpdatesEnabled(False)
+            QTimer.singleShot(0, self._finish_first_show)
 
-    def _apply_layout(self, *, narrow: bool) -> None:
-        self._clear_grid()
-        self._narrow = narrow
-        if narrow:
-            # 单列：自上而下铺满
-            self._grid.addWidget(self._auth_card, 0, 0)
-            self._grid.addWidget(self._gpu_card, 1, 0)
-            self._grid.addWidget(self._out_card, 2, 0)
-            self._grid.addWidget(self._setup_card, 3, 0)
-            self._grid.addWidget(self._diag_card, 4, 0)
-            for r in range(5):
-                self._grid.setRowStretch(r, 1 if r == 0 else 1)
-            self._grid.setColumnStretch(0, 1)
-            self._grid.setColumnStretch(1, 0)
-        else:
-            # 双列：左授权跨两行；右 GPU/输出；底开箱|诊断
-            self._grid.addWidget(self._auth_card, 0, 0, 2, 1)
-            self._grid.addWidget(self._gpu_card, 0, 1)
-            self._grid.addWidget(self._out_card, 1, 1)
-            self._grid.addWidget(self._setup_card, 2, 0)
-            self._grid.addWidget(self._diag_card, 2, 1)
-            self._grid.setRowStretch(0, 2)
-            self._grid.setRowStretch(1, 2)
-            self._grid.setRowStretch(2, 1)
-            self._grid.setColumnStretch(0, 3)
-            self._grid.setColumnStretch(1, 2)
+    def _finish_first_show(self) -> None:
+        try:
+            self.prepare_for_size(self.size())
+        except Exception:
+            pass
+        self.setUpdatesEnabled(True)
 
-    def resizeEvent(self, event: QResizeEvent) -> None:
-        super().resizeEvent(event)
-        narrow = self.width() < _NARROW_BREAKPOINT
-        if narrow != self._narrow:
-            self._apply_layout(narrow=narrow)
+    def prepare_for_size(self, size) -> None:
+        """插入堆叠前按最终尺寸预布局，减少首帧跳动。"""
+        if size is None or size.width() < 2 or size.height() < 2:
+            return
+        self.resize(size)
+        self._body.adjustSize()
+        self.updateGeometry()
 
     def _build_hero(self, vm: MainViewModel) -> QFrame:
         hero = QFrame()
@@ -320,9 +313,13 @@ class ProfilePage(QWidget):
         left.setSpacing(4)
         title = QLabel("个人中心")
         title.setObjectName("ProfileTitle")
-        sub = QLabel("管理授权、硬件加速与本地输出；诊断日志一键打包。支持最大化 / 缩放窗口。")
+        sub = QLabel("管理授权、硬件加速与本地输出；诊断日志一键打包。")
         sub.setObjectName("ProfileSubtitle")
         sub.setWordWrap(True)
+        # 固定两行槽位，避免与右侧版本 pill / 下方卡片叠字
+        _sub_h = sub.fontMetrics().lineSpacing() * 2 + 4
+        sub.setFixedHeight(_sub_h)
+        sub.setToolTip(sub.text())
         left.addWidget(title)
         left.addWidget(sub)
         lay.addLayout(left, 1)
@@ -336,7 +333,7 @@ class ProfilePage(QWidget):
     def _build_auth_card(self, vm: MainViewModel) -> QFrame:
         card, lay = _make_card(
             "授权 / 卡密",
-            "本地校验卡密格式；联网支付尚未接入。",
+            "本地卡密或联网激活；可配置购买页与 license 服务器。",
         )
 
         status = QFrame()
@@ -352,6 +349,14 @@ class ProfilePage(QWidget):
         status_lay.addStretch(1)
         status_lay.addWidget(self._auth_status)
         lay.addWidget(status)
+
+        self._quota_label = QLabel("")
+        self._quota_label.setObjectName("ProfileCardHint")
+        self._quota_label.setWordWrap(True)
+        _qh = self._quota_label.fontMetrics().lineSpacing() * 2 + 4
+        self._quota_label.setFixedHeight(_qh)
+        lay.addWidget(self._quota_label)
+        self._refresh_quota_label()
 
         field = QLabel("卡密")
         field.setObjectName("ProfileFieldLabel")
@@ -378,15 +383,25 @@ class ProfilePage(QWidget):
         self._btn_redeem = _btn("兑换正式版", primary=True)
         self._btn_redeem.clicked.connect(self._on_redeem)
         self._btn_clear = _btn("恢复试用", primary=False)
-        self._btn_clear.setToolTip("清除本地卡密，回到试用版能力")
+        self._btn_clear.setToolTip("清除本地卡密，回到试用版能力（次数配额保留）")
         self._btn_clear.clicked.connect(self._on_clear_license)
         actions.addWidget(self._btn_redeem, 2)
         actions.addWidget(self._btn_clear, 1)
         lay.addLayout(actions)
 
+        self._btn_buy = _btn("打开购买页…", primary=False)
+        self._btn_buy.setToolTip(
+            "需配置 app.conf 的 license_purchase_url，或环境变量 MUSIC_LICENSE_PURCHASE_URL"
+        )
+        self._btn_buy.clicked.connect(self._on_open_purchase)
+        lay.addWidget(self._btn_buy)
+
         tip = QLabel(
-            "试用：快速超分 2×、快速去水印。\n"
-            "正式版：AI 4×、批量队列、LaMa 精修。"
+            "试用：OpenCV 超分 2×、快速去水印、单文件切片；"
+            "高光导出≤20 次、竖屏≤10 次、最长边≤720p。\n"
+            "正式版：AI 4×、批量队列、LaMa 精修、导出不限。\n"
+            "联网：app.conf 写 license_server_url（POST /v1/activate）；"
+            "无服务器时本地格式校验。"
         )
         tip.setObjectName("ProfileCardHint")
         tip.setWordWrap(True)
@@ -440,7 +455,7 @@ class ProfilePage(QWidget):
     def _build_diag_card(self) -> QFrame:
         card, lay = _make_card(
             "诊断与清理",
-            "打包 player / cli / ORT EP 日志；清理超分临时帧残留。",
+            "打包日志；清理临时帧；检查新版本（需配置 update_manifest_url）。",
         )
         row = QHBoxLayout()
         row.setSpacing(10)
@@ -451,6 +466,9 @@ class ProfilePage(QWidget):
         row.addWidget(btn_pack, 1)
         row.addWidget(btn_clean, 1)
         lay.addLayout(row)
+        btn_upd = _btn("检查更新…", primary=False)
+        btn_upd.clicked.connect(self._on_check_update)
+        lay.addWidget(btn_upd)
         lay.addStretch(1)
         return card
 
@@ -473,6 +491,28 @@ class ProfilePage(QWidget):
 
     def _refresh_auth_badge(self, auth: str) -> None:
         self._auth_status.setText((auth or "试用版").strip() or "试用版")
+        self._refresh_quota_label()
+
+    def _refresh_quota_label(self) -> None:
+        if not hasattr(self, "_quota_label"):
+            return
+        try:
+            q = self._vm.trial_quota_summary()
+        except Exception:
+            self._quota_label.setText("")
+            return
+        if q.get("licensed"):
+            txt = "正式版：导出与功能不限次数。"
+            self._quota_label.setText(txt)
+            self._quota_label.setToolTip(txt)
+            return
+        txt = (
+            f"试用剩余：高光导出 {q.get('highlight_left')}/{q.get('highlight_max')}，"
+            f"竖屏 {q.get('vertical_left')}/{q.get('vertical_max')}；"
+            f"最长边≤{q.get('max_export_height')}p。"
+        )
+        self._quota_label.setText(txt)
+        self._quota_label.setToolTip(txt)
 
     def _sync_gpu_check(self) -> None:
         enabled = bool(getattr(self._vm, "gpu_enabled", True))
@@ -511,6 +551,7 @@ class ProfilePage(QWidget):
         ok, msg = self._vm.redeem_license(key)
         if ok:
             self._key_edit.clear()
+            self._refresh_quota_label()
             QMessageBox.information(self, "授权", msg)
         else:
             QMessageBox.warning(self, "授权", msg)
@@ -518,7 +559,31 @@ class ProfilePage(QWidget):
     @Slot()
     def _on_clear_license(self):
         ok, msg = self._vm.clear_license()
+        self._refresh_quota_label()
         QMessageBox.information(self, "授权", msg if ok else msg)
+
+    @Slot()
+    def _on_open_purchase(self):
+        url = ""
+        try:
+            url = self._vm.purchase_url()
+        except Exception:
+            url = ""
+        if not url:
+            QMessageBox.information(
+                self,
+                "购买页",
+                "尚未配置购买地址。\n\n"
+                "在 app.conf 增加：\n"
+                "license_purchase_url=https://你的商店/…\n"
+                "或设置环境变量 MUSIC_LICENSE_PURCHASE_URL。\n\n"
+                "支付成功后把卡密粘贴到上方兑换即可。",
+            )
+            return
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+
+        QDesktopServices.openUrl(QUrl(url))
 
     @Slot(bool)
     def _on_gpu_toggled(self, checked: bool):
@@ -534,6 +599,38 @@ class ProfilePage(QWidget):
             return
         self._vm.set_output_dir(path)
         self._sync_output_label()
+
+    @Slot()
+    def _on_check_update(self):
+        info = self._vm.check_for_update()
+        if info.has_update and info.remote_version:
+            try:
+                from core.update_check import remember_notified_version
+                remember_notified_version(info.remote_version)
+            except Exception:
+                pass
+        if not info.configured:
+            from core.update_check import setup_help_text
+
+            QMessageBox.information(
+                self,
+                "检查更新",
+                f"{info.message}\n\n{setup_help_text()}",
+            )
+            return
+        if info.has_update and info.url:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+
+            r = QMessageBox.question(
+                self,
+                "发现新版本",
+                f"{info.message}\n\n{info.notes}\n\n是否打开下载页？",
+            )
+            if r == QMessageBox.StandardButton.Yes:
+                QDesktopServices.openUrl(QUrl(info.url))
+            return
+        QMessageBox.information(self, "检查更新", info.message)
 
     @Slot()
     def _on_open_wizard(self):

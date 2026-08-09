@@ -21,7 +21,7 @@ from core.image_loader import load_preview, probe_size
 from ui.elided_label import ElidedPathLabel
 from ui.exif_panel import ExifPanel, attach_exif_overlay
 from ui.theme import BG, PLAYER_BG, TEXT_MUTED, enhance_page_stylesheet
-from ui.studio_kit import make_studio_hero, studio_page_stylesheet
+from ui.studio_kit import make_fixed_ai_hint, make_studio_hero, set_ai_hint_text, studio_page_stylesheet
 from ui.workflow_link import TAB_WATERMARK, ask_video_handoff
 from viewmodels.main_vm import MainViewModel
 
@@ -335,9 +335,7 @@ class EnhancePage(QWidget):
             "超分",
         ))
 
-        self._ai_hint = QLabel("")
-        self._ai_hint.setObjectName("MutedText")
-        self._ai_hint.setWordWrap(True)
+        self._ai_hint = make_fixed_ai_hint()
         root.addWidget(self._ai_hint)
         self._refresh_ai_hint()
         vm.gpuNameChanged.connect(lambda _n: self._refresh_ai_hint())
@@ -459,6 +457,8 @@ class EnhancePage(QWidget):
 
         self._img_meta = QLabel("—")
         self._img_meta.setObjectName("MetaBadge")
+        self._img_meta.setWordWrap(True)
+        self._img_meta.setMaximumHeight(self._img_meta.fontMetrics().lineSpacing() * 2 + 16)
         layout.addWidget(self._img_meta)
 
         self._img_compare = SideBySideCompare()
@@ -509,6 +509,8 @@ class EnhancePage(QWidget):
 
         self._vid_info = QLabel("—")
         self._vid_info.setObjectName("MetaBadge")
+        self._vid_info.setWordWrap(True)
+        self._vid_info.setMaximumHeight(self._vid_info.fontMetrics().lineSpacing() * 2 + 16)
         layout.addWidget(self._vid_info)
 
         preview_row = QHBoxLayout()
@@ -844,11 +846,8 @@ class EnhancePage(QWidget):
         return page
 
     def _refresh_ai_hint(self):
-        lbl = getattr(self, "_ai_hint", None)
-        if lbl is None:
-            return
         fn = getattr(self._vm, "ai_runtime_hint", None)
-        lbl.setText(fn() if callable(fn) else "")
+        set_ai_hint_text(getattr(self, "_ai_hint", None), fn() if callable(fn) else "")
 
     def _refresh_license_gates(self):
         """试用：灰显 AI 4×；正式版全开。"""

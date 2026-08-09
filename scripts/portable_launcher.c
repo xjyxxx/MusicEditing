@@ -40,7 +40,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
     _snwprintf_s(bin_dir, MAX_PATH, _TRUNCATE, L"%sbuild_x64\\bin\\Release", exe_path);
 
     if (GetFileAttributesW(pythonw) == INVALID_FILE_ATTRIBUTES) {
-        fail(L"Missing runtime\\pythonw.exe\nPlease use a full portable package.");
+        fail(L"Missing runtime\\pythonw.exe\n"
+             L"Please use a full portable package.\n"
+             L"If the app flashes and exits: install VC++ 2015-2022 x64.");
         return 2;
     }
 
@@ -77,7 +79,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
     if (!CreateProcessW(
             pythonw, cmdline, NULL, NULL, FALSE, 0, NULL, exe_path, &si, &pi)) {
         fail(L"Failed to start runtime\\pythonw.exe\n"
-             L"Install VC++ 2015-2022 x64 redistributable if needed.");
+             L"1) Install VC++ 2015-2022 x64 redistributable\n"
+             L"2) If SmartScreen blocked the zip, unblock / re-extract\n"
+             L"3) Try 「启动 MusicEditing.bat」");
         return 4;
     }
 

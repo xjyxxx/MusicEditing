@@ -232,15 +232,22 @@ class MainViewModel(QObject):
 
     def require_feature(self, feature: str) -> tuple[bool, str]:
         """试用门禁。返回 (ok, tip)。正式版一律放行。"""
-        if self.is_licensed:
-            return True, ""
-        tips = {
-            "enhance_ai_4x": "试用版不可用 AI 超分 4×，请到「个人中心」兑换正式版，或改用 2× / 快速 OpenCV。",
-            "pipeline_queue": "试用版不可用批量全流程队列，请到「个人中心」兑换正式版。",
-            "watermark_lama": "试用版不可用精修去水印（LaMa），请到「个人中心」兑换正式版，或改用「快速」。",
-        }
-        tip = tips.get(feature, "该功能需正式版，请到「个人中心」兑换卡密。")
-        return False, tip
+        from core.trial_policy import feature_allowed
+
+        return feature_allowed(self.is_licensed, feature)
+
+    def trial_quota_summary(self) -> dict:
+        from core.trial_policy import quota_snapshot
+
+        return quota_snapshot(self._app)
+
+    def purchase_url(self) -> str:
+        from core.network import purchase_url
+
+        u = purchase_url()
+        if u:
+            return u
+        return (getattr(self._app, "license_purchase_url", "") or "").strip()
 
     @Property(str, constant=True)
 
@@ -653,8 +660,8 @@ class MainViewModel(QObject):
         return path
 
     def ai_runtime_hint(self) -> str:
-        """GPU 推理 / 模型就绪一句话状态。"""
-        gpu = "GPU 推理开" if self._app.use_gpu else "GPU 推理关（CPU）"
+        """GPU / 模型就绪状态（控制在约两行，长说明见标签 tooltip）。"""
+        gpu = "GPU开" if self._app.use_gpu else "GPU关·CPU"
         sr_ok = bool(
             getattr(self._app, "realesrgan_model_path", "")
             and os.path.isfile(self._app.realesrgan_model_path)
@@ -665,26 +672,26 @@ class MainViewModel(QObject):
         )
         parts = [gpu]
         if self._bridge and self._app.use_gpu:
-            ok_ep, ep_msg = self._bridge.probe_ort_cuda()
-            if not ok_ep:
-                parts.append(ep_msg)
-            else:
-                parts.append("CUDA EP✓ · tile自动≈512")
-        parts.append("超分模型✓" if sr_ok else "超分模型缺（download_realesrgan_model.bat）")
-        parts.append("LaMa✓" if lama_ok else "LaMa缺（download_lama_model.bat）")
+            ok_ep, _ep_msg = self._bridge.probe_ort_cuda()
+            parts.append("CUDA EP✓ · tile≈640" if ok_ep else "无CUDA EP→CPU")
+        parts.append("超分✓" if sr_ok else "超分模型缺（跑 download_realesrgan_model.bat）")
+        parts.append("LaMa✓" if lama_ok else "LaMa缺（跑 download_lama_model.bat）")
         return " · ".join(parts)
 
+    def check_for_update(self):
+        """检查更新；返回 UpdateInfo，并刷新状态栏文案。"""
+        from core.update_check import check_for_update
 
+        info = check_for_update(self.version)
+        self._status_message = info.message
+        self.statusMessageChanged.emit(self._status_message)
+        return info
 
     @Slot(str, str, int, str, int)
-
     def start_enhance_image(
-
         self, input_path: str, output_path: str, scale: int = 2,
         backend: str = "realesrgan", strength: int = 65,
-
     ):
-
         be = (backend or "realesrgan").strip().lower()
 
         if be in ("opencv", "cv", "fast", "bicubic"):
@@ -1543,6 +1550,21 @@ class MainViewModel(QObject):
             self.errorOccurred.emit("没有可导出的高光片段")
             return
 
+        from core.trial_policy import (
+            check_export_quota,
+            clamp_export_height,
+            consume_export_quota,
+        )
+
+        ok_q, tip_q = check_export_quota(self._app, "highlight")
+        if not ok_q:
+            self.errorOccurred.emit(tip_q)
+            return
+        max_height = clamp_export_height(self.is_licensed, int(max_height or 0))
+        if tip_q and not self.is_licensed:
+            self._status_message = tip_q
+            self.statusMessageChanged.emit(self._status_message)
+
         task = TaskModel(
             task_id=self._next_task_id,
             task_type=TaskType.EXPORT,
@@ -1572,6 +1594,7 @@ class MainViewModel(QObject):
                     naming_preset=naming_preset,
                     use_naming_scheme=use_naming_scheme,
                 )
+                consume_export_quota(self._app, "highlight")
                 task.state = TaskState.COMPLETED
                 task.progress = 100.0
                 self.taskStateChanged.emit(task.task_id, TaskState.COMPLETED)
@@ -1654,6 +1677,17 @@ class MainViewModel(QObject):
             self.errorOccurred.emit("请指定输出路径")
             return
 
+        from core.trial_policy import (
+            check_export_quota,
+            clamp_vertical_size,
+            consume_export_quota,
+        )
+
+        ok_q, tip_q = check_export_quota(self._app, "vertical")
+        if not ok_q:
+            self.errorOccurred.emit(tip_q)
+            return
+
         segs = [
             s for s in self._state.highlight_segments
             if s.selected and s.end_sec > s.start_sec
@@ -1664,8 +1698,15 @@ class MainViewModel(QObject):
         bias = crop_bias
         track_mode = (track_mode or "fixed").strip().lower() or "fixed"
         out_path = os.path.abspath(output_path)
-        w, h = int(width), int(height)
+        w, h = clamp_vertical_size(self.is_licensed, int(width), int(height))
         quality = (quality or "high").strip().lower() or "high"
+        if not self.is_licensed:
+            note = tip_q
+            if h < int(height):
+                note = (note + "；" if note else "") + f"试用导出分辨率≤{h}p"
+            if note:
+                self._status_message = note
+                self.statusMessageChanged.emit(self._status_message)
 
         task = TaskModel(
             task_id=self._next_task_id,
@@ -1715,6 +1756,7 @@ class MainViewModel(QObject):
                     quality=quality,
                     on_progress=lambda p, m: report(50.0 + p * 0.5, m),
                 )
+                consume_export_quota(self._app, "vertical")
                 task.state = TaskState.COMPLETED
                 task.progress = 100.0
                 self.taskStateChanged.emit(task.task_id, TaskState.COMPLETED)

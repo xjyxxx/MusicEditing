@@ -5,12 +5,15 @@
 用法（仓库根）:
   python scripts/pack_portable.py
   python scripts/pack_portable.py --zip
+  python scripts/pack_portable.py --profile slim --zip    # 试用/演示包（无大模型）
+  python scripts/pack_portable.py --profile full --zip    # 含 LLM/vosk
   python scripts/pack_portable.py --ship-source   # 调试：保留 .py（不推荐外发）
 
 说明:
   - 默认将 client/scripts 编成 .pyc 后删除 .py，降低源码泄露风险
   - C++ 引擎本身就是 exe/dll，不含工程源码
   - .pyc 仍可被反编译，不是军工级保护；需要更强可再上 Nuitka
+  - 可选代码签名：环境变量 MUSIC_CODE_SIGN_THUMBPRINT=证书 SHA1，或 --sign
 """
 
 from __future__ import annotations
@@ -72,6 +75,28 @@ SKIP_BIN_NAMES = {
     "_sr_test_ai.png",
     "_sr_test_in.png",
     "_sr_test_out.png",
+}
+
+# slim=演示体积 / standard=默认可卖 / full=含语音模型
+PACK_PROFILES: dict[str, dict] = {
+    "slim": {
+        "with_models": False,
+        "with_scenedetect": False,
+        "with_llm": False,
+        "with_cuda_ort": False,
+    },
+    "standard": {
+        "with_models": True,
+        "with_scenedetect": True,
+        "with_llm": False,
+        "with_cuda_ort": False,
+    },
+    "full": {
+        "with_models": True,
+        "with_scenedetect": True,
+        "with_llm": True,
+        "with_cuda_ort": False,
+    },
 }
 
 
@@ -451,6 +476,10 @@ def _write_readme(
             "二、怎么启动",
             "  解压后双击 MusicEditing.exe（推荐，无黑框）",
             "  「启动 MusicEditing.bat」仅作备用。",
+            "",
+            "  若 Windows 提示「未知发布者 / SmartScreen」：",
+            "  点「更多信息」→「仍要运行」（未做代码签名时正常）。",
+            "  若双击无反应或闪退：先装 VC++ x64 运行库（见上），再试 bat。",
         ]
     else:
         need = [
@@ -499,6 +528,80 @@ def _write_readme(
     txt.write_text("\n".join(lines), encoding="utf-8", newline="\r\n")
 
 
+def verify_portable_pack(out_root: Path, *, embed_python: bool, ship_source: bool) -> list[str]:
+    """打包后冒烟检查；返回警告列表，缺关键文件则抛 SystemExit。"""
+    errors: list[str] = []
+    warns: list[str] = []
+    bin_dir = out_root / "build_x64" / "bin" / "Release"
+    for name in REQUIRED_BIN:
+        if not (bin_dir / name).is_file():
+            errors.append(f"缺少 {bin_dir / name}")
+    bat = out_root / "启动 MusicEditing.bat"
+    exe = out_root / "MusicEditing.exe"
+    if not bat.is_file() and not exe.is_file():
+        errors.append("既无 MusicEditing.exe 也无启动 bat")
+    if not exe.is_file():
+        warns.append("未生成 MusicEditing.exe（可用备用 bat；检查 VS C++ 工具链）")
+    scripts = out_root / "client" / "scripts"
+    if ship_source:
+        if not (scripts / "main.py").is_file():
+            errors.append("缺少 client/scripts/main.py")
+    else:
+        if not (scripts / "main.pyc").is_file() and not (scripts / "main.py").is_file():
+            errors.append("缺少 client/scripts/main.pyc")
+        leftover = list(scripts.rglob("*.py"))
+        # requirements.txt 旁不应有大量源码
+        if leftover:
+            warns.append(f"仍残留 {len(leftover)} 个 .py（期望仅字节码）")
+    if embed_python:
+        pyw = out_root / "runtime" / "pythonw.exe"
+        py = out_root / "runtime" / "python.exe"
+        if not pyw.is_file() and not py.is_file():
+            errors.append("缺少 runtime/pythonw.exe")
+    readme = out_root / "使用说明.txt"
+    if not readme.is_file():
+        warns.append("缺少 使用说明.txt")
+    if errors:
+        for e in errors:
+            print(f"[验收失败] {e}", flush=True)
+        _die(f"便携包验收未通过（{len(errors)} 项）")
+    for w in warns:
+        print(f"[验收警告] {w}", flush=True)
+    print("[验收] 关键文件齐全", flush=True)
+    return warns
+
+
+def try_sign_exe(exe: Path) -> bool:
+    """可选 Authenticode：MUSIC_CODE_SIGN_THUMBPRINT 或 signtool 默认证书。"""
+    if not exe.is_file():
+        return False
+    thumb = (os.environ.get("MUSIC_CODE_SIGN_THUMBPRINT") or "").strip()
+    signtool = shutil.which("signtool")
+    if not signtool:
+        # 常见 Windows SDK 路径
+        for cand in sorted(Path(r"C:\Program Files (x86)\Windows Kits\10\bin").glob("*/x64/signtool.exe")):
+            signtool = str(cand)
+            break
+    if not signtool:
+        print("[签名] 未找到 signtool.exe，跳过", flush=True)
+        return False
+    cmd = [signtool, "sign", "/fd", "SHA256", "/td", "SHA256", "/tr", "http://timestamp.digicert.com"]
+    if thumb:
+        cmd += ["/sha1", thumb]
+    else:
+        cmd += ["/a"]  # 自动选证书
+    cmd.append(str(exe))
+    print("[签名] " + " ".join(cmd[:-1] + [exe.name]), flush=True)
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode != 0:
+        print((r.stdout or "")[-400:], flush=True)
+        print((r.stderr or "")[-400:], flush=True)
+        print("[签名] 失败（无证书时属正常；SmartScreen 需正式签名）", flush=True)
+        return False
+    print("[签名] 成功", flush=True)
+    return True
+
+
 def pack(
     out_root: Path,
     *,
@@ -509,6 +612,8 @@ def pack(
     make_zip: bool,
     embed_python: bool,
     ship_source: bool = False,
+    do_sign: bool = False,
+    profile: str = "standard",
 ) -> Path:
     if not BIN.is_dir():
         _die(f"未找到 {BIN}，请先 .\\build_x64.bat 或 setup_llama_gpu.py vulkan")
@@ -651,6 +756,12 @@ def pack(
             print("[警告] 无内嵌 Python 时无法用同版本编译 .pyc，将保留 .py", flush=True)
 
     _write_launcher(out_root, embed_python=embed_python)
+    if do_sign:
+        exe = out_root / "MusicEditing.exe"
+        if exe.is_file():
+            try_sign_exe(exe)
+        else:
+            print("[签名] 无 MusicEditing.exe，跳过", flush=True)
     _write_readme(
         out_root,
         with_cuda_ort=with_cuda_ort,
@@ -658,6 +769,21 @@ def pack(
         embed_python=embed_python,
         ship_source=ship_source,
     )
+    # 档位说明追加
+    readme = out_root / "使用说明.txt"
+    try:
+        extra = (
+            f"\n五、本包档位\n  profile={profile}\n"
+            f"  models={'是' if with_models else '否'}  "
+            f"scenedetect={'是' if with_scenedetect else '否'}  "
+            f"llm/vosk={'是' if with_llm else '否'}  "
+            f"cuda_ort={'是' if with_cuda_ort else '否'}\n"
+        )
+        readme.write_text(readme.read_text(encoding="utf-8") + extra, encoding="utf-8")
+    except OSError:
+        pass
+
+    verify_portable_pack(out_root, embed_python=embed_python, ship_source=ship_source)
 
     total = 0
     for dirpath, _dns, fns in os.walk(out_root):
@@ -668,6 +794,7 @@ def pack(
                 pass
     print(f"\n[完成] 目录: {out_root}")
     print(f"[完成] 约 {total / (1024 ** 3):.2f} GB（{total / (1024 ** 2):.0f} MB）")
+    print(f"[完成] 档位 profile={profile}", flush=True)
 
     zip_path = None
     if make_zip:
@@ -692,10 +819,21 @@ def main() -> int:
     )
     ap.add_argument("--out", type=Path, default=None, help="输出目录")
     ap.add_argument("--zip", action="store_true", help="额外打成 zip")
-    ap.add_argument("--skip-models", action="store_true", help="不拷贝 models")
+    ap.add_argument(
+        "--profile",
+        choices=sorted(PACK_PROFILES.keys()),
+        default="standard",
+        help="体积档：slim=无ONNX演示 / standard=默认可卖 / full=含 LLM+vosk",
+    )
+    ap.add_argument("--skip-models", action="store_true", help="不拷贝 models（覆盖 profile）")
     ap.add_argument("--with-cuda-ort", action="store_true", help="包含 CUDA ORT EP")
     ap.add_argument("--no-scenedetect", action="store_true", help="不带 PySceneDetect")
     ap.add_argument("--with-llm", action="store_true", help="额外拷贝 .gguf / vosk")
+    ap.add_argument(
+        "--sign",
+        action="store_true",
+        help="尝试 signtool 签名 MusicEditing.exe（需本机代码签名证书）",
+    )
     ap.add_argument(
         "--no-embed-python",
         action="store_true",
@@ -708,20 +846,29 @@ def main() -> int:
     )
     args = ap.parse_args()
 
+    prof = dict(PACK_PROFILES[args.profile])
+    with_models = bool(prof["with_models"]) and not args.skip_models
+    with_scenedetect = bool(prof["with_scenedetect"]) and not args.no_scenedetect
+    with_llm = bool(prof["with_llm"]) or args.with_llm
+    with_cuda_ort = bool(prof["with_cuda_ort"]) or args.with_cuda_ort
+
     stamp = _dt.datetime.now().strftime("%Y%m%d")
-    out = args.out or (ROOT / "dist" / f"MusicEditing_Portable_{stamp}")
+    suffix = "" if args.profile == "standard" else f"_{args.profile}"
+    out = args.out or (ROOT / "dist" / f"MusicEditing_Portable_{stamp}{suffix}")
     if not out.is_absolute():
         out = (ROOT / out).resolve()
 
     pack(
         out,
-        with_models=not args.skip_models,
-        with_cuda_ort=args.with_cuda_ort,
-        with_scenedetect=not args.no_scenedetect,
-        with_llm=args.with_llm,
+        with_models=with_models,
+        with_cuda_ort=with_cuda_ort,
+        with_scenedetect=with_scenedetect,
+        with_llm=with_llm,
         make_zip=args.zip,
         embed_python=not args.no_embed_python,
         ship_source=args.ship_source,
+        do_sign=args.sign,
+        profile=args.profile,
     )
     print(
         "\n发给别人: 整个文件夹或 .zip；"

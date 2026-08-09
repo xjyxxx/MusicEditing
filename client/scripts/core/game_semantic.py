@@ -1,9 +1,11 @@
 """游戏高光轻量语义层：切点 + 运动/闪光 + 可选 game_event.onnx / HUD。
 
 优先级：
-1. models/game_event.onnx（若存在，ORT 推理抬分）
+1. models/game_event.onnx（若存在，ORT 推理抬分；可用 make_game_event_stub_onnx.py 生成 stub）
 2. 否则 OpenCV「击杀字/血条感」HUD 启发式（顶栏/角标高对比区域）
 3. 始终融合运动能量 + 亮度突变
+
+说明：仓库 stub / HUD **不是**商业击杀检测；真模型请覆盖同名 ONNX。
 """
 
 from __future__ import annotations

@@ -115,7 +115,7 @@ SlicePage「游戏高光」→ start_slice_analysis
 | `scenedetect_method` | `adaptive`（默认）\| `content` |
 | `scenedetect_frame_skip` | 跳帧加速，`0` 最准 |
 
-**限制：** 语义层含运动/闪光 + HUD「击杀感」；若存在 `models/game_event.onnx` 则 ORT 推理抬分（可用 `scripts/make_game_event_stub_onnx.py` 生成占位）。真击杀检测请覆盖同名 ONNX。长视频可把 `scenedetect_frame_skip` 调到 `1`–`3` 提速。
+**限制：** 语义层含运动/闪光 + HUD「击杀感」；若存在 `models/game_event.onnx` 则 ORT 推理抬分（`scripts/make_game_event_stub_onnx.py` 可生成**顶栏加权 stub**，非商业击杀模型）。真击杀检测请覆盖同名 ONNX。长视频可把 `scenedetect_frame_skip` 调到 `1`–`3` 提速。
 
 ### 5.2.1 网易云热评滚动（已落地）
 
@@ -246,7 +246,7 @@ SlicePage「竖屏短视频」
       ├─ 有高光片段：export_highlights 临时成片
       └─ MediaBridge.export_vertical_short
             → ffmpeg scale+crop 9:16（默认 1080x1920；质量映射 _video_encoder_args）
-  → verticalExportFinished → 可送去超分/去水印
+  → verticalExportFinished → 可送去超分/去水印 / **打开文件夹**
 ```
 
 **导出参数（`ui/export_options_dialog.py`）：** 分辨率 原画/1080p/720p；质量 高/标准/小文件；格式 mp4/mov。不选或保持默认时行为与现网固定管线一致。  
@@ -334,7 +334,7 @@ EnhancePage / WatermarkPage 导入图片
 
 ```
 切片「一键高光成片 / 静音剪掉」完成（后台）
-  → 主线程弹窗「送去超分 / 送去去水印」
+  → 主线程弹窗「送去超分 / 送去去水印 / 打开文件夹」
   → open_with_video：先切 Tab，再异步 import_video(成片)
 
 去水印完成（视频）→「送去超分」
@@ -649,9 +649,9 @@ BgmPage「人声分离」
 | 校验 | `client/scripts/core/network.py` |
 | 配置 | `app.conf`：`auth_type` / `license_fp` / `gpu_enabled` / `output_dir` |
 
-**当前限制：** 卡密为本地格式校验（≥16 且含字母数字），联网支付未接。
+**当前限制：** 默认本地格式校验；可配置 `license_server_url` 走联网 `POST /v1/activate`。仓库提供演示服务 `scripts/license_server/`（签发卡密 + 简易购买页）。完整支付收银台由外部商店完成，支付成功后发卡即可。详见 [distribution.md](distribution.md)。
 
-**试用 / 正式门禁（`MainViewModel.require_feature`）：**
+**试用 / 正式门禁（`MainViewModel.require_feature` + `core/trial_policy.py`）：**
 
 | 功能键 | 试用 | 正式 |
 |--------|------|------|
@@ -659,7 +659,15 @@ BgmPage「人声分离」
 | `pipeline_queue` | 「开始队列」灰显 + 拦截 | ✅ |
 | `watermark_lama` | 精修 LaMa 灰显 + 拦截 | ✅ |
 
-试用仍可用：OpenCV 超分 2×、快速去水印、单文件切片/导出。兑换/恢复试用经 `authTypeChanged` 刷新各页。
+**试用配额（写入 `app.conf`，恢复试用不清零）：**
+
+| 项 | 试用上限 |
+|----|----------|
+| 高光导出 | 20 次 |
+| 竖屏导出 | 10 次 |
+| 导出最长边 | ≤720p |
+
+试用仍可用：OpenCV 超分 2×、快速去水印、单文件切片。个人中心展示剩余次数与「打开购买页」。兑换/恢复试用经 `authTypeChanged` 刷新各页。
 
 
 ### 5.18 开箱向导 / 进度 ETA / 去水印批量加固
@@ -717,7 +725,8 @@ BgmPage「人声分离」
 ### 5.21 AI 画质速度（CUDA / tile / RIFE）
 
 - **CUDA 自检：** `MediaBridge.probe_ort_cuda`；`ai_runtime_hint` 在 GPU 开但无 CUDA EP 时提示「已回退 CPU」  
-- **超分 tile：** 增强页高级选项 → `MUSIC_UPSCALE_TILE`（C++ `super_resolution.cpp`，默认 384）  
+- **超分 tile：** 自动 CUDA≈640 / CPU≈384（`set_upscale_tile(0)`）；增强页可手动覆盖；C++ `super_resolution.cpp`  
+- **视频快路径：** OpenCV 超分/快速去水印中间帧用 JPEG；OpenCV `setNumThreads` 吃满 CPU  
 - **补帧 RIFE：** EnhancePage 可选 RIFE ONNX（`models/rife.onnx`）；失败回退 FFmpeg minterpolate（`core/rife_interp.py`）  
 - **不做：** TensorRT、云端超分  
 
@@ -758,12 +767,18 @@ scripts/run_regression_short.bat
   ├─ tests/regression/test_opencv_upscale.py      OpenCV 超分（≤12 帧）
   ├─ tests/regression/test_pipeline_parallel.py   队列 max_parallel=2 切片重叠
   ├─ tests/regression/test_vertical_export.py     竖屏 9:16 导出
-  └─ tests/regression/test_cookie_probe_hint.py   Cookie/限流/无音轨白话提示
+  ├─ tests/regression/test_cookie_probe_hint.py   Cookie/限流/无音轨白话提示
+  ├─ tests/regression/test_trial_policy.py        试用门禁 / 配额 / 卡密
+  ├─ tests/regression/test_license_activate.py    激活服务 /v1/activate
+  ├─ tests/regression/test_pack_verify.py         便携包验收逻辑
+  └─ tests/regression/test_update_check.py        自动更新 manifest
 ```
 
-发版前清单见 [release_checklist.md](release_checklist.md)。
+发版前清单见 [release_checklist.md](release_checklist.md)；分发/安装/卡密/自动更新见 [distribution.md](distribution.md)。
 
-**便携分发：** `scripts/pack_portable.py` → `dist/MusicEditing_Portable_*` + `MusicEditing.exe`；内嵌 `runtime\`；**默认去掉可读 `.py`（只留 `.pyc`）**；C++ 为 exe/dll。`--ship-source` 仅调试。启动器经临时 bat 调 `vcvars64` 编译（避免 cmd 嵌套引号失败）。
+**自动更新上线：** `publish_update_manifest.py` 生成 `dist/update/musicediting_update.json`；`serve_update_channel.py` 本地联调；客户端 `update_manifest_url` + 可选 `update_check_on_startup`（同版本只弹一次）。
+
+**便携分发：** `pack_portable.py --profile slim|standard|full`；`accept_portable.py` 验收；`build_installer.bat` 打 Inno 安装包；可选 `--sign`。
 
 **诊断包：** 个人中心「一键打包诊断日志」→ `core/diag_pack.py`  
 写入桌面（或 `docs/diagnostics/`）zip：`log_media_player` / `log_media_cli` / Python 日志、`ort_ep_report.json`、`diag_snapshot.json`。  

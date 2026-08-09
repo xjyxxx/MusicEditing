@@ -147,6 +147,76 @@ def wrap_studio_scroll(page: QWidget) -> tuple[QVBoxLayout, QWidget, QVBoxLayout
     return outer, body, root
 
 
+class _AiHintClipHost(QFrame):
+    """固定高度提示条：文案压成约两行并省略，避免盖住下方 Tab/按钮。"""
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("AiHintShell")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setStyleSheet(
+            "QFrame#AiHintShell { background: transparent; border: none; }"
+        )
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self._label = QLabel("")
+        self._label.setObjectName("MutedText")
+        self._label.setWordWrap(True)
+        self._label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self._label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored
+        )
+        lay.addWidget(self._label)
+        self._full = ""
+        fm = self.fontMetrics()
+        self.setFixedHeight(fm.lineSpacing() * 2 + 6)
+
+    def set_full_text(self, text: str) -> None:
+        self._full = (text or "").strip()
+        self.setToolTip(self._full)
+        self._label.setToolTip(self._full)
+        self._apply_fit()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._apply_fit()
+
+    def _apply_fit(self) -> None:
+        t = self._full
+        if not t:
+            self._label.setText("")
+            return
+        fm = self._label.fontMetrics()
+        w = max(40, self.width() - 2)
+        # 约两行字符预算；超出 ElideRight，完整内容在 tooltip
+        budget = max(w, int(w * 1.95))
+        shown = fm.elidedText(t.replace("\n", " · "), Qt.TextElideMode.ElideRight, budget)
+        self._label.setText(shown)
+        self._label.setFixedHeight(self.height())
+
+
+def make_fixed_ai_hint() -> QWidget:
+    """页顶 AI/GPU 状态条：固定约 2 行高，文案超出省略，不盖住下方控件。"""
+    return _AiHintClipHost()
+
+
+def set_ai_hint_text(host: QWidget | None, text: str) -> None:
+    if host is None:
+        return
+    if isinstance(host, _AiHintClipHost):
+        host.set_full_text(text)
+        return
+    lbl = host if isinstance(host, QLabel) else host.findChild(QLabel)
+    if lbl is None:
+        return
+    t = (text or "").strip()
+    lbl.setText(t)
+    lbl.setToolTip(t)
+    host.setToolTip(t)
+
+
 def make_studio_hero(title: str, subtitle: str = "", pill: str = "") -> QFrame:
     hero = QFrame()
     hero.setObjectName("StudioHero")
@@ -158,10 +228,12 @@ def make_studio_hero(title: str, subtitle: str = "", pill: str = "") -> QFrame:
     row.setSpacing(10)
     t = QLabel(title)
     t.setObjectName("StudioTitle")
+    t.setWordWrap(False)
     row.addWidget(t, 0)
     if pill:
         p = QLabel(pill)
         p.setObjectName("StudioPill")
+        p.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         row.addWidget(p, 0)
     row.addStretch(1)
     lay.addLayout(row)
@@ -169,6 +241,9 @@ def make_studio_hero(title: str, subtitle: str = "", pill: str = "") -> QFrame:
         s = QLabel(subtitle)
         s.setObjectName("StudioSubtitle")
         s.setWordWrap(True)
+        # 最多约 3 行，避免副标题把下方提示条/Tab 顶乱或画出卡片外
+        s.setMaximumHeight(s.fontMetrics().lineSpacing() * 3 + 4)
+        s.setToolTip(subtitle)
         lay.addWidget(s)
     return hero
 

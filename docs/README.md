@@ -13,6 +13,7 @@
 | 改首页播放器解码 | [design/player_decode_flow.md](design/player_decode_flow.md) |
 | 看依赖树 / 扩展路线 | [design/deps_and_extending.md](design/deps_and_extending.md) |
 | 发版前检查 | [design/release_checklist.md](design/release_checklist.md) |
+| 便携包 / 安装 / 卡密服务 | [design/distribution.md](design/distribution.md) |
 | 对照产品交互需求 | 仓库根目录产品交互设计文档（只读） |
 
 完整设计目录说明：[design/README.md](design/README.md)

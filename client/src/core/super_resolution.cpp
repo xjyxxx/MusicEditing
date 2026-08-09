@@ -192,6 +192,12 @@ bool runTiledX4(
 
 bool upscaleOpenCv(const cv::Mat& bgr, int scale, cv::Mat& out) {
     if (bgr.empty() || scale < 2) return false;
+    static bool once = false;
+    if (!once) {
+        once = true;
+        const int n = static_cast<int>(std::max(2u, std::thread::hardware_concurrency()));
+        cv::setNumThreads(n);
+    }
     cv::resize(bgr, out, cv::Size(), scale, scale, cv::INTER_CUBIC);
     return !out.empty();
 }
