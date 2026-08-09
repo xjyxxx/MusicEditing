@@ -1,6 +1,7 @@
 # MusicEditing — 实现说明（枢纽）
 
 > **定位**：描述仓库**当前代码**的实现链路（非产品愿景稿）。  
+> **学习路径（分阶段）**：[docs/LEARNING.md](../LEARNING.md)  
 > **产品对照**：[AI本地音视频处理工具-产品交互设计文档（开发落地版）.md](../../AI本地音视频处理工具-产品交互设计文档（开发落地版）.md)  
 > **文档总索引**：[docs/README.md](../README.md)  
 > **维护规则**：改功能时同步更新本文状态表 + 对应专文（见 `.cursor/skills/music-editing-feature-docs/`）。
@@ -11,6 +12,7 @@
 
 | 文档 | 内容 |
 |------|------|
+| [LEARNING.md](../LEARNING.md) | **学习路径**（分阶段：跑通 → 功能地图 → 架构 → 开发/发版） |
 | **本文** | 总体架构、构建启动、状态表、命令速查 |
 | [mvvm_and_ui.md](mvvm_and_ui.md) | Model / VM / View、滤镜、GPU、去水印/超分 UI 侧 |
 | [media_engine.md](media_engine.md) | VideoDecoder、C API、CLI、llama.cpp |
@@ -21,7 +23,7 @@
 | [distribution.md](distribution.md) | 便携验收、签名、Inno、卡密服务 |
 | [流程图/README.md](../流程图/README.md) | 播放器分层 mermaid 总览 |
 
-**推荐阅读：** §1–§2 → 按任务读专文 → 查进度用 §3 → 跑命令用 §4。
+**推荐阅读：** 外人按阶段学请先读 [docs/LEARNING.md](../LEARNING.md)；专文速查：§1–§2 → 按任务读专文 → 查进度用 §3 → 跑命令用 §4。
 
 ---
 

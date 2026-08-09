@@ -2,6 +2,8 @@
 
 本目录存放 **MusicEditing 实现级**说明。改代码时请同步更新对应专文（规范见仓库 `.cursor/skills/music-editing-feature-docs/`）。
 
+**给外人学习（分阶段路径）：** [../LEARNING.md](../LEARNING.md)  
+**对外硬核多期课（PPT）：** [../course/README.md](../course/README.md)  
 总入口：[docs/README.md](../README.md)
 
 ## 文档地图
@@ -15,7 +17,7 @@
 | [deps_and_extending.md](deps_and_extending.md) | 模块依赖树、扩展与路线图 |
 | [player_decode_flow.md](player_decode_flow.md) | 首页播放器调用链（OPEN/NEXT/SEEK、音画双通道） |
 | [release_checklist.md](release_checklist.md) | 发版前短测 / 冒烟清单 |
-| [distribution.md](distribution.md) | 便携验收、签名、Inno 安装包、卡密激活服务 |
+| [distribution.md](distribution.md) | 便携验收、签名、Inno、卡密、自动更新 |
 | [流程图/README.md](../流程图/README.md) | 播放器分层 mermaid 总览 |
 
 ## 产品对照（只读）
@@ -40,7 +42,11 @@
 
 ## 推荐阅读顺序
 
+按阶段学请直接打开 **[LEARNING.md](../LEARNING.md)**（环境 → 功能地图 → 架构 → 开发者轨 / 发版轨）。
+
+按任务速查：
+
 1. [implementation_flow.md](implementation_flow.md) §1–§2（架构与构建）
-2. 按任务读专文：功能 → `feature_flows`；UI → `mvvm_and_ui`；引擎 → `media_engine`
+2. 功能 → `feature_flows`；UI → `mvvm_and_ui`；引擎 → `media_engine`
 3. 播放器细节 → `player_decode_flow` + 流程图
 4. 查进度用枢纽 §3；跑命令用枢纽 §4

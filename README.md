@@ -12,6 +12,8 @@
 
 ## 技术文档
 
+- **学习路径（推荐先读）**：[docs/LEARNING.md](docs/LEARNING.md)
+- **对外硬核课（多期 PPT）**：[docs/course/README.md](docs/course/README.md)
 - **总索引**：[docs/README.md](docs/README.md)
 - 枢纽（架构 / 状态 / 命令）：[docs/design/implementation_flow.md](docs/design/implementation_flow.md)
 - 业务链路：[docs/design/feature_flows.md](docs/design/feature_flows.md)

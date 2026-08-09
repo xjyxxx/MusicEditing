@@ -6,4 +6,4 @@
 |------|------|
 | `音视频的流程.txt` | 早期音视频产品与开源栈科普；架构以 `docs/design/` 专文为准 |
 
-实现与维护请看：[../README.md](../README.md)、[../design/implementation_flow.md](../design/implementation_flow.md)。
+实现与维护请看：[../LEARNING.md](../LEARNING.md)（学习路径）、[../README.md](../README.md)、[../design/implementation_flow.md](../design/implementation_flow.md)。
