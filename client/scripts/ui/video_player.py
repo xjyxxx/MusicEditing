@@ -116,6 +116,8 @@ class VideoPlayerWidget(QWidget):
         )
         self._decode_future: Future | None = None
         self._decode_token = 0
+        self._seek_pending_resume: bool | None = None
+        self._seek_busy = False
         self._opencv_filter = load_app_config().get("opencv_filter", "clahe")
         _cfg = load_app_config()
         _pb = _cfg.get("opencv_filter_playback", "off").strip().lower()
@@ -435,19 +437,18 @@ class VideoPlayerWidget(QWidget):
     def _maybe_soft_resync(self, audio_sec: float) -> bool:
         """仅在大偏差时把画面追到音频时钟；不碰音轨，避免「咔」一下。
 
-        双通道常态会有约 150~300ms 解码/显示滞后，属正常，靠跳帧追赶即可。
-        旧逻辑 120ms 就 seek 音+画 → 开播即抖、每隔约 2s 卡顿。
+        双通道常态会有约 100~250ms 解码/显示滞后，属正常，靠跳帧追赶即可。
         """
         if self._seeking or self._audio_only or not self._backend:
             return False
         if self._last_shown_frame_ts < 0:
             return False
         now = time.monotonic()
-        # 开播宽限期：时钟尚未稳态
-        if self._play_started_wall > 0 and (now - self._play_started_wall) < 4.0:
+        # 开播宽限期：时钟尚未稳态（略缩短，更快进入可校正）
+        if self._play_started_wall > 0 and (now - self._play_started_wall) < 2.5:
             self._drift_streak = 0
             return False
-        if now - self._last_soft_resync_wall < 6.0:
+        if now - self._last_soft_resync_wall < 3.5:
             return False
 
         video_ts = self._last_shown_frame_ts
@@ -455,16 +456,16 @@ class VideoPlayerWidget(QWidget):
         abs_drift = abs(drift)
 
         # 画面略落后：交给 next_frame(min_ts) 跳帧，不 seek
-        if drift < 0 and abs_drift < 0.45:
+        if drift < 0 and abs_drift < 0.38:
             self._drift_streak = 0
             return False
         # 画面略超前：等音频追上即可
-        if drift > 0 and abs_drift < 0.35:
+        if drift > 0 and abs_drift < 0.30:
             self._drift_streak = 0
             return False
 
         self._drift_streak += 1
-        if self._drift_streak < 20:
+        if self._drift_streak < 12:
             return False
 
         log.info(
@@ -488,14 +489,15 @@ class VideoPlayerWidget(QWidget):
         try:
             if not self._backend:
                 return
-            self._backend.seek(target)
-            frame = self._backend.next_frame(
+            frame = self._backend.seek_and_frame(
+                target,
                 min_ts=max(0.0, target - self._frame_interval * 0.5),
                 apply_filter=None,
             )
             if frame:
                 ts, rgb, w, h = frame
                 self._show_frame(ts, rgb, w, h, update_progress=False)
+                self._submit_lookahead_decode(self._frame_index(ts))
             if self._playing:
                 self._backend.resume()
         except RuntimeError as e:
@@ -754,11 +756,16 @@ class VideoPlayerWidget(QWidget):
             if not self._playing:
                 pos = max(0.0, self._position_sec)
                 try:
-                    self._backend.seek(pos)
+                    frame = self._backend.seek_and_frame(
+                        pos,
+                        min_ts=max(0.0, pos - self._frame_interval * 0.5),
+                        apply_filter=True,
+                    )
+                    if frame:
+                        ts, rgb, w, h = frame
+                        self._show_frame(ts, rgb, w, h)
                 except RuntimeError:
                     pass
-                self._last_shown_frame_ts = pos - self._frame_interval
-                self._pull_and_show_frame(apply_filter=True)
                 self._refresh_filter_status()
         self._refresh_title_filter_hint()
         log.info(
@@ -817,10 +824,9 @@ class VideoPlayerWidget(QWidget):
         if not self._backend:
             return
         try:
-            self._backend.seek(0.0)
             if self._has_audio:
                 self._audio.seek(0.0)
-            frame = self._backend.next_frame(min_ts=0.0, apply_filter=None)
+            frame = self._backend.seek_and_frame(0.0, min_ts=0.0, apply_filter=None)
             if frame:
                 ts, rgb, w, h = frame
                 self._show_frame(ts, rgb, w, h)
@@ -962,22 +968,18 @@ class VideoPlayerWidget(QWidget):
 
 
     @Slot()
-
     def _on_seek_released(self):
-
-        self._seeking = False
-
+        # 保持 _seeking，直到异步首帧回来，避免空窗 tick 抢 IPC
         if not self._current_path or self._duration_sec <= 0:
-
+            self._seeking = False
             return
-
         ratio = self._progress.value() / max(self._progress.maximum(), 1)
-
         self._seek_to(ratio * self._duration_sec, resume=self._was_playing_before_seek)
 
     def _seek_to(self, position_sec: float, *, resume: bool | None = None):
-        """统一 seek（进度条 / 波形点击）。"""
+        """统一 seek（进度条 / 波形点击）：后台 SEEK+首帧，避免卡住 UI。"""
         if not self._current_path or self._duration_sec <= 0:
+            self._seeking = False
             return
         self._position_sec = max(0.0, min(float(position_sec), self._duration_sec))
         self._progress.setValue(int(self._position_sec * 1000))
@@ -985,31 +987,88 @@ class VideoPlayerWidget(QWidget):
         self._decode_future = None
         self._last_shown_frame_ts = -1.0
         self._drift_streak = 0
+        self._last_soft_resync_wall = time.monotonic()
+        self._seeking = True
+        self._seek_busy = True
+        self._seek_pending_resume = resume
         if self._audio_only:
             self._audio.seek(self._position_sec)
             self._update_time_label()
+            self._seeking = False
+            self._seek_busy = False
             if resume:
                 self.play()
             return
         if not self._backend:
+            self._seeking = False
+            self._seek_busy = False
             return
         try:
             self._title.setText(self._title.text().split(" · ")[0] + " · Seek…")
-            self._backend.seek(self._position_sec)
             if self._has_audio:
                 self._audio.seek(self._position_sec)
-            # Seek 后同步拉一帧，避免黑屏等待
-            frame = self._backend.next_frame(
-                min_ts=max(0.0, self._position_sec - self._frame_interval * 0.5),
-                apply_filter=None,
-            )
-            if frame:
-                ts, rgb, w, h = frame
-                self._show_frame(ts, rgb, w, h)
         except RuntimeError as e:
             self._title.setText(f"Seek 失败: {e}")
+            self._seeking = False
+            self._seek_busy = False
             return
+
+        token = self._decode_token
+        backend = self._backend
+        pos = self._position_sec
+        fi = self._frame_interval
+
+        def _job():
+            if token != self._decode_token:
+                return False
+            return backend.seek_and_frame(
+                pos,
+                min_ts=max(0.0, pos - fi * 0.5),
+                apply_filter=None,
+            )
+
+        self._decode_future = self._decode_pool.submit(_job)
+        QTimer.singleShot(10, self._poll_seek_result)
+
+    @Slot()
+    def _poll_seek_result(self):
+        """收割异步 Seek 首帧。"""
+        if not self._seek_busy:
+            return
+        fut = self._decode_future
+        if fut is None:
+            self._seeking = False
+            self._seek_busy = False
+            return
+        if not fut.done():
+            QTimer.singleShot(10, self._poll_seek_result)
+            return
+
+        self._decode_future = None
+        resume = self._seek_pending_resume
+        self._seek_pending_resume = None
+        self._seek_busy = False
+        try:
+            frame = fut.result()
+        except RuntimeError as e:
+            self._title.setText(f"Seek 失败: {e}")
+            self._seeking = False
+            return
+        except Exception as e:
+            log.warning("Seek 异常: %s", e)
+            self._seeking = False
+            return
+
+        if frame and frame is not False:
+            ts, rgb, w, h = frame
+            self._show_frame(ts, rgb, w, h)
+            # 预热下一帧，恢复播放时少空一拍
+            self._submit_lookahead_decode(self._frame_index(ts))
+            base = self._title.text().split(" · ")[0]
+            self._title.setText(base)
+
         self._update_time_label()
+        self._seeking = False
         if resume:
             self.play()
 
@@ -1158,10 +1217,9 @@ class VideoPlayerWidget(QWidget):
 
         audio_sec = self._audio.position_sec()
         now = time.monotonic()
-        fi = self._frame_interval
         audio_idx = self._frame_index(audio_sec)
 
-        # 双时钟长期漂移 → 软校正（冷却 2s，连续约 10 次超阈值）
+        # 双时钟长期漂移 → 软校正（冷却 3.5s，连续约 12 次超阈值）
         if self._maybe_soft_resync(audio_sec):
             return True
 
@@ -1173,7 +1231,10 @@ class VideoPlayerWidget(QWidget):
             self._last_progress_wall = now
 
         shown_idx = self._frame_index(self._last_shown_frame_ts)
+        # 音频尚未追上画面：预热下一帧解码，但先不贴帧
         if audio_idx <= shown_idx:
+            if self._decode_future is None:
+                self._submit_lookahead_decode(shown_idx)
             return True
 
         # 收割后台解码结果
@@ -1203,22 +1264,33 @@ class VideoPlayerWidget(QWidget):
             self._show_frame(ts, rgb, w, h, update_progress=False)
             paint_ms = int((time.monotonic() - paint_t0) * 1000)
             stats = self._backend.last_frame_stats
-            if stats.decode_ms > 25 or paint_ms > 15:
+            if stats.decode_ms > 25 or paint_ms > 15 or stats.from_prefetch:
                 log.debug(
-                    "同步 idx=%d/%d ts=%.3f audio=%.3f decode=%dms paint=%dms skipped=%d",
+                    "同步 idx=%d/%d ts=%.3f audio=%.3f decode=%dms paint=%dms skipped=%d prefetch=%s",
                     new_idx, audio_idx, ts, audio_sec,
-                    stats.decode_ms, paint_ms, stats.skipped,
+                    stats.decode_ms, paint_ms, stats.skipped, stats.from_prefetch,
                 )
             shown_idx = self._frame_index(self._last_shown_frame_ts)
             if audio_idx <= shown_idx:
+                self._submit_lookahead_decode(shown_idx)
                 return True
 
         # 提交下一帧解码（若空闲）
         if self._decode_future is not None and not self._decode_future.done():
             return True
 
+        self._submit_lookahead_decode(shown_idx, audio_idx=audio_idx)
+        return True
+
+    def _submit_lookahead_decode(self, shown_idx: int, audio_idx: int | None = None) -> None:
+        """保持 1 帧预取：解码 shown_idx+1（落后过多则追到 audio 附近）。"""
+        if not self._backend:
+            return
+        if self._decode_future is not None and not self._decode_future.done():
+            return
+        fi = self._frame_interval
         want_idx = shown_idx + 1
-        if audio_idx - shown_idx > 6:
+        if audio_idx is not None and audio_idx - shown_idx > 6:
             want_idx = audio_idx - 1
         target_min = max(0.0, want_idx * fi - fi * 0.02)
         token = self._decode_token
@@ -1226,11 +1298,10 @@ class VideoPlayerWidget(QWidget):
 
         def _job():
             if token != self._decode_token:
-                return False  # 已失效
+                return False
             return backend.next_frame(min_ts=target_min, apply_filter=None)
 
         self._decode_future = self._decode_pool.submit(_job)
-        return True
 
     def _show_frame(self, ts: float, rgb: bytes, w: int, h: int, update_progress: bool = True):
         self._last_shown_frame_ts = ts

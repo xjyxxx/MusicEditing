@@ -133,7 +133,7 @@ MainWindow.shutdown()
 |------|------|------|
 | PySide6 菜单导航 UI | ✅ | MenuBar + QStackedWidget；核心/工作流/趣味/帮助分组（§3.3） |
 | Studio 视觉主题 | ✅ | `ui/theme.py` 炭黑+琥珀；顶栏胶囊；§3.3.1 |
-| 首页本地播放器 | ✅ | FFmpeg 视频 + Qt 音乐；OpenGL；播完再点播放从头开始；**音画漂移软校正** |
+| 首页本地播放器 | ✅ | FFmpeg 视频 + Qt 音乐；OpenGL；**SHM 传帧** + 预取；音画软校正 |
 | 媒体信息面板 | ✅ | 「信息」→ ffprobe 封装/编码/分辨率/码率（`MediaInfoDialog`，VideoEye 精简） |
 | 波形/响度可视化 | ✅ | showwavespic + ebur128；播放器下方可点击 seek（§5.12） |
 | MVVM 双向绑定 | ✅ | Signal/Slot |
@@ -141,6 +141,9 @@ MainWindow.shutdown()
 | 状态栏天气 | ✅ | IP 定位 + Open-Meteo；今日氛围用电影向滤镜（暖阳/雨幕/雪色/雷霓…）（§5.11） |
 | AI 运行状态提示 | ✅ | 增强/去水印页显示 GPU 推理与模型是否就绪；缺模型指向 download_*.bat |
 | 长路径 UI | ✅ | `ElidedPathLabel`：增强/去水印/封面/BGM/音频趣味等路径行中间省略 |
+| 帧共享内存 / 预取 | ✅ | 双缓冲 SHM + 预取；Seek **异步**首帧 + lookahead 预热 |
+
+
 
 ### 切片与导出
 
@@ -148,17 +151,19 @@ MainWindow.shutdown()
 |------|------|------|
 | 高光时间轴（缩略图） | ✅ | `HighlightTimelineWidget` 色块+胶片条；列表带图标；见 §5.1.1 |
 | 三大功能串联 | ✅ | `open_with_video` + 完成弹窗/「送去」；批量全流程队列见下 |
-| 批量全流程队列 | ✅ | `PipelineQueuePage`：切片成片→超分→去水印；暂停/跳过/取消（§5.9.1） |
+| 批量全流程队列 | ✅ | 有限并行；失败重试；磁盘预警；分阶段 ETA；超分默认试跑 8s |
+
 | 切片/导入异步 | ✅ | `import_video` / `start_slice_analysis` 后台线程；UI 收 Signal |
 | 手动切片 | ✅ | SlicePage 起止时间添加/删除/清空；不依赖 Vosk |
 | 响度高潮切片 | ✅ | 场景「响度高潮」；ebur128 峰值成段（§5.12） |
 | AI 高光识别（演讲/解说） | ✅ | 演讲金句：Vosk+LLM/金句词；无人声模型时人声段兜底 |
-| AI 高光识别（游戏） | ✅ | PySceneDetect 场景切点（§5.2）；失败回退时间规则 |
-| 批量导出剪辑 | ✅ | `一键高光成片` → 分片 + `highlights_merged.mp4`（ffmpeg） |
+| AI 高光识别（游戏） | ✅ | 切点 + 运动/闪光 + HUD；可选 `game_event.onnx`（§5.2） |
+| 批量导出剪辑 | ✅ | `一键高光成片` + 可选规范命名（§5.5） |
 | 竖屏短视频导出 | ✅ | 切片成片→9:16；固定锚点 + **智能跟脸** `track_mode=face`（§5.5） |
-| 抖音发布预设 | ✅ | ExportOptions 抖音竖屏 + 封面 PNG + 话题草稿（§5.5） |
+| 发布预设 / 规范命名 | ✅ | 抖音/B站/快手竖屏 + `export_naming` / 封面话题（§5.5） |
+| 成片模板一键竖屏 | ✅ | 抖音/B站/快手模板：时长上限+竖屏+封面话题；队列可选（§5.5/§5.9） |
 | 静音剪掉 | ✅ | `静音剪掉` → silencedetect + 拼接紧凑口播 |
-| 导出参数面板 | ✅ | 高光/竖屏/抖音预设：分辨率·质量·容器·封面话题（`ExportOptionsDialog`） |
+| 导出参数面板 | ✅ | 模板·预设·分辨率·质量·规范命名·封面话题（`ExportOptionsDialog`） |
 
 ### 画质与水印
 
@@ -172,7 +177,8 @@ MainWindow.shutdown()
 | LUT 一键调色 | ✅ | 增强页 Tab + lut3d 导出；与 FrameProcessor 同预设（§5.13） |
 | OpenCV GPU 滤镜 | ✅ | OpenCL `cv::UMat`（`opencv_filter_device=auto`）；失败回退 CPU |
 | 图片 EXIF | ✅ | 图片右上角悬浮摘要 +「全部」弹窗；`exif_panel.py`（§5.7） |
-| 4K 超分 | ✅ | `EnhancePage` + Real-ESRGAN ONNX / OpenCV 双三次；`upscale` CLI；预览 `image_loader`（OpenCV） |
+| 4K 超分 | ✅ | AI：ctypes 常驻 + 自动 tile≈512；CUDA EP 缺失明示；OpenCV JPEG+多线程 |
+
 | 去水印 | ✅ | `WatermarkPage` 快速/精修；智能建议角标；图片文件夹/多视频批量；帧批复用 |
 | 水印智能建议/批量 | ✅ | 四角启发式 + 抖音/快手预设；批量重试与结果列表（§5.18） |
 
@@ -181,8 +187,8 @@ MainWindow.shutdown()
 | 功能 | 状态 | 说明 |
 |------|------|------|
 | 网易云热评滚动 | ✅ | 三合一；B 站弹幕；首页速度/密度/区域（§5.2.1） |
-| 链接下载 | ✅ | `DownloadPage` + 历史缓存；B 站音画合并；Cookie 文件选择；探测短时缓存（§5.6） |
-| 热评导出 / 短视频成片 | ✅ | JSON+ASS+竖屏；三种风格 ass_caption/danmaku/cards（§5.2.1） |
+| 链接下载 | ✅ | Cookie；B 站音画合并；失败白话+换 Cookie/重试（§5.6） |
+| 热评导出 / 短视频成片 | ✅ | JSON+ASS+竖屏；失败可恢复提示（§5.2.1/§5.6） |
 | 热评弹幕/卡片成片 | ✅ | `danmaku` / `cards` / `ass_caption` 三种 ASS 风格（§5.2.1） |
 
 ### 趣味音频与素材
@@ -200,11 +206,18 @@ MainWindow.shutdown()
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
-| llama.cpp GPU 推理 | ⏳ | `n_gpu_layers` 接口已有，默认 0；需 `GGML_CUDA=ON` |
-| 开箱依赖向导 | ✅ | 首次启动 + 个人中心；模型/GPU/Cookie/yt-dlp（§5.18） |
+| 回归短测 | ✅ | SHM/Seek、OpenCV 超分、队列并行、**竖屏导出**、**Cookie 提示**（§5.23） |
+| 发版 checklist | ✅ | [release_checklist.md](release_checklist.md) |
+| 便携打包 | ✅ | `pack_portable.py` 内嵌 `runtime\`；对方免装 Python |
+| llama.cpp GPU 推理 | ✅ | 推荐 Vulkan（免 Toolkit）；或 CUDA；`MUSIC_LLM_N_GPU_LAYERS`；`setup_llama_gpu.py` |
+| 开箱依赖向导 | ✅ | 缺啥摘要 + **试跑 15 秒成片**；模型/GPU/Cookie/yt-dlp/场景/LLM（§5.18） |
 | 长任务进度 ETA | ✅ | 超分/去水印/补帧/队列线性外推「剩余约…」（§5.18） |
+| 诊断日志打包 | ✅ | 个人中心一键 zip：player/cli/ORT EP（§5.23） |
+| 临时帧/产物配额 | ✅ | 启动后台清理残留；队列 `max_output_gb`（§5.23） |
+| UI 启动流畅 | ✅ | 页懒创建；`media_player` 延迟到开文件；依赖扫描延后 |
+| Studio 页一致性 | ✅ | `studio_kit`：切片/增强/队列/个人中心 Hero+Card 全宽 |
 | 授权/卡密 | ✅ | 本地卡密 + **功能门禁**（AI4× / 队列 / LaMa）；联网支付未接 |
-| 个人中心 | ✅ | `ProfilePage`：卡密、GPU、输出目录、开箱向导、关于（§5.17/§5.18） |
+| 个人中心 | ✅ | 卡密、GPU、输出目录、开箱向导、诊断打包、清理临时帧（§5.17/§5.23） |
 
 ---
 
@@ -223,4 +236,8 @@ MainWindow.shutdown()
 .\scripts\download_exiftool.bat            # 图片 EXIF：exiftool.exe + exiftool_files → third_party/exiftool/
 .\scripts\download_vosk_model.bat          # 演讲金句 ASR：vosk-model-small-cn-0.22 → models/
 .\scripts\install_scenedetect.bat          # 游戏高光：安装 PySceneDetect（scenedetect）
+.\scripts\pack_portable.bat          # 打便携包 → dist\（可加 --zip）
+python .\scripts\pack_portable.py --zip
+python .\scripts\setup_llama_gpu.py       # llama GPU：推荐 Vulkan；可选 CUDA
+.\scripts\run_regression_short.bat        # 工程质量短测：SHM/Seek、OpenCV 超分、队列并行
 ```

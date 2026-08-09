@@ -60,7 +60,7 @@ LlmEngine::LlmEngine(const LlmConfig& config) : impl_(std::make_unique<Impl>()) 
     llama_sampler_chain_add(impl_->sampler, llama_sampler_init_greedy());
 
     impl_->ready = true;
-    LOG_INFO("LLM 加载成功");
+    LOG_INFO("LLM 加载成功 n_gpu_layers=" + std::to_string(config.n_gpu_layers));
 }
 
 LlmEngine::~LlmEngine() {

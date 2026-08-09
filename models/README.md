@@ -7,3 +7,7 @@
 
 # Real-ESRGAN ONNX（画质超分）
 # scripts\download_realesrgan_model.bat → models/realesr-general-x4v3.onnx
+
+# 游戏高光事件（可选）
+# scripts\make_game_event_stub_onnx.py → models/game_event.onnx（占位 stub）
+# 换成真实击杀/血条检测模型时直接覆盖同名文件即可

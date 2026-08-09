@@ -104,19 +104,18 @@ void imageToNchw01(const cv::Mat& bgr, std::vector<float>& out) {
 }
 
 void nchw01ToBgr(const float* nchw, int h, int w, cv::Mat& bgr) {
-    const size_t plane = static_cast<size_t>(h * w);
-    cv::Mat rgb(h, w, CV_8UC3);
-    for (int y = 0; y < h; ++y) {
-        uint8_t* row = rgb.ptr<uint8_t>(y);
-        for (int x = 0; x < w; ++x) {
-            for (int c = 0; c < 3; ++c) {
-                float v = nchw[c * plane + static_cast<size_t>(y * w + x)];
-                v = std::clamp(v, 0.0f, 1.0f);
-                row[x * 3 + c] = static_cast<uint8_t>(v * 255.0f + 0.5f);
-            }
-        }
+    // OpenCV imagesFromBlob：NCHW float[0,1] → RGB Mat，再转 BGR（避免三重手写循环）
+    const int sizes[4] = {1, 3, h, w};
+    cv::Mat blob(4, sizes, CV_32F, const_cast<float*>(nchw));
+    std::vector<cv::Mat> images;
+    cv::dnn::imagesFromBlob(blob, images);
+    if (images.empty() || images[0].empty()) {
+        bgr.release();
+        return;
     }
-    cv::cvtColor(rgb, bgr, cv::COLOR_RGB2BGR);
+    cv::Mat rgb8;
+    images[0].convertTo(rgb8, CV_8UC3, 255.0);
+    cv::cvtColor(rgb8, bgr, cv::COLOR_RGB2BGR);
 }
 
 /// 对 work 图跑 4× 模型（分块），写出 out（尺寸 = work * 4）

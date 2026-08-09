@@ -84,7 +84,9 @@
 | `SIGNAL` | `#3DB8A8` | 信息文字、GroupBox 标题 |
 | 字体 | YaHei UI / Segoe UI Semibold | 中文桌面可读 |
 
-顶栏为圆角 `TopChrome`：品牌名 + 当前页胶囊 + GPU/授权/天气 + 版本号。主功能入口为菜单栏。主按钮用 `objectName="primaryButton"`。长路径标签用 `ui/elided_label.ElidedPathLabel`（中间省略 + Tooltip），避免撑开布局。
+顶栏为圆角 `TopChrome`：品牌名 + 当前页胶囊 + GPU/授权/天气 + 版本号。主功能入口为菜单栏。主按钮用 `objectName="primaryButton"` 或 Studio `StudioPrimary`。长路径标签用 `ui/elided_label.ElidedPathLabel`（中间省略 + Tooltip），避免撑开布局。
+
+**Studio 页壳（`ui/studio_kit.py`）：** 个人中心 / 切片 / 增强 / 队列统一 **Hero + Card + 12px 全宽边距**（切片全页滚动；增强 Hero+Tabs；队列 Hero+双栏面板）。避免各页 QGroupBox「半成品感」。
 
 ### 3.4 首页播放器交互（统一 FFmpeg 播放器）
 
@@ -239,7 +241,7 @@ GPU 在本产品中承担 **AI 推理** 与 **视频硬解码** 两类加速目�
 | **离线批处理解码** | `VideoDecoder` D3D11VA | ✅ x64 已实现 | `preferHwaccel` / `media_cli iterate --hw`；失败回退 CPU |
 | **OpenCV 帧滤镜** | CPU `cv::Mat` | CPU 运行 | 硬解后在 CPU 做 CLAHE 等，与硬解串联 |
 | **Vosk ASR** | CPU 推理 | ✅ 可选 | `download_vosk_model.bat`；无模型时人声段兜底 |
-| **llama.cpp 高光分析** | CPU（`n_gpu_layers=0`） | ⏳ 接口已有 | 需 `GGML_CUDA=ON` 编译 + 传入层数 |
+| **llama.cpp 高光分析** | `MUSIC_LLM_N_GPU_LAYERS` | ✅ 随 GPU 开关 | `set_prefer_cuda` → `-1`（全层）/ `0`（CPU）；需 `MUSIC_GGML_CUDA=ON` 构建才真正上 GPU |
 | **去水印 LaMa** | ONNX Runtime + OpenCV | ✅ GPU 开则 CUDA EP，失败回退 CPU | `set_prefer_cuda` → `MUSIC_ORT_CUDA`；无捆绑 `cuda_runtime` |
 | **4K 超分** | Real-ESRGAN ONNX + OpenCV | ✅ 同上 | 2× 半分辨率快路径 + tile=384；CUDA 需系统 CUDA 12 运行库 |
 | **图片预览解码** | OpenCV `imdecode` + 可选 CUDA resize | ✅ OpenCV；CUDA 视本机包 | `core/image_loader.py`；超大 PNG 不走 Qt 解码；对比视图不用 OpenGL 视口（防缩放残影） |
@@ -256,7 +258,12 @@ MusicEditing   [GPU  RTX…]   [授权  试用]   [深圳 晴 26°C]          v0
 逻辑见 `client/scripts/viewmodels/main_vm.py` 的 `gpu_name` 属性：读取 `AppLogic.use_gpu` 与 `gpu_info["name"]`。  
 天气见 `core/weather_service.py` + `MainWindow._refresh_weather`（[feature_flows](feature_flows.md) §5.11）。视觉见上文 §3.3.1。
 
-**启动时弹窗（`main_window.py`）：** 若 `cuda_available == false`，提示「当前为 CPU 模式，处理速度较慢。支持 NVIDIA 显卡硬件加速（CUDA）。」
+**启动时弹窗（`main_window.py`）：** 首屏 `show` 后约 500ms 再扫依赖；若需开箱向导则弹出；若向导不弹且 `cuda_available == false`，再提示「当前为 CPU 模式…」。
+
+**启动流畅度：**
+- 功能页懒创建：`MainWindow` 启动只建首页，其它 TAB 首次点开再 `_ensure_page`
+- `media_player.exe` 延迟到首次打开本地视频再启动（见 [player_decode_flow](player_decode_flow.md) §7）
+- 临时帧清理在后台线程（`main.py`），不堵 UI
 
 **检测实现（`client/scripts/core/app_logic.py`）：**
 
@@ -358,26 +365,28 @@ Win32/x64 差异：`third_party/ffmpeg.cmake` 检测 `hwcontext.h`，定义 `MUS
 高光分析路径：
 
 ```
-MainViewModel._analyze_speech_pipeline()
-  └─ MediaBridge.analyze_speech(...)
-       └─ media_cli analyze-speech ...
-            └─ HighlightAnalyzer → LlmEngine
-                 └─ llama_model_load_from_file(..., n_gpu_layers)
+MainViewModel.set_gpu_enabled(True)
+  └─ MediaBridge.set_prefer_cuda(True)
+       └─ env MUSIC_LLM_N_GPU_LAYERS=-1
+            └─ media_cli analyze-speech
+                 └─ HighlightAnalyzer::getLlm() 读环境变量
+                      └─ LlmEngine(n_gpu_layers=-1)
 ```
 
-**当前限制：**
+**已接通：**
 
-1. CMake 默认 `GGML_CUDA=OFF`（见 `build_x64/CMakeCache.txt`），llama 推理全在 CPU。
-2. `HighlightAnalyzer::getLlm()` 创建 `LlmConfig` 时 **`n_gpu_layers` 固定为 0**（`highlight_analyzer.cpp`），未读取 Python `use_gpu`。
+1. Python：`set_prefer_cuda` 同步设置 `MUSIC_LLM_N_GPU_LAYERS`（开=-1，关=0）
+2. C++：`HighlightAnalyzer` 读取该环境变量写入 `LlmConfig.n_gpu_layers`
 
-**启用 GPU 推理需：**
+**构建注意：** 当前若使用 `third_party/llama_prebuilt`（无 CUDA），层数设置不会真正上 GPU。要从源码编 CUDA 版：
 
 ```powershell
-# 构建时（示例）
-cmake -B build_x64 -A x64 -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=native
+# 检测到 nvcc 时 build_x64.bat 会加 -DMUSIC_GGML_CUDA=ON
+# 或手动：
+cmake -B build_x64 -A x64 -DMUSIC_GGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=native
 ```
 
-并在 C++ 侧根据 `use_gpu` 设置 `cfg.n_gpu_layers = -1`（全部层上 GPU）或具体层数。
+并确保 CMake 走 `llama.cpp` 源码路径而非仅 prebuilt。
 
 #### 3.6.8 其它 GPU 相关代码
 
@@ -386,13 +395,14 @@ cmake -B build_x64 -A x64 -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=native
 | `client/scripts/core/app_logic.py` | `detect_gpu_info()`、`prefer_hw_decode`、`use_gpu` |
 | `client/scripts/viewmodels/main_vm.py` | `gpu_name` 属性、`set_gpu_enabled()` |
 | `client/scripts/ui/main_window.py` | 状态栏 `GPU:` 标签、无 NVIDIA 弹窗 |
-| `client/src/core/llm_engine.cpp` | `n_gpu_layers` 传给 llama（待启用 CUDA） |
-| `client/src/core/highlight_analyzer.cpp` | 创建 `LlmConfig`（待接 GPU 层数） |
+| `client/scripts/core/media_bridge.py` | `MUSIC_ORT_CUDA` + `MUSIC_LLM_N_GPU_LAYERS` |
+| `client/src/core/llm_engine.cpp` | `n_gpu_layers` 传给 llama |
+| `client/src/core/highlight_analyzer.cpp` | 读 `MUSIC_LLM_N_GPU_LAYERS` |
 
 #### 3.6.9 实施优先级（建议）
 
 1. ~~**P0** — `gpu_enabled` → 播放器硬解~~ ✅ 已完成  
-2. **P1** — llama：`GGML_CUDA=ON` + `n_gpu_layers` 随 `use_gpu` 变化  
+2. ~~**P1** — llama：`n_gpu_layers` 随 `use_gpu`~~ ✅ 已接通；CUDA 构建视本机 Toolkit  
 3. ~~**P2** — `VideoDecoder` / `media_cli iterate` 硬解~~ ✅ 已完成（复用 `ffmpeg_hwaccel`）  
 4. **P3** — OpenCV CUDA 滤镜；超分已支持可选 `MUSIC_ORT_CUDA=1`
 

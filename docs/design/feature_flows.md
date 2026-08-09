@@ -17,6 +17,7 @@
 | §5.9 | 三大功能串联 / 全流程队列 |
 | §5.10+ | 补帧、天气、波形、LUT、封面、音频、BGM、个人中心… |
 | §5.22 | 溯源水印 |
+| §5.23 | 工程质量：回归短测 / 诊断包 / 资源清理 |
 
 ### 5.1 智能切片完整链路（演讲金句等 — 已落地）
 
@@ -82,7 +83,7 @@ SlicePage._on_highlights
 | `vosk_model_dir` | Vosk 中文模型**绝对路径**（含 `am/final.mdl`）；留空自动探测，勿填 `.` |
 | `llm_model_path` | `.gguf` 模型路径；留空则 ASR + 规则打分 |
 
-### 5.2 游戏高光（PySceneDetect 场景切点）
+### 5.2 游戏高光（PySceneDetect + 轻量语义打分）
 
 **场景：游戏高光** → `_analyze_game_fallback()`：
 
@@ -93,12 +94,16 @@ SlicePage「游戏高光」→ start_slice_analysis
             AdaptiveDetector（默认，抗快速运镜）或 ContentDetector
             敏感度 → adaptive_threshold / content threshold
       → ranges_to_clipped_segments（按最短/最长整形，最多约 24 段）
+      → core.game_semantic.enrich_game_segments
+            运动/闪光 + HUD 击杀感；有 models/game_event.onnx 则 ORT 抬分
+            重排/抬高 score
       → 失败 / 未安装 → 时间轴规则 `_simulate_highlights` 兜底
 ```
 
 | 资源 | 路径 |
 |------|------|
 | 封装 | `client/scripts/core/scene_detect.py` |
+| 语义层 | `client/scripts/core/game_semantic.py` |
 | 第三方库 | `scenedetect`（[PySceneDetect](https://www.scenedetect.com/)） |
 | 安装 | `run_ui_*.bat` 自动 `pip install -e third_party/PySceneDetect`；或 `scripts/install_scenedetect.bat` |
 | 本地源码 | **已随仓库** `third_party/PySceneDetect`（见 `README.MusicEditing.md`） |
@@ -110,7 +115,7 @@ SlicePage「游戏高光」→ start_slice_analysis
 | `scenedetect_method` | `adaptive`（默认）\| `content` |
 | `scenedetect_frame_skip` | 跳帧加速，`0` 最准 |
 
-**限制：** 切的是画面内容变化场景，不是「击杀/高光事件」语义；后者仍属视觉模型范畴。长视频可把 `scenedetect_frame_skip` 调到 `1`–`3` 提速。
+**限制：** 语义层含运动/闪光 + HUD「击杀感」；若存在 `models/game_event.onnx` 则 ORT 推理抬分（可用 `scripts/make_game_event_stub_onnx.py` 生成占位）。真击杀检测请覆盖同名 ONNX。长视频可把 `scenedetect_frame_skip` 调到 `1`–`3` 提速。
 
 ### 5.2.1 网易云热评滚动（已落地）
 
@@ -213,7 +218,7 @@ View: EnhancePage._on_run_image / _on_run_video
 View 更新进度与结果预览
 ```
 
-**当前限制：** 视频 AI 超分较慢。对比区左原图 / 右超分结果，中间 1px 细线；滚轮缩放当前侧，Ctrl+滚轮两侧同步；拖拽平移。预览经 `image_loader`（OpenCV 解码）；显示为不透明底软件合成，避免缩小时残影。试用可用 OpenCV 2×；正式版解锁 AI 4×（见 §5.17）。
+**当前限制：** 视频 AI 超分仍较慢（ONNX 串行）；OpenCV 快路径已用 JPEG 中间帧 + 多线程批帧。对比区左原图 / 右超分结果，中间 1px 细线；滚轮缩放当前侧，Ctrl+滚轮两侧同步；拖拽平移。预览经 `image_loader`（OpenCV 解码）；显示为不透明底软件合成，避免缩小时残影。试用可用 OpenCV 2×；正式版解锁 AI 4×（见 §5.17）。
 
 **长路径：** 各子 Tab 路径行使用 `ui/elided_label.ElidedPathLabel`（`ElideMiddle` + Tooltip 全文），`sizeHint` 不按完整路径回报宽度，避免缓存目录超长文件名把整页/窗口撑向右侧。
 
@@ -252,7 +257,9 @@ SlicePage「竖屏短视频」
 
 **智能跟脸（`track_mode=face`）：** SlicePage 竖屏锚点可选「智能跟脸」→ OpenCV Haar 采样人脸中心 → 平滑轨迹 → 分段 `crop`+`concat`；无人脸或失败回退 `crop_bias` 固定裁切（`core/face_track.py`）。
 
-**发布预设：** `ExportOptionsDialog` 支持「抖音竖屏」→ 1080×1920 + 高码率 + 可选封面 PNG / 话题草稿 `.txt`（`core/publish_pack.py`，不接发布 API）。
+**发布预设 + 规范命名 + 成片模板：**  
+- `ExportOptionsDialog` / 队列页可选 **成片模板**（抖音爆款≤45s / B站高光≤60s / 快手快剪≤30s）：限总时长 → 合并 → 跟脸竖屏 → 封面文案位 + 话题草稿（`core/film_templates.py`）。  
+- 发布预设仍填抖音/B站/快手分辨率与质量；规范命名见 `export_naming`。
 
 ### 5.6 链接下载（yt-dlp）+ 热评三合一
 
@@ -270,6 +277,10 @@ DownloadPage（单页）
 | 转码 | 项目已有 FFmpeg |
 | 信息/播放历史 | `core/url_info_cache.py` → `~/MusicEditingInfoCache`（启动自动载入列表） |
 | Cookie | 本页「Cookie…」→ `yt_dlp_cookies_file`（优先）或 `yt_dlp_cookies_from_browser` |
+| 重试 | `_yt_dlp_retry_args`：retries/fragment/file-access + 指数退避；缓解 bilivideo SSL EOF |
+| 失败可恢复 | `core/download_recover.py` 白话分类（Cookie/限流/无音轨/SSL）；下载页弹窗「换 Cookie / 重试」；热评短视频失败同理 |
+
+**B 站稳定性：** 探测优先「音画合并」；下载 `bv*+ba`；仍无音轨则分轨 + ffmpeg 合并；普通画质可无 Cookie，大会员高画质需 Cookie 文件。
 
 **抖音 Cookie 导出（必做）：**
 
@@ -319,7 +330,7 @@ EnhancePage / WatermarkPage 导入图片
 | `start_slice_analysis` | 后台 → `progressUpdated` / `highlightsReady` |
 | 超分 / 去水印 / 导出高光 / 静音剪掉 | 已后台 |
 | `open_with_video` 切 Tab | 主线程（先切页再异步 import） |
-| `start_pipeline_queue` | 后台单线程顺序跑完整条链路（§5.9.1） |
+| `start_pipeline_queue` | 后台有限并行（默认 2）：切片/导出可重叠；超分+去水印串行（§5.9.1） |
 
 ```
 切片「一键高光成片 / 静音剪掉」完成（后台）
@@ -346,9 +357,11 @@ EnhancePage / WatermarkPage 导入图片
 PipelineQueuePage「开始队列」
   → MainViewModel.start_pipeline_queue(paths, PipelineSettings)
       → 后台线程 core/pipeline_runner.run_pipeline_queue
-            对每个视频顺序：
+            max_parallel（默认 2）：多任务切片/导出可重叠
+            超分 + 去水印用信号量串行（防 GPU/磁盘互抢）
+            每个视频：
               probe
-              → [可选] analyze（复用演讲/游戏切片）→ export_highlights → highlights_merged.mp4
+              → [可选] analyze → export_highlights → highlights_merged.mp4
               → [可选] upscale_video（OpenCV / Real-ESRGAN）
               → [可选] watermark_inpaint_video（角标预设区域）
       → pipelineItemUpdated / pipelineFinished（主线程刷新列表）
@@ -361,11 +374,11 @@ PipelineQueuePage「开始队列」
 | 编排 | `core/pipeline_runner.py` |
 | VM | `MainViewModel.start_pipeline_queue` / pause / skip / cancel |
 
-**参数要点：** 步骤可勾选；超分默认 OpenCV 2×，试跑秒数 `0=全程`；去水印默认关，开启后用右上/左上等角标框（按成片分辨率比例），无需逐文件框选。输出：`output_root/<文件名>/`（未选目录则视频旁 `pipeline_out/<文件名>/`）。
+**参数要点：** 步骤可勾选；**成片模板**（抖音/B站/快手一键竖屏+封面话题）；超分默认 OpenCV 2×，试跑秒数默认 **8**（`0=全程`）；**并行任务 1–4**（默认 2）；**产物上限**默认 20 GB；失败自动重试 1 次；启动前磁盘 &lt;5GB 预警。去水印默认关。输出：`output_root/<文件名>/`。
 
-**控制：** 暂停（进度回调处挂起）、跳过当前、取消队列。
+**控制：** 暂停、跳过当前（并行时消费一次）、取消队列。
 
-**限制：** 单线程顺序执行（非底层多任务并行）；角标去水印是启发式框，复杂游走水印仍需去水印页手动画框；切片场景与单页相同（游戏为规则兜底）。
+**限制：** 超分/去水印仍串行；角标去水印是启发式框；切片场景与单页相同。
 
 ### 5.10 视频补帧（FFmpeg minterpolate / 可选 RIFE）
 
@@ -620,7 +633,14 @@ BgmPage「人声分离」
   │         → AppLogic.toggle_gpu → gpu_enabled 持久化
   │         → MediaBridge.set_prefer_hw_decode / set_prefer_cuda
   │
-  └─ 默认输出目录 → set_output_dir → app.conf output_dir
+  ├─ 默认输出目录 → set_output_dir → app.conf output_dir
+  │
+  ├─ 开箱向导 → SetupWizardDialog
+  │
+  └─ 诊断与清理
+        →「一键打包诊断日志」core/diag_pack.pack_diagnostics
+              docs 下 player/cli/Python 日志 + ort_ep_report.json + diag_snapshot.json → zip
+        →「清理临时帧」core/resource_cleanup.cleanup_orphan_temp_dirs
 ```
 
 | 资源 | 路径 |
@@ -645,11 +665,15 @@ BgmPage「人声分离」
 ### 5.18 开箱向导 / 进度 ETA / 去水印批量加固
 
 ```
-首次启动（setup_wizard_done 未写）
+首次启动（setup_wizard_done 未写）或 media_cli 缺失
   → MainWindow._maybe_show_setup_wizard
-      → SetupWizardDialog（检测 GPU / Real-ESRGAN / LaMa / Vosk / yt-dlp / Cookie）
-      → 一键 scripts/download_*.bat；Cookie → 下载页说明
-      → 完成 → app.conf setup_wizard_done=true
+      → SetupWizardDialog
+            顶部「建议优先处理」摘要（next_actions_summary）
+            检测：引擎 media_cli / GPU / Real-ESRGAN / LaMa / Vosk /
+                  yt-dlp / Cookie / PySceneDetect / .gguf / game_event.onnx
+      → 一键 scripts/download_*.bat；Cookie→下载页；编译/LLM 说明弹窗
+      → **试跑 15 秒成片**（tests 样例 → 裁切 → 竖屏，`core/trial_run.py`）
+      → 关键缺失时确认后才可「完成并进入」→ app.conf setup_wizard_done=true
 个人中心「打开开箱向导…」可再次打开
 ```
 
@@ -722,6 +746,41 @@ BgmPage「人声分离」
 **致谢：** 思路参考 [blind-watermark](https://github.com/guofei9987/blind_watermark)、[HideInfo](https://github.com/guofei9987/HideInfo)（MIT），独立实现、未整库 vendoring。
 
 **限制：** LSB 不抗强 JPEG；频域抗轻度压缩更好；回声需足够音轨时长且会重编码音频。不宣称对抗平台重编码。
+
+
+### 5.23 工程质量（回归短测 / 诊断包 / 资源清理）
+
+**回归短测（各一条自动化脚本）：**
+
+```
+scripts/run_regression_short.bat
+  ├─ tests/regression/test_player_shm_seek.py     SHM + 预取 + Seek
+  ├─ tests/regression/test_opencv_upscale.py      OpenCV 超分（≤12 帧）
+  ├─ tests/regression/test_pipeline_parallel.py   队列 max_parallel=2 切片重叠
+  ├─ tests/regression/test_vertical_export.py     竖屏 9:16 导出
+  └─ tests/regression/test_cookie_probe_hint.py   Cookie/限流/无音轨白话提示
+```
+
+发版前清单见 [release_checklist.md](release_checklist.md)。
+
+**便携分发：** `scripts/pack_portable.py` → `dist/MusicEditing_Portable_*` + `MusicEditing.exe`；内嵌 `runtime\`；**默认去掉可读 `.py`（只留 `.pyc`）**；C++ 为 exe/dll。`--ship-source` 仅调试。启动器经临时 bat 调 `vcvars64` 编译（避免 cmd 嵌套引号失败）。
+
+**诊断包：** 个人中心「一键打包诊断日志」→ `core/diag_pack.py`  
+写入桌面（或 `docs/diagnostics/`）zip：`log_media_player` / `log_media_cli` / Python 日志、`ort_ep_report.json`、`diag_snapshot.json`。  
+`MediaBridge` 启动时为 CLI 设置 `MUSIC_LOG_FILE=docs/log_media_cli.txt`。
+
+**资源清理：**
+
+| 能力 | 实现 |
+|------|------|
+| 超分/去水印临时帧 | 正常路径 `finally` 删除；启动清理 `music_sr_*` 等残留（>6h）；个人中心可手动全清 |
+| 队列产物上限 | `PipelineSettings.max_output_gb`（默认 20）；超限按最旧媒体文件删；队列页可改 |
+
+| 资源 | 路径 |
+|------|------|
+| 诊断 | `client/scripts/core/diag_pack.py` |
+| 清理 | `client/scripts/core/resource_cleanup.py` |
+| 短测 | `tests/regression/` · `scripts/run_regression_short.bat` |
 
 
 ---

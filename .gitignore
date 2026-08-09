@@ -1,6 +1,8 @@
 # 构建目录（产物不提交）
 build/
 build_x64/
+dist/
+dist/_cache/
 .cache/
 *.exe
 *.pdb

@@ -101,8 +101,11 @@ class GlVideoWidget(QOpenGLWidget):
         need = width * height * 3
         if len(rgb) < need:
             return
-        # 单次拷贝保留缓冲；垂直翻转改由 UV（避免 mirrored+copy）
-        keep = bytes(rgb[:need]) if not isinstance(rgb, (bytes, bytearray)) else bytes(rgb[:need])
+        # 已是精确长度的 bytes 时复用，避免再拷一份（双缓冲 SHM 读出后常见）
+        if isinstance(rgb, bytes) and len(rgb) == need:
+            keep = rgb
+        else:
+            keep = bytes(rgb[:need])
         img = QImage(keep, width, height, width * 3, QImage.Format_RGB888)
         self._pending_keep = keep
         self._pending_image = img

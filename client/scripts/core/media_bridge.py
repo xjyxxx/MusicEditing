@@ -125,12 +125,13 @@ def _file_has_video_stream(path: str) -> bool:
 
 
 def _yt_dlp_retry_args() -> List[str]:
-    """缓解 bilivideo SSL EOF / 断流。"""
+    """缓解 bilivideo SSL EOF / 断流（加重试与指数退避）。"""
     return [
-        "--retries", "12",
-        "--fragment-retries", "12",
-        "--socket-timeout", "30",
-        "--retry-sleep", "linear=1::2",
+        "--retries", "15",
+        "--fragment-retries", "15",
+        "--file-access-retries", "8",
+        "--socket-timeout", "45",
+        "--retry-sleep", "exp=1:8",
     ]
 
 
@@ -289,6 +290,21 @@ def _friendly_yt_dlp_error(url: str, err: str) -> str:
         return (
             "站点需要可用 Cookie（未必登录）。"
             "请关闭浏览器后重试，或设置 yt_dlp_cookies_file。\n"
+            f"原始错误：{text[-400:]}"
+        )
+    if "429" in low or "too many requests" in low or "rate limit" in low:
+        return (
+            "请求过于频繁（限流）。请等待 1～2 分钟后重试，或更新 yt-dlp。\n"
+            f"原始错误：{text[-400:]}"
+        )
+    if "ssl" in low and ("eof" in low or "syscall" in low):
+        return (
+            "网络 SSL/断流。可直接重试；B 站请勾「音画合并」。\n"
+            f"原始错误：{text[-400:]}"
+        )
+    if "no audio" in low or "仍无音轨" in text:
+        return (
+            "画面无音轨。请勾选「音画合并」后重下。\n"
             f"原始错误：{text[-400:]}"
         )
     return text[-800:] if text else "链接探测/下载失败"
@@ -477,11 +493,17 @@ class MediaBridge:
         env = os.environ.copy()
         if cli_dir not in env.get("PATH", ""):
             env["PATH"] = cli_dir + os.pathsep + env.get("PATH", "")
+        try:
+            from core.diag_pack import ensure_cli_log_env
+            env = ensure_cli_log_env(env)
+        except Exception:
+            pass
         self._env = env
         self._prefer_cuda = False
         self._prefer_hw_decode = True
         self._watermark_backend = "lama"
         self._upscale_backend = "realesrgan"
+        self._last_upscale_ep = ""
         self.set_prefer_cuda(False)
         self.set_prefer_hw_decode(True)
         self.set_watermark_backend("lama")
@@ -560,15 +582,18 @@ class MediaBridge:
         return []
 
     def set_prefer_cuda(self, enabled: bool) -> None:
-        """LaMa ONNX CUDA EP 开关（默认关闭，项目不再捆绑 cuda_runtime）。"""
+        """LaMa ONNX CUDA EP + llama n_gpu_layers 开关（默认关闭）。"""
         self._prefer_cuda = bool(enabled)
         self._env["MUSIC_ORT_CUDA"] = "1" if self._prefer_cuda else "0"
+        # -1 = 尽量全部层上 GPU（需用 GGML_CUDA 编译的 llama）；0 = 纯 CPU
+        self._env["MUSIC_LLM_N_GPU_LAYERS"] = "-1" if self._prefer_cuda else "0"
 
     def set_upscale_tile(self, tile: int) -> None:
-        """超分 tile 尺寸（128–1024）；0 或无效则用 C++ 默认 384。"""
+        """超分 tile（128–1024）；0=自动（CUDA EP→512，否则 384）。"""
         t = int(tile or 0)
         if t <= 0:
-            self._env.pop("MUSIC_UPSCALE_TILE", None)
+            ok, _ = self.probe_ort_cuda()
+            self._env["MUSIC_UPSCALE_TILE"] = "512" if ok else "384"
         else:
             self._env["MUSIC_UPSCALE_TILE"] = str(max(128, min(1024, t)))
 
@@ -578,10 +603,10 @@ class MediaBridge:
             import onnxruntime as ort
             providers = list(ort.get_available_providers() or [])
             if "CUDAExecutionProvider" in providers:
-                return True, "CUDA EP 可用"
-            return False, "已回退 CPU（无 CUDAExecutionProvider）"
+                return True, "CUDA EP✓"
+            return False, "超分/LaMa 将用 CPU（无 CUDA EP；可装 CUDA 运行库或关 GPU）"
         except Exception as e:
-            return False, f"已回退 CPU（ORT 不可用: {e})"
+            return False, f"超分/LaMa 将用 CPU（ORT: {e}）"
 
     def set_prefer_hw_decode(self, enabled: bool) -> None:
         """批处理 iterate / 缩略图是否请求 D3D11VA（CLI --hw）。"""
@@ -1132,27 +1157,43 @@ class MediaBridge:
         timeout: Optional[int] = 600,
         backend: str = "realesrgan",
     ) -> str:
-        prev = self._upscale_backend
-        self.set_upscale_backend(backend)
+        """图片超分：优先 ctypes 常驻 Session，失败回退 CLI。"""
+        be = (backend or "realesrgan").strip().lower()
+        if be in ("opencv", "cv", "fast", "bicubic"):
+            be = "opencv"
+        else:
+            be = "realesrgan"
+        # 同步 env，便于 ctypes / CLI
+        self.set_upscale_backend(be)
         try:
-            sp = max(0, min(100, int(strength)))
-            args = [
-                "upscale",
-                model_path or "-",
-                input_path,
-                output_path,
-                str(2 if scale == 2 else 4),
-                str(sp),
-            ]
-            out = self._run(args, timeout=timeout)
-            if "UPSCALE_OK" not in out:
-                raise RuntimeError(f"超分失败: {out}")
-            for line in out.splitlines():
-                if line.startswith("output="):
-                    return line.split("=", 1)[1].strip()
-            return output_path
-        finally:
-            self.set_upscale_backend(prev)
+            from core.media_engine_ctypes import get_media_engine
+            eng = get_media_engine()
+            if eng is not None and getattr(eng, "_has_upscale", False):
+                ep = eng.upscale_load(model_path or "-", backend=be)
+                eng.upscale_image_file(
+                    input_path, output_path, scale=scale, strength=strength,
+                )
+                self._last_upscale_ep = ep
+                return output_path
+        except Exception:
+            pass
+
+        sp = max(0, min(100, int(strength)))
+        args = [
+            "upscale",
+            model_path or "-",
+            input_path,
+            output_path,
+            str(2 if scale == 2 else 4),
+            str(sp),
+        ]
+        out = self._run(args, timeout=timeout)
+        if "UPSCALE_OK" not in out:
+            raise RuntimeError(f"超分失败: {out}")
+        for line in out.splitlines():
+            if line.startswith("output="):
+                return line.split("=", 1)[1].strip()
+        return output_path
 
     def upscale_frames(
         self,
@@ -1165,72 +1206,85 @@ class MediaBridge:
         timeout: Optional[int] = 600,
         backend: Optional[str] = None,
     ) -> int:
-        """一次加载后端，批量超分目录内 PNG 帧。返回处理帧数。"""
-        prev = self._upscale_backend
+        """一次加载后端，批量超分目录内 PNG/JPEG 帧。返回处理帧数。"""
+        # 用 env 快照，避免并行队列改共享 _env
+        env = dict(self._env)
         if backend:
-            self.set_upscale_backend(backend)
+            be = (backend or "").strip().lower()
+            if be in ("opencv", "cv", "fast", "bicubic"):
+                env["MUSIC_UPSCALE_BACKEND"] = "opencv"
+            else:
+                env["MUSIC_UPSCALE_BACKEND"] = "realesrgan"
+        sp = max(0, min(100, int(strength)))
+        args = [
+            "upscale-frames",
+            model_path or "-",
+            frames_in_dir,
+            frames_out_dir,
+            str(2 if scale == 2 else 4),
+            str(sp),
+        ]
+        cmd = [str(self._cli)] + args
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            cwd=str(self._cli.parent),
+        )
+
+        assert proc.stdout is not None
+        count = 0
+        stderr_lines: list[str] = []
+
+        def drain_stderr():
+            assert proc.stderr is not None
+            for line in proc.stderr:
+                s = line.rstrip("\n")
+                stderr_lines.append(s)
+                if s.startswith("UPSCALE_EP:"):
+                    self._last_upscale_ep = s.split(":", 1)[1].strip()
+                elif s.startswith("UPSCALE_BACKEND:"):
+                    # 保留后端名，EP 优先
+                    if not getattr(self, "_last_upscale_ep", ""):
+                        self._last_upscale_ep = s.split(":", 1)[1].strip()
+
+        t = threading.Thread(target=drain_stderr, daemon=True)
+        t.start()
+
         try:
-            sp = max(0, min(100, int(strength)))
-            args = [
-                "upscale-frames",
-                model_path or "-",
-                frames_in_dir,
-                frames_out_dir,
-                str(2 if scale == 2 else 4),
-                str(sp),
-            ]
-            cmd = [str(self._cli)] + args
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                env=self._env,
-                cwd=str(self._cli.parent),
-            )
-
-            assert proc.stdout is not None
-            count = 0
-            stderr_lines: list[str] = []
-
-            def drain_stderr():
-                assert proc.stderr is not None
-                for line in proc.stderr:
-                    stderr_lines.append(line.rstrip("\n"))
-
-            t = threading.Thread(target=drain_stderr, daemon=True)
-            t.start()
-
-            try:
-                for line in proc.stdout:
-                    line = line.strip()
-                    if line.startswith("PROGRESS:"):
-                        parts = line.split(":")
-                        if len(parts) >= 3:
-                            cur = int(parts[1])
-                            total = int(parts[2])
-                            if on_progress:
-                                on_progress(cur, total)
-                    elif line.startswith("UPSCALE_FRAMES_OK"):
+            for line in proc.stdout:
+                line = line.strip()
+                if line.startswith("PROGRESS:"):
+                    parts = line.split(":")
+                    if len(parts) >= 3:
+                        cur = int(parts[1])
+                        total = int(parts[2])
+                        if on_progress:
+                            on_progress(cur, total)
+                elif line.startswith("UPSCALE_FRAMES_OK"):
+                    pass
+                elif line.startswith("count="):
+                    try:
+                        count = int(line.split("=", 1)[1])
+                    except ValueError:
                         pass
-                    elif line.startswith("count="):
-                        try:
-                            count = int(line.split("=", 1)[1])
-                        except ValueError:
-                            pass
-            finally:
-                proc.wait(timeout=timeout)
-                t.join(timeout=5)
-
-            stderr = "\n".join(stderr_lines)
-            if proc.returncode != 0:
-                err = _format_cli_failure("", stderr, proc.returncode)
-                raise RuntimeError(err or f"超分帧处理失败: {stderr}")
-            return count
         finally:
-            self.set_upscale_backend(prev)
+            proc.wait(timeout=timeout)
+            t.join(timeout=5)
+
+        stderr = "\n".join(stderr_lines)
+        if proc.returncode != 0:
+            err = _format_cli_failure("", stderr, proc.returncode)
+            raise RuntimeError(err or f"超分帧处理失败: {stderr}")
+        return count
+
+    @property
+    def last_upscale_ep(self) -> str:
+        return getattr(self, "_last_upscale_ep", "") or ""
 
     def upscale_video(
         self,
@@ -1267,7 +1321,9 @@ class MediaBridge:
 
         try:
             report(2.0, "正在提取视频帧…")
-            extract_cmd = [str(ffmpeg), "-y"]
+            # OpenCV 快路径用 JPEG 中间帧（读写更快）；AI 仍用 PNG 保精度
+            frame_ext = "jpg" if not use_ai else "png"
+            extract_cmd = [str(ffmpeg), "-y", "-threads", "0"]
             if start_sec > 0:
                 extract_cmd.extend(["-ss", f"{start_sec:.3f}"])
             extract_cmd.extend(["-i", input_path])
@@ -1276,9 +1332,11 @@ class MediaBridge:
                 extract_cmd.extend(["-t", f"{duration:.3f}"])
             if max_frames > 0:
                 extract_cmd.extend(["-vframes", str(max_frames)])
+            if frame_ext == "jpg":
+                extract_cmd.extend(["-q:v", "2"])
             extract_cmd.extend([
                 "-vsync", "0",
-                os.path.join(frames_in, "frame_%06d.png"),
+                os.path.join(frames_in, f"frame_%06d.{frame_ext}"),
             ])
             result = subprocess.run(
                 extract_cmd, capture_output=True, text=True,
@@ -1287,17 +1345,27 @@ class MediaBridge:
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.strip() or "帧提取失败")
 
-            frame_files = sorted(glob.glob(os.path.join(frames_in, "*.png")))
+            frame_files = sorted(
+                glob.glob(os.path.join(frames_in, "*.png"))
+                + glob.glob(os.path.join(frames_in, "*.jpg"))
+                + glob.glob(os.path.join(frames_in, "*.jpeg"))
+            )
             if not frame_files:
                 raise RuntimeError("未提取到任何视频帧")
 
             total = len(frame_files)
             mode_label = "Real-ESRGAN" if use_ai else "OpenCV 双三次"
-            report(8.0, f"共 {total} 帧，{mode_label} {scale}x 强度{strength}%…")
+            ok_ep, ep_msg = self.probe_ort_cuda() if use_ai else (False, "")
+            if use_ai and self._prefer_cuda and not ok_ep:
+                report(8.0, f"共 {total} 帧，{mode_label} {scale}x · {ep_msg}")
+            else:
+                report(8.0, f"共 {total} 帧，{mode_label} {scale}x 强度{strength}%…")
 
             def on_frame(cur: int, frame_total: int):
                 pct = 8.0 + cur / frame_total * 82.0
-                report(pct, f"处理帧 {cur}/{frame_total}")
+                ep = self.last_upscale_ep
+                tail = f" · EP={ep}" if ep else ""
+                report(pct, f"处理帧 {cur}/{frame_total}{tail}")
 
             timeout = max(120, total * 90) if use_ai else max(60, total * 3)
             self.upscale_frames(
@@ -1316,7 +1384,7 @@ class MediaBridge:
             encode_cmd = [
                 str(ffmpeg), "-y",
                 "-framerate", f"{fps:.3f}",
-                "-i", os.path.join(frames_out, "frame_%06d.png"),
+                "-i", os.path.join(frames_out, f"frame_%06d.{frame_ext}"),
                 *_video_encoder_args(),
                 silent_mp4,
             ]
@@ -2545,10 +2613,12 @@ class MediaBridge:
         max_height: int = 0,
         quality: str = "high",
         container: str = "mp4",
+        naming_preset: str = "custom",
+        use_naming_scheme: bool = False,
     ) -> Tuple[List[str], str]:
         """
-        导出高光片段到目录，并可选拼接成 highlights_merged.<ext>。
-        max_height>0 时对成片做缩放重编码；quality/container 控制输出。
+        导出高光片段到目录，并可选拼接成片。
+        use_naming_scheme=True 时用「源名_类型_平台_时间」规范名。
         """
         if not segments:
             raise ValueError("没有可导出的高光片段")
@@ -2561,6 +2631,8 @@ class MediaBridge:
             if on_progress:
                 on_progress(p, msg)
 
+        from core.export_naming import default_clip_name, default_merged_name
+
         clips: List[str] = []
         total = len(segments)
         q = (quality or "high").strip().lower() or "high"
@@ -2570,10 +2642,14 @@ class MediaBridge:
         for i, (start, end) in enumerate(segments):
             if end <= start:
                 continue
-            name = f"highlight_{i + 1:03d}_{start:.1f}-{end:.1f}.{ext}"
+            if use_naming_scheme:
+                name = default_clip_name(
+                    input_path, i + 1, preset=naming_preset, ext=ext,
+                )
+            else:
+                name = f"highlight_{i + 1:03d}_{start:.1f}-{end:.1f}.{ext}"
             out = os.path.join(output_dir, name)
             report(5.0 + i / max(total, 1) * 70.0, f"导出片段 {i + 1}/{total}")
-            # 分段优先 remux（-c copy），少起重编码
             self.export_clip(input_path, start, end, out, reencode=False, quality=q)
             clips.append(out)
 
@@ -2582,10 +2658,15 @@ class MediaBridge:
 
         merged = ""
         if concat:
-            merged = os.path.join(output_dir, f"highlights_merged.{ext}")
+            if use_naming_scheme:
+                merged = os.path.join(
+                    output_dir,
+                    default_merged_name(input_path, preset=naming_preset, ext=ext),
+                )
+            else:
+                merged = os.path.join(output_dir, f"highlights_merged.{ext}")
             report(90.0, "正在拼接成片…")
             self.concat_clips(clips, merged)
-            # 仅当用户选了非「高」质量或分辨率限制时，整段一次重编码
             if need_param_reencode and merged and os.path.isfile(merged):
                 report(94.0, "按导出参数重编码…")
                 tmp = merged + ".reenc.tmp." + ext

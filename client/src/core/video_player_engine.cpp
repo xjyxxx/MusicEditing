@@ -31,6 +31,7 @@ extern "C" {
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <cstddef>
 #include <vector>
 
 namespace media::core {
@@ -257,10 +258,10 @@ bool VideoPlayerEngine::seek(double timestampSec) {
     return true;
 }
 
-bool VideoPlayerEngine::decodeNextFrameToFile(
-    const std::string& rgbFilePath, DecodeFrameResult* result,
+bool VideoPlayerEngine::decodeNextFrameToBuffer(
+    uint8_t* outRgb, size_t capacity, DecodeFrameResult* result,
     double minTimestampSec, bool applyFilter) {
-    if (!isOpen() || impl_->eof) {
+    if (!isOpen() || impl_->eof || !outRgb) {
         return false;
     }
 
@@ -271,6 +272,12 @@ bool VideoPlayerEngine::decodeNextFrameToFile(
     const int dstH = impl_->playbackScaleH > 0 ? impl_->playbackScaleH : srcH;
     const int bufSize = av_image_get_buffer_size(AV_PIX_FMT_RGB24, dstW, dstH, 1);
     if (bufSize <= 0) {
+        return false;
+    }
+    const size_t packedNeed = static_cast<size_t>(dstW) * static_cast<size_t>(dstH) * 3u;
+    if (capacity < packedNeed) {
+        LOG_ERROR("RGB 缓冲区不足 need=" + std::to_string(packedNeed)
+            + " cap=" + std::to_string(capacity));
         return false;
     }
     const bool catchUp = minTimestampSec >= 0.0;
@@ -298,7 +305,6 @@ bool VideoPlayerEngine::decodeNextFrameToFile(
     const AVStream* vstream = impl_->formatCtx->streams[impl_->videoStreamIndex];
     const double frameStep = impl_->info.fps > 0 ? 1.0 / impl_->info.fps : 0.04;
 
-    bool writeFailed = false;
     auto tryOutputFrame = [&](AVFrame* decoded) -> bool {
         ts = common::frameTimestampSec(decoded, vstream, ts + frameStep);
 
@@ -355,37 +361,23 @@ bool VideoPlayerEngine::decodeNextFrameToFile(
             }
         }
 
-        const std::string tmpPath = rgbFilePath + ".part";
-        FILE* fp = std::fopen(tmpPath.c_str(), "wb");
-        if (!fp) {
-            LOG_ERROR("无法写入帧文件: " + tmpPath);
-            writeFailed = true;
-            return false;
-        }
-        for (int y = 0; y < dstH; ++y) {
-            const uint8_t* row = rgbFrame->data[0] + static_cast<ptrdiff_t>(y) * rgbStride;
-            if (std::fwrite(row, 1, static_cast<size_t>(rowBytes), fp) != static_cast<size_t>(rowBytes)) {
-                LOG_ERROR("写入帧行失败 y=" + std::to_string(y));
-                std::fclose(fp);
-                std::remove(tmpPath.c_str());
-                writeFailed = true;
-                return false;
+        // 紧密打包写入调用方缓冲（无磁盘）
+        if (rgbStride == rowBytes) {
+            std::memcpy(outRgb, rgbFrame->data[0], packedNeed);
+        } else {
+            for (int y = 0; y < dstH; ++y) {
+                std::memcpy(
+                    outRgb + static_cast<size_t>(y) * static_cast<size_t>(rowBytes),
+                    rgbFrame->data[0] + static_cast<ptrdiff_t>(y) * rgbStride,
+                    static_cast<size_t>(rowBytes));
             }
-        }
-        std::fflush(fp);
-        std::fclose(fp);
-        std::remove(rgbFilePath.c_str());
-        if (std::rename(tmpPath.c_str(), rgbFilePath.c_str()) != 0) {
-            LOG_ERROR("帧文件替换失败: " + rgbFilePath);
-            writeFailed = true;
-            return false;
         }
 
         impl_->lastTimestamp = ts;
         return true;
     };
 
-    while (!gotFrame && !writeFailed) {
+    while (!gotFrame) {
         const int recvRet = avcodec_receive_frame(impl_->codecCtx, frame);
         if (recvRet == 0) {
             if (tryOutputFrame(frame)) {
@@ -416,12 +408,6 @@ bool VideoPlayerEngine::decodeNextFrameToFile(
         }
     }
 
-    if (writeFailed) {
-        av_frame_free(&frame);
-        av_frame_free(&rgbFrame);
-        return false;
-    }
-
     av_frame_free(&frame);
     av_frame_free(&rgbFrame);
 
@@ -442,6 +428,7 @@ bool VideoPlayerEngine::decodeNextFrameToFile(
         result->hwTransfer = hwTransfer;
         result->width = dstW;
         result->height = dstH;
+        result->stride = rowBytes;
     }
 
     ++impl_->framesOutput;
@@ -462,6 +449,45 @@ bool VideoPlayerEngine::decodeNextFrameToFile(
             + " 帧>40ms，建议 opencv_filter_playback=off 或 HWACCEL off");
     }
 
+    return true;
+}
+
+bool VideoPlayerEngine::decodeNextFrameToFile(
+    const std::string& rgbFilePath, DecodeFrameResult* result,
+    double minTimestampSec, bool applyFilter) {
+    DecodeFrameResult local{};
+    DecodeFrameResult* out = result ? result : &local;
+    // 预分配最大常见预览缓冲（4K）；实际只用到 width*height*3
+    const size_t cap = 3840u * 2160u * 3u;
+    std::vector<uint8_t> buf(cap);
+    if (!decodeNextFrameToBuffer(buf.data(), buf.size(), out, minTimestampSec, applyFilter)) {
+        return false;
+    }
+    const int dstW = out->width;
+    const int dstH = out->height;
+    const size_t rowBytes = static_cast<size_t>(dstW) * 3u;
+    const std::string tmpPath = rgbFilePath + ".part";
+    FILE* fp = std::fopen(tmpPath.c_str(), "wb");
+    if (!fp) {
+        LOG_ERROR("无法写入帧文件: " + tmpPath);
+        return false;
+    }
+    for (int y = 0; y < dstH; ++y) {
+        if (std::fwrite(buf.data() + static_cast<size_t>(y) * rowBytes, 1, rowBytes, fp)
+            != rowBytes) {
+            std::fclose(fp);
+            std::remove(tmpPath.c_str());
+            LOG_ERROR("写入帧行失败 y=" + std::to_string(y));
+            return false;
+        }
+    }
+    std::fflush(fp);
+    std::fclose(fp);
+    std::remove(rgbFilePath.c_str());
+    if (std::rename(tmpPath.c_str(), rgbFilePath.c_str()) != 0) {
+        LOG_ERROR("帧文件替换失败: " + rgbFilePath);
+        return false;
+    }
     return true;
 }
 

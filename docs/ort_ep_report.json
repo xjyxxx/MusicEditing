@@ -1,0 +1,10 @@
+{
+  "import_ok": true,
+  "providers": [
+    "AzureExecutionProvider",
+    "CPUExecutionProvider"
+  ],
+  "cuda_ep": false,
+  "message": "无 CUDA EP（超分/LaMa 将用 CPU）",
+  "version": "1.23.2"
+}

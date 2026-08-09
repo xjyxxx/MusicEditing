@@ -38,7 +38,7 @@ flowchart TB
     Backend -->|stdin/stdout| PlayerExe["media_player.exe"]
     PlayerExe --> Input --> Decode --> Process --> Output
     Process -.-> OpenCVExtra
-    Output -->|RGB 临时文件| Backend --> Widget
+    Output -->|命名共享内存 RGB| Backend --> Widget
     QtAudio -->|读原文件音频轨| Speaker["系统扬声器"]
 ```
 
@@ -56,7 +56,8 @@ flowchart TB
 
 | 类型 | 存放位置 | 格式 |
 |------|----------|------|
-| 视频帧 | `%TEMP%\me_player_*\frame.rgb` | 裸 RGB24，每帧覆盖 |
+| 视频帧 | 命名共享内存 `MusicEditing_rgb_*`（首选） | 裸 RGB24 |
+| 视频帧（回退） | `%TEMP%\me_player_*\frame.rgb` | 裸 RGB24，每帧覆盖 |
 | UI 图像 | Python QImage / OpenGL 纹理 | 内存 |
 | 音频 | 不落地 | Qt 内部 PCM → 声卡 |
 

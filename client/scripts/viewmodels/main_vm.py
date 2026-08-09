@@ -669,7 +669,7 @@ class MainViewModel(QObject):
             if not ok_ep:
                 parts.append(ep_msg)
             else:
-                parts.append("CUDA EP✓")
+                parts.append("CUDA EP✓ · tile自动≈512")
         parts.append("超分模型✓" if sr_ok else "超分模型缺（download_realesrgan_model.bat）")
         parts.append("LaMa✓" if lama_ok else "LaMa缺（download_lama_model.bat）")
         return " · ".join(parts)
@@ -1338,10 +1338,25 @@ class MainViewModel(QObject):
                     sensitivity=params.sensitivity,
                 )
                 if clipped:
-                    report(90.0, f"场景切点完成：{len(clipped)} 段")
+                    report(78.0, f"场景切点 {len(clipped)} 段，语义打分…")
+
+                    def sem_report(p: float, msg: str):
+                        report(78.0 + max(0.0, min(100.0, p)) * 0.12, msg)
+
+                    try:
+                        from core.game_semantic import enrich_game_segments
+                        clipped = enrich_game_segments(
+                            video.file_path, clipped, on_progress=sem_report,
+                        )
+                    except Exception as e:
+                        import logging
+                        logging.getLogger("SceneDetect").warning(
+                            "语义打分跳过: %s", e,
+                        )
+                    report(92.0, f"游戏高光完成：{len(clipped)} 段（含语义分）")
                     import logging
                     logging.getLogger("SceneDetect").info(
-                        "游戏高光采用 PySceneDetect 结果 segments=%d", len(clipped),
+                        "游戏高光采用 PySceneDetect+语义 segments=%d", len(clipped),
                     )
                     return [
                         HighlightSegment(
@@ -1514,8 +1529,11 @@ class MainViewModel(QObject):
         max_height: int = 0,
         quality: str = "high",
         container: str = "mp4",
+        naming_preset: str = "custom",
+        use_naming_scheme: bool = False,
+        max_total_sec: float = 0.0,
     ):
-        """批量导出高光片段，并可选拼接成 highlights_merged。<ext>。"""
+        """批量导出高光片段，并可选拼接成片。"""
         video = self._state.current_video
         segs = [s for s in self._state.highlight_segments if s.selected and s.end_sec > s.start_sec]
         if not video or not self._bridge:
@@ -1544,10 +1562,15 @@ class MainViewModel(QObject):
                     self.progressUpdated.emit(task.task_id, p, msg)
 
                 ranges = [(s.start_sec, s.end_sec) for s in segs]
+                if max_total_sec and max_total_sec > 0:
+                    from core.film_templates import clamp_ranges_to_budget
+                    ranges = clamp_ranges_to_budget(ranges, float(max_total_sec))
                 clips, merged = self._bridge.export_highlights(
                     video.file_path, ranges, output_dir,
                     concat=concat, on_progress=report,
                     max_height=max_height, quality=quality, container=container,
+                    naming_preset=naming_preset,
+                    use_naming_scheme=use_naming_scheme,
                 )
                 task.state = TaskState.COMPLETED
                 task.progress = 100.0

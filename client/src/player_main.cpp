@@ -1,6 +1,7 @@
 #include "core/video_player_engine.h"
 #include "core/frame_processor.h"
 
+#include "common/frame_shm.h"
 #include "common/logger.h"
 
 #include <iostream>
@@ -11,7 +12,18 @@
 namespace {
 
 media::core::VideoPlayerEngine g_player;
+media::common::FrameSharedMemory g_shm[2];
+int g_shm_count = 0;       // 1=单缓冲；2=双缓冲
+int g_shm_write_slot = 0;  // 下次 NEXT 写入的槽
 bool g_hwaccel_preferred = false;
+
+void closeAllShm() {
+    for (int i = 0; i < 2; ++i) {
+        g_shm[i].close();
+    }
+    g_shm_count = 0;
+    g_shm_write_slot = 0;
+}
 
 std::string trim(const std::string& s) {
     size_t b = 0, e = s.size();
@@ -51,6 +63,7 @@ int main() {
 
         if (cmd == "QUIT" || cmd == "quit") {
             g_player.close();
+            closeAllShm();
             std::cout << "BYE" << std::endl;
             LOG_INFO("media_player 退出");
             break;
@@ -65,6 +78,45 @@ int main() {
             g_hwaccel_preferred = (mode == "on" || mode == "1" || mode == "true");
             g_player.setHwAccelPreferred(g_hwaccel_preferred);
             std::cout << "HWACCEL_OK enabled=" << (g_hwaccel_preferred ? 1 : 0) << std::endl;
+            std::cout.flush();
+            continue;
+        }
+
+        if (cmd == "SHM") {
+            // SHM <name0> <capacity> [name1]  — 有 name1 时双缓冲
+            std::string name0;
+            std::string name1;
+            size_t capacity = 0;
+            iss >> name0 >> capacity;
+            if (!(iss >> name1)) {
+                name1.clear();
+            }
+            if (name0.empty() || capacity == 0) {
+                replyError("shm_bad_args");
+                continue;
+            }
+            closeAllShm();
+            if (!g_shm[0].open(name0, capacity)) {
+                replyError("shm_open_failed");
+                continue;
+            }
+            g_shm_count = 1;
+            g_shm_write_slot = 0;
+            if (!name1.empty()) {
+                if (!g_shm[1].open(name1, capacity)) {
+                    closeAllShm();
+                    replyError("shm_open_failed");
+                    continue;
+                }
+                g_shm_count = 2;
+            }
+            std::cout << "SHM_OK name=" << g_shm[0].name()
+                << " capacity=" << g_shm[0].capacity()
+                << " dual=" << (g_shm_count > 1 ? 1 : 0);
+            if (g_shm_count > 1) {
+                std::cout << " name1=" << g_shm[1].name();
+            }
+            std::cout << std::endl;
             std::cout.flush();
             continue;
         }
@@ -189,19 +241,50 @@ int main() {
             }
 
             media::core::VideoPlayerEngine::DecodeFrameResult decoded{};
-            if (!g_player.decodeNextFrameToFile(outPath, &decoded, minTs, applyFilter != 0)) {
+            const bool useShm = (outPath == "shm" || outPath == "SHM");
+            bool ok = false;
+            int shmSlot = 0;
+            if (useShm) {
+                if (g_shm_count < 1 || !g_shm[0].isOpen()) {
+                    replyError("shm_not_ready");
+                    continue;
+                }
+                shmSlot = g_shm_write_slot;
+                if (shmSlot < 0 || shmSlot >= g_shm_count || !g_shm[shmSlot].isOpen()) {
+                    shmSlot = 0;
+                }
+                ok = g_player.decodeNextFrameToBuffer(
+                    g_shm[shmSlot].data(), g_shm[shmSlot].capacity(),
+                    &decoded, minTs, applyFilter != 0);
+                if (ok && g_shm_count > 1) {
+                    g_shm_write_slot = 1 - shmSlot;
+                }
+            } else {
+                ok = g_player.decodeNextFrameToFile(
+                    outPath, &decoded, minTs, applyFilter != 0);
+            }
+
+            if (!ok) {
                 std::cout << "FRAME_EOF" << std::endl;
             } else {
                 const auto& info = g_player.info();
                 const int fw = decoded.width > 0 ? decoded.width : info.width;
                 const int fh = decoded.height > 0 ? decoded.height : info.height;
+                const size_t bytes = static_cast<size_t>(fw) * static_cast<size_t>(fh) * 3u;
                 std::cout << "FRAME_OK timestamp=" << decoded.timestampSec
                     << " width=" << fw
                     << " height=" << fh
                     << " skipped=" << decoded.skippedFrames
                     << " decode_ms=" << decoded.decodeMs
                     << " hw_xfer=" << (decoded.hwTransfer ? 1 : 0)
-                    << " path=" << outPath << std::endl;
+                    << " bytes=" << bytes
+                    << " shm=" << (useShm ? 1 : 0);
+                if (useShm) {
+                    std::cout << " slot=" << shmSlot;
+                } else {
+                    std::cout << " path=" << outPath;
+                }
+                std::cout << std::endl;
             }
             std::cout.flush();
             continue;
@@ -210,5 +293,6 @@ int main() {
         replyError("unknown_command");
     }
 
+    closeAllShm();
     return 0;
 }

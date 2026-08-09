@@ -626,7 +626,8 @@ QLabel#HintLabel {{
     background: {SURFACE_2}; border: 1px solid {BORDER}; border-radius: 8px;
 }}
 QLabel#MetaBadge {{
-    color: #B8EDE4; font-size: 13px; font-weight: 600; padding: 6px 10px;
+    color: #B8EDE4; font-size: 13px; font-weight: 600;
+    padding: 6px 12px; min-height: 28px;
     background: {SIGNAL_SOFT}; border: 1px solid #3A6A64; border-radius: 8px;
 }}
 QLabel#SideTitle {{
@@ -647,6 +648,11 @@ QPushButton#GhostBtn {{
 }}
 QPushButton#GhostBtn:hover {{ background: #2C3444; }}
 QPushButton#GhostBtn:disabled {{ color: {TEXT_DIM}; border-color: {BORDER}; }}
+QLineEdit#ProfileKeyEdit {{
+    min-height: 34px;
+    padding: 8px 12px;
+    font-size: 13px;
+}}
 QPushButton#PresetBtn {{
     background: {SURFACE_2}; color: {TEXT_MUTED}; padding: 4px 10px;
     border-radius: 6px; border: 1px solid {BORDER};

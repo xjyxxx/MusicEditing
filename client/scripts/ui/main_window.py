@@ -30,6 +30,13 @@ from ui.pipeline_queue_page import PipelineQueuePage
 from ui.profile_page import ProfilePage
 from ui.setup_wizard import SetupWizardDialog
 from ui.stego_page import StegoPage
+from ui.studio_kit import (
+    make_studio_card,
+    make_studio_hero,
+    studio_btn,
+    studio_page_stylesheet,
+    wrap_studio_scroll,
+)
 from ui.theme import app_stylesheet, style_spinbox
 from ui.video_player import VideoPlayerWidget, _is_audio_file
 from ui.watermark_page import WatermarkPage
@@ -37,6 +44,7 @@ from ui.workflow_link import (
     MENU_GROUPS,
     PAGE_TITLES,
     TAB_AUDIO_FUN,
+    TAB_BGM,
     TAB_COVER,
     TAB_DOWNLOAD,
     TAB_ENHANCE,
@@ -235,29 +243,44 @@ class SlicePage(QWidget):
         self._duration_sec = 0.0
         self._syncing_selection = False
         self._last_result_path = ""
-        layout = QVBoxLayout(self)
+        self.setObjectName("SlicePage")
+        self.setStyleSheet(studio_page_stylesheet("SlicePage"))
+        _, _, root = wrap_studio_scroll(self)
+
+        root.addWidget(make_studio_hero(
+            "智能切片",
+            "导入视频 → AI/手动挑高光 → 一键成片 / 竖屏 / 静音剪掉",
+            "成片",
+        ))
 
         # 导入区
+        import_card, import_lay = make_studio_card("素材", "本页导入，或沿用其它页已打开的视频")
         import_row = QHBoxLayout()
         self._file_label = QLabel("未选择视频")
-        btn_import = QPushButton("导入视频")
+        self._file_label.setObjectName("StudioCardHint")
+        btn_import = studio_btn("导入视频", primary=True)
         btn_import.clicked.connect(self._on_import)
-        btn_use = QPushButton("用当前视频")
+        btn_use = studio_btn("用当前视频")
         btn_use.setToolTip("使用其它页已导入的共享视频")
         btn_use.clicked.connect(self._on_use_current_video)
         import_row.addWidget(self._file_label, 1)
         import_row.addWidget(btn_import)
         import_row.addWidget(btn_use)
-        layout.addLayout(import_row)
-
-        # 视频信息
+        import_lay.addLayout(import_row)
         self._info_label = QLabel("")
-        self._info_label.setObjectName("InfoText")
-        layout.addWidget(self._info_label)
+        self._info_label.setObjectName("StudioCardHint")
+        self._info_label.setWordWrap(True)
+        import_lay.addWidget(self._info_label)
+        root.addWidget(import_card)
 
         # 参数配置
-        params_box = QGroupBox("AI 识别参数")
-        params_layout = QGridLayout(params_box)
+        params_card, params_outer = make_studio_card(
+            "AI 识别参数",
+            "演讲金句需 Vosk；游戏高光可用场景切点；无模型可改手动切片",
+        )
+        params_layout = QGridLayout()
+        params_layout.setHorizontalSpacing(10)
+        params_layout.setVerticalSpacing(8)
 
         self._scene_combo = QComboBox()
         self._scene_combo.addItems(["游戏高光", "演讲金句", "日常精彩片段", "响度高潮", "自定义识别"])
@@ -267,7 +290,7 @@ class SlicePage(QWidget):
             "下载模型: scripts\\download_vosk_model.bat"
         )
         self._scene_hint = QLabel("")
-        self._scene_hint.setObjectName("MutedText")
+        self._scene_hint.setObjectName("StudioCardHint")
         self._scene_hint.setWordWrap(True)
         self._scene_combo.currentTextChanged.connect(self._on_scene_changed)
         params_layout.addWidget(QLabel("场景:"), 0, 0)
@@ -301,12 +324,16 @@ class SlicePage(QWidget):
         self._min_slider.valueChanged.connect(lambda v: self._min_label.setText(f"{v}s"))
         self._max_slider.valueChanged.connect(lambda v: self._max_label.setText(f"{v}s"))
         self._sens_slider.valueChanged.connect(lambda v: self._sens_label.setText(f"{v}%"))
-
-        layout.addWidget(params_box)
+        params_outer.addLayout(params_layout)
+        root.addWidget(params_card)
 
         # 手动切片（不依赖 Vosk）
-        manual_box = QGroupBox("手动切片（无需 AI / Vosk）")
-        manual_layout = QGridLayout(manual_box)
+        manual_card, manual_outer = make_studio_card(
+            "手动切片", "无需 AI / Vosk；可与分析结果混用",
+        )
+        manual_layout = QGridLayout()
+        manual_layout.setHorizontalSpacing(10)
+        manual_layout.setVerticalSpacing(8)
         self._manual_start = QDoubleSpinBox()
         self._manual_start.setRange(0.0, 86400.0)
         self._manual_start.setDecimals(1)
@@ -321,7 +348,7 @@ class SlicePage(QWidget):
         self._manual_end.setValue(10.0)
         style_spinbox(self._manual_end)
         self._manual_range_label = QLabel("0:00 – 0:10")
-        self._manual_range_label.setObjectName("InfoText")
+        self._manual_range_label.setObjectName("StudioCardHint")
         self._manual_start.valueChanged.connect(self._on_manual_spin)
         self._manual_end.valueChanged.connect(self._on_manual_spin)
         manual_layout.addWidget(QLabel("开始:"), 0, 0)
@@ -329,71 +356,73 @@ class SlicePage(QWidget):
         manual_layout.addWidget(QLabel("结束:"), 0, 2)
         manual_layout.addWidget(self._manual_end, 0, 3)
         manual_layout.addWidget(self._manual_range_label, 0, 4)
-        btn_add_manual = QPushButton("添加到列表")
+        btn_add_manual = studio_btn("添加到列表", primary=True)
         btn_add_manual.setToolTip("按起止时间添加片段，可与 AI 结果混用")
         btn_add_manual.clicked.connect(self._on_add_manual)
-        btn_del = QPushButton("删除选中")
+        btn_del = studio_btn("删除选中")
         btn_del.clicked.connect(self._on_remove_selected)
-        btn_clear = QPushButton("清空列表")
+        btn_clear = studio_btn("清空列表")
         btn_clear.clicked.connect(self._on_clear_segments)
         manual_layout.addWidget(btn_add_manual, 1, 0, 1, 2)
         manual_layout.addWidget(btn_del, 1, 2, 1, 1)
         manual_layout.addWidget(btn_clear, 1, 3, 1, 1)
-        layout.addWidget(manual_box)
+        manual_outer.addLayout(manual_layout)
+        root.addWidget(manual_card)
 
         # 进度
         self._progress = QProgressBar()
         self._progress.setVisible(False)
-        layout.addWidget(self._progress)
+        root.addWidget(self._progress)
 
-        # 高光时间轴（色块 + 片段缩略图）
-        layout.addWidget(QLabel("高光时间轴（缩略图）"))
+        # 高光时间轴 + 列表
+        result_card, result_lay = make_studio_card(
+            "高光结果", "时间轴点选片段；列表可删改后再导出",
+        )
         self._timeline = HighlightTimelineWidget()
         self._timeline.segmentClicked.connect(self._on_timeline_segment)
-        layout.addWidget(self._timeline)
-
-        # 高光列表（带缩略图图标）
+        result_lay.addWidget(self._timeline)
         self._highlight_list = QListWidget()
         self._highlight_list.setIconSize(QSize(96, 54))
+        self._highlight_list.setMinimumHeight(160)
         self._highlight_list.currentRowChanged.connect(self._on_list_row_changed)
-        layout.addWidget(self._highlight_list)
+        result_lay.addWidget(self._highlight_list)
         self._thumb_gen = 0
         self.thumbnailReady.connect(self._on_thumbnail_ready)
+        root.addWidget(result_card, 1)
 
         # 操作按钮
+        action_card, action_lay = make_studio_card("导出与接力", "成片后可送超分 / 去水印")
         btn_row = QHBoxLayout()
-        self._btn_analyze = QPushButton("AI 智能分析")
-        self._btn_analyze.setObjectName("primaryButton")
+        btn_row.setSpacing(8)
+        self._btn_analyze = studio_btn("AI 智能分析", primary=True)
         self._btn_analyze.setToolTip(
             "演讲类需 Vosk 模型；无模型请用「游戏高光」或上方「手动切片」"
         )
         self._btn_analyze.clicked.connect(self._on_analyze)
-        btn_analyze = self._btn_analyze
-        btn_export = QPushButton("一键高光成片")
+        btn_export = studio_btn("一键高光成片")
         btn_export.setToolTip("导出列表中的片段，并拼接成 highlights_merged.mp4")
         btn_export.clicked.connect(self._on_export)
-        btn_vertical = QPushButton("竖屏短视频")
+        btn_vertical = studio_btn("竖屏短视频")
         btn_vertical.setToolTip(
             "切片成片 → 9:16 裁切；若有同名 .srt/.vtt/.ass 则烧录字幕（片段会重定时）"
         )
         btn_vertical.clicked.connect(self._on_vertical_export)
-        btn_silence = QPushButton("静音剪掉")
+        btn_silence = studio_btn("静音剪掉")
         btn_silence.setToolTip("检测静音段并裁掉，生成紧凑口播版")
         btn_silence.clicked.connect(self._on_compact_speech)
-        btn_enhance = QPushButton("送去超分")
+        btn_enhance = studio_btn("送去超分")
         btn_enhance.setToolTip("将高光成片（或当前视频）导入「画质增强」")
         btn_enhance.clicked.connect(lambda: self._send_to(TAB_ENHANCE))
-        btn_wm = QPushButton("送去去水印")
+        btn_wm = studio_btn("送去去水印")
         btn_wm.setToolTip("将高光成片（或当前视频）导入「去水印」")
         btn_wm.clicked.connect(lambda: self._send_to(TAB_WATERMARK))
-        btn_row.addWidget(btn_analyze)
-        btn_row.addWidget(btn_export)
-        btn_row.addWidget(btn_vertical)
-        btn_row.addWidget(btn_silence)
-        btn_row.addWidget(btn_enhance)
-        btn_row.addWidget(btn_wm)
-        btn_row.addStretch()
-        layout.addLayout(btn_row)
+        for w in (
+            self._btn_analyze, btn_export, btn_vertical, btn_silence, btn_enhance, btn_wm,
+        ):
+            btn_row.addWidget(w)
+        btn_row.addStretch(1)
+        action_lay.addLayout(btn_row)
+        root.addWidget(action_card)
 
         vm.videoLoaded.connect(self._on_video_loaded)
         vm.progressUpdated.connect(self._on_progress)
@@ -407,8 +436,8 @@ class SlicePage(QWidget):
     @Slot(str)
     def _on_scene_changed(self, scene: str):
         tips = {
-            "游戏高光": "PySceneDetect 视觉场景切点（Adaptive）；失败则时间轴规则兜底。"
-                        "未安装可运行 scripts\\install_scenedetect.bat。",
+            "游戏高光": "PySceneDetect 场景切点 + 运动/闪光语义打分（偏「爆点」）；"
+                        "失败则时间轴规则兜底。未安装可运行 scripts\\install_scenedetect.bat。",
             "演讲金句": "优先 Vosk 转写 + 金句词/LLM；无模型则用人声段候选。"
                         "完整识别请运行 scripts\\download_vosk_model.bat。",
             "日常精彩片段": "同演讲链路，偏向口语兴奋词；无 Vosk 用人声段。",
@@ -622,6 +651,9 @@ class SlicePage(QWidget):
             max_height=opts.max_height,
             quality=opts.quality,
             container=opts.container,
+            naming_preset=opts.preset,
+            use_naming_scheme=bool(getattr(opts, "use_naming_scheme", True)),
+            max_total_sec=float(getattr(opts, "max_total_sec", 0) or 0),
         )
 
     @Slot()
@@ -677,8 +709,14 @@ class SlicePage(QWidget):
         opts = opts_dlg.options()
         vw, vh = opts.vertical_size
 
-        base = os.path.splitext(os.path.basename(video.file_path))[0]
-        default = f"{base}_vertical.{opts.container}"
+        if getattr(opts, "use_naming_scheme", True):
+            from core.export_naming import default_vertical_name
+            default = default_vertical_name(
+                video.file_path, preset=opts.preset, ext=opts.container,
+            )
+        else:
+            base = os.path.splitext(os.path.basename(video.file_path))[0]
+            default = f"{base}_vertical.{opts.container}"
         filt = "MP4 (*.mp4);;MOV (*.mov);;所有文件 (*.*)"
         out, _ = QFileDialog.getSaveFileName(
             self, "保存竖屏短视频", default, filt,
@@ -786,10 +824,17 @@ class SlicePage(QWidget):
                 if opts.make_cover and self._vm.bridge:
                     cover, draft = make_publish_pack(
                         self._vm.bridge, path,
+                        title=getattr(opts, "cover_title", "") or "",
                         width=opts.vertical_size[0], height=opts.vertical_size[1],
+                        preset=getattr(opts, "preset", "douyin_vertical") or "douyin_vertical",
                     )
                 elif opts.make_topic_draft:
-                    draft = write_topic_draft(path)
+                    draft = write_topic_draft(
+                        path,
+                        title=getattr(opts, "cover_title", "") or "",
+                        preset=getattr(opts, "preset", "custom") or "custom",
+                        topics=getattr(opts, "topic_tags", None),
+                    )
                 bits = []
                 if cover:
                     bits.append(f"封面：{os.path.basename(cover)}")
@@ -904,36 +949,26 @@ class MainWindow(QMainWindow):
         self._gpu_label.setText(f"GPU  {self._vm.gpu_name}")
         self._auth_label.setText(f"授权  {self._vm.auth_type}")
 
-        # 功能页：堆叠容器 + 菜单导航（不再平铺大量 Tab）
+        # 功能页：堆叠 + 懒创建（启动只建首页，其它页第一次点开再建）
         self._stack = QStackedWidget()
         self._stack.setObjectName("MainStack")
-        self._home_page = HomePage(self._vm)
-        self._slice_page = SlicePage(self._vm, handoff=self.open_with_video)
-        self._enhance_page = EnhancePage(self._vm, handoff=self.open_with_video)
-        self._watermark_page = WatermarkPage(self._vm, handoff=self.open_with_video)
-        self._download_page = DownloadPage(self._vm)
-        self._pipeline_page = PipelineQueuePage(self._vm)
-        self._cover_page = CoverPage(self._vm)
-        self._audio_fun_page = AudioFunPage(self._vm)
-        self._bgm_page = BgmPage(self._vm)
-        self._profile_page = ProfilePage(self._vm)
-        self._library_page = MediaLibraryPage(self._vm, handoff=self.open_with_video)
-        self._stego_page = StegoPage(self._vm)
-        for page in (
-            self._home_page,
-            self._slice_page,
-            self._enhance_page,
-            self._watermark_page,
-            self._download_page,
-            self._pipeline_page,
-            self._cover_page,
-            self._audio_fun_page,
-            self._bgm_page,
-            self._profile_page,
-            self._library_page,
-            self._stego_page,
-        ):
-            self._stack.addWidget(page)
+        self._page_by_tab: dict[int, QWidget] = {}
+        self._home_page = None
+        self._slice_page = None
+        self._enhance_page = None
+        self._watermark_page = None
+        self._download_page = None
+        self._pipeline_page = None
+        self._cover_page = None
+        self._audio_fun_page = None
+        self._bgm_page = None
+        self._profile_page = None
+        self._library_page = None
+        self._stego_page = None
+        for i in range(TAB_STEGO + 1):
+            ph = QWidget()
+            ph.setObjectName(f"PagePlaceholder_{i}")
+            self._stack.addWidget(ph)
         main_layout.addWidget(self._stack, 1)
 
         self._nav_group = QActionGroup(self)
@@ -941,9 +976,6 @@ class MainWindow(QMainWindow):
         self._nav_actions: dict[int, QAction] = {}
         self._build_menus()
         self._goto_page(TAB_HOME)
-
-        self._download_page.previewPlayRequested.connect(self._on_preview_play)
-        self._download_page.playWithCommentsRequested.connect(self._on_play_with_comments)
 
         # 底部状态
         self._status_label = QLabel(self._vm.status_message)
@@ -954,12 +986,85 @@ class MainWindow(QMainWindow):
         # 天气刷新依赖底栏提示，放在 status_label 之后
         self._start_weather_refresh()
 
-        # GPU 提示（向导未弹出时再提示）
+        # 向导 / CPU 提示挪到首屏显示后再扫依赖，避免启动主线程再卡 ~300ms
         from core.app_logic import AppLogic
-        from core.setup_status import should_show_setup_wizard
         app = AppLogic()
-        QTimer.singleShot(400, lambda: self._maybe_show_setup_wizard(app))
-        if not should_show_setup_wizard(app) and not app.gpu_info["cuda_available"]:
+        QTimer.singleShot(500, lambda: self._post_show_setup(app))
+
+    def _create_page(self, index: int) -> QWidget:
+        """按 TAB_* 索引创建功能页（仅首次）。"""
+        if index == TAB_HOME:
+            return HomePage(self._vm)
+        if index == TAB_SLICE:
+            return SlicePage(self._vm, handoff=self.open_with_video)
+        if index == TAB_ENHANCE:
+            return EnhancePage(self._vm, handoff=self.open_with_video)
+        if index == TAB_WATERMARK:
+            return WatermarkPage(self._vm, handoff=self.open_with_video)
+        if index == TAB_DOWNLOAD:
+            return DownloadPage(self._vm)
+        if index == TAB_PIPELINE:
+            return PipelineQueuePage(self._vm)
+        if index == TAB_COVER:
+            return CoverPage(self._vm)
+        if index == TAB_AUDIO_FUN:
+            return AudioFunPage(self._vm)
+        if index == TAB_BGM:
+            return BgmPage(self._vm)
+        if index == TAB_PROFILE:
+            return ProfilePage(self._vm)
+        if index == TAB_LIBRARY:
+            return MediaLibraryPage(self._vm, handoff=self.open_with_video)
+        if index == TAB_STEGO:
+            return StegoPage(self._vm)
+        return QWidget()
+
+    def _ensure_page(self, index: int) -> QWidget:
+        """懒创建功能页并替换占位；返回真实页面。"""
+        existing = self._page_by_tab.get(index)
+        if existing is not None:
+            return existing
+        page = self._create_page(index)
+        old = self._stack.widget(index)
+        self._stack.removeWidget(old)
+        self._stack.insertWidget(index, page)
+        if old is not None:
+            old.deleteLater()
+        self._page_by_tab[index] = page
+        attr = {
+            TAB_HOME: "_home_page",
+            TAB_SLICE: "_slice_page",
+            TAB_ENHANCE: "_enhance_page",
+            TAB_WATERMARK: "_watermark_page",
+            TAB_DOWNLOAD: "_download_page",
+            TAB_PIPELINE: "_pipeline_page",
+            TAB_COVER: "_cover_page",
+            TAB_AUDIO_FUN: "_audio_fun_page",
+            TAB_BGM: "_bgm_page",
+            TAB_PROFILE: "_profile_page",
+            TAB_LIBRARY: "_library_page",
+            TAB_STEGO: "_stego_page",
+        }.get(index)
+        if attr:
+            setattr(self, attr, page)
+        if index == TAB_DOWNLOAD:
+            page.previewPlayRequested.connect(self._on_preview_play)
+            page.playWithCommentsRequested.connect(self._on_play_with_comments)
+        try:
+            from ui.wheel_guard import harden_wheel_widgets
+            harden_wheel_widgets(page)
+        except Exception:
+            pass
+        return page
+
+    def _post_show_setup(self, app=None):
+        """首屏出来后再扫依赖 / 弹向导，避免启动卡顿。"""
+        from core.setup_status import should_show_setup_wizard
+        show_wiz = should_show_setup_wizard(app)
+        if show_wiz:
+            self._maybe_show_setup_wizard(app)
+            return
+        if app is not None and not app.gpu_info.get("cuda_available"):
             QMessageBox.information(
                 self, "硬件提示",
                 "当前为 CPU 模式，处理速度较慢。\n支持 NVIDIA 显卡硬件加速（CUDA）。"
@@ -1001,7 +1106,7 @@ class MainWindow(QMainWindow):
             path = self._pending_library_path
             self._pending_library_path = ""
             self._goto_page(TAB_PIPELINE)
-            self._pipeline_page.enqueue_paths([path])
+            self._ensure_page(TAB_PIPELINE).enqueue_paths([path])
             return
         self._goto_page(idx)
 
@@ -1111,7 +1216,7 @@ class MainWindow(QMainWindow):
             return
         self._stop_weather_pulse()
         self._goto_page(TAB_HOME)
-        ok = self._home_page.apply_opencv_filter(mood.filter_mode)
+        ok = self._ensure_page(TAB_HOME).apply_opencv_filter(mood.filter_mode)
         if ok:
             self._status_label.setText(
                 f"今日氛围 · 已套用「{mood.glyph} {mood.label}」"
@@ -1172,9 +1277,10 @@ class MainWindow(QMainWindow):
             help_menu.addAction(act_about)
 
     def _goto_page(self, index: int):
-        """切换功能页（菜单 / 接力 / 下载完成共用）。"""
-        if index < 0 or index >= self._stack.count():
+        """切换功能页（菜单 / 接力 / 下载完成共用）；首次进入时懒创建。"""
+        if index < 0 or index > TAB_STEGO:
             return
+        self._ensure_page(index)
         self._stack.setCurrentIndex(index)
         title = PAGE_TITLES.get(index, f"页面 {index}")
         self._page_label.setText(title)
@@ -1187,12 +1293,12 @@ class MainWindow(QMainWindow):
     def _goto_hot_comments_tab(self):
         """趣味菜单：进入下载与热评页并滚到评论结果区。"""
         self._goto_page(TAB_DOWNLOAD)
-        self._download_page.focus_comments()
+        self._ensure_page(TAB_DOWNLOAD).focus_comments()
 
     @Slot()
     def _on_menu_open_media(self):
         self._goto_page(TAB_HOME)
-        self._home_page.prompt_open_media()
+        self._ensure_page(TAB_HOME).prompt_open_media()
 
     @Slot()
     def _on_about(self):
@@ -1219,13 +1325,13 @@ class MainWindow(QMainWindow):
         # 先切页，再后台探测；videoLoaded 到达后各页刷新
         self._goto_page(tab_index)
         if tab_index == TAB_ENHANCE:
-            self._enhance_page.focus_video_tab()
+            self._ensure_page(TAB_ENHANCE).focus_video_tab()
         elif tab_index == TAB_WATERMARK:
-            self._watermark_page.focus_video_tab()
+            self._ensure_page(TAB_WATERMARK).focus_video_tab()
         elif tab_index == TAB_COVER:
-            self._cover_page.set_video(path)
+            self._ensure_page(TAB_COVER).set_video(path)
         elif tab_index == TAB_AUDIO_FUN:
-            self._audio_fun_page.set_media(path)
+            self._ensure_page(TAB_AUDIO_FUN).set_media(path)
         self._vm.import_video(path)
 
     @Slot(str)
@@ -1233,7 +1339,7 @@ class MainWindow(QMainWindow):
         """列表试听：打开并自动播放（无热评）。"""
         if not path or not os.path.isfile(path):
             return
-        self._home_page.play_with_comments(path, [], auto_play=True)
+        self._ensure_page(TAB_HOME).play_with_comments(path, [], auto_play=True)
         self._goto_page(TAB_HOME)
 
     @Slot(str, object)
@@ -1241,7 +1347,7 @@ class MainWindow(QMainWindow):
         """「送首页播放」：打开媒体并叠弹幕（评论可为空）。"""
         if not path or not os.path.isfile(path):
             return
-        self._home_page.play_with_comments(path, comments, auto_play=True)
+        self._ensure_page(TAB_HOME).play_with_comments(path, comments, auto_play=True)
         self._goto_page(TAB_HOME)
         n = len(comments) if comments else 0
         if n:
@@ -1254,9 +1360,12 @@ class MainWindow(QMainWindow):
         if getattr(self, "_shutdown_done", False):
             return
         self._shutdown_done = True
-        self._home_page.shutdown_player()
-        if getattr(self, "_download_page", None):
-            self._download_page.shutdown()
+        home = self._page_by_tab.get(TAB_HOME)
+        if home is not None:
+            home.shutdown_player()
+        dl = self._page_by_tab.get(TAB_DOWNLOAD)
+        if dl is not None:
+            dl.shutdown()
 
     def closeEvent(self, event):
         self.shutdown()
@@ -1266,6 +1375,7 @@ class MainWindow(QMainWindow):
 def run_app():
     import sys
     from ui.theme import app_stylesheet, apply_dark_palette
+    from ui.wheel_guard import harden_wheel_widgets, install_wheel_focus_guard
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
@@ -1273,7 +1383,10 @@ def run_app():
     # 应用到 QApplication，下拉弹出层也能吃到深色 QSS（避免白边）
     app.setStyleSheet(app_stylesheet())
     app.setQuitOnLastWindowClosed(True)
+    # 悬停滚轮不再误改进度条/音量/下拉；需先点击获得焦点
+    install_wheel_focus_guard(app)
     win = MainWindow()
+    harden_wheel_widgets(win)
     app.aboutToQuit.connect(win.shutdown)
     win.show()
     sys.exit(app.exec())

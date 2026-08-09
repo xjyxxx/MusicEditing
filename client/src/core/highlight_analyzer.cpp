@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 
@@ -95,6 +96,12 @@ LlmEngine* HighlightAnalyzer::getLlm() {
         LlmConfig cfg;
         cfg.model_path = llm_model_path_;
         cfg.n_predict = 512;
+        // MUSIC_LLM_N_GPU_LAYERS：0=CPU；-1=尽量全部层上 GPU（需 GGML_CUDA 构建）
+        cfg.n_gpu_layers = 0;
+        if (const char* env = std::getenv("MUSIC_LLM_N_GPU_LAYERS")) {
+            cfg.n_gpu_layers = std::atoi(env);
+        }
+        LOG_INFO("LLM n_gpu_layers=" + std::to_string(cfg.n_gpu_layers));
         llm_ = std::make_unique<LlmEngine>(cfg);
     }
     return llm_ ? llm_.get() : nullptr;

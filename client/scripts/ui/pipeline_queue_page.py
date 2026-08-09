@@ -233,8 +233,8 @@ class PipelineQueuePage(QWidget):
         self.setStyleSheet(_page_stylesheet())
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(4, 4, 4, 4)
-        root.setSpacing(12)
+        root.setContentsMargins(12, 10, 12, 12)
+        root.setSpacing(10)
 
         root.addWidget(self._build_hero())
 
@@ -367,10 +367,31 @@ class PipelineQueuePage(QWidget):
             step_row.addWidget(chip, 1)
         col.addLayout(step_row)
 
-        tip = QLabel("点按步骤开启/关闭 · 去水印使用角标预设，无需逐个框选")
+        tip = QLabel("点按步骤开启/关闭 · 可选成片模板一键竖屏+封面话题 · 去水印用角标预设")
         tip.setObjectName("PanelMeta")
         tip.setWordWrap(True)
         col.addWidget(tip)
+
+        # 成片模板
+        tpl_box = self._section("成片模板")
+        tpl_lay = QVBoxLayout(tpl_box)
+        tpl_lay.setSpacing(6)
+        self._film_tpl = QComboBox()
+        self._film_tpl.addItem("不使用（仅切片/超分/去水印）", "")
+        from core.film_templates import list_film_templates
+        for t in list_film_templates():
+            self._film_tpl.addItem(t.label, t.key)
+        self._film_tpl.setToolTip(
+            "选模板后：限制高光总时长 → 合并 → 跟脸竖屏 → 封面 PNG + 话题草稿"
+        )
+        self._film_tpl_hint = QLabel("")
+        self._film_tpl_hint.setObjectName("PanelMeta")
+        self._film_tpl_hint.setWordWrap(True)
+        self._film_tpl.currentIndexChanged.connect(self._on_film_tpl)
+        tpl_lay.addWidget(self._film_tpl)
+        tpl_lay.addWidget(self._film_tpl_hint)
+        col.addWidget(self._wrap_section(tpl_box))
+        self._on_film_tpl()
 
         # 切片
         self._slice_box = self._section("切片")
@@ -413,9 +434,9 @@ class PipelineQueuePage(QWidget):
         eg.addWidget(self._field_label("试跑秒数"), 1, 0)
         self._enh_max_sec = QDoubleSpinBox()
         self._enh_max_sec.setRange(0.0, 600.0)
-        self._enh_max_sec.setValue(0.0)
+        self._enh_max_sec.setValue(8.0)
         self._enh_max_sec.setSpecialValueText("全程")
-        self._enh_max_sec.setToolTip("0 = 全程；大于 0 仅超分前 N 秒，适合试跑")
+        self._enh_max_sec.setToolTip("0 = 全程；默认 8 秒试跑，适合批量队列")
         style_spinbox(self._enh_max_sec)
         eg.addWidget(self._enh_max_sec, 1, 1, 1, 3)
         col.addWidget(self._wrap_section(self._enh_box))
@@ -456,6 +477,34 @@ class PipelineQueuePage(QWidget):
         out_row.addWidget(self._out_label, 1)
         out_row.addWidget(btn_out)
         out_col.addLayout(out_row)
+
+        par_row = QHBoxLayout()
+        par_row.addWidget(self._field_label("并行任务"))
+        self._max_parallel = QComboBox()
+        self._max_parallel.addItem("1（顺序）", 1)
+        self._max_parallel.addItem("2（推荐）", 2)
+        self._max_parallel.addItem("3", 3)
+        self._max_parallel.addItem("4", 4)
+        self._max_parallel.setCurrentIndex(1)
+        self._max_parallel.setToolTip(
+            "多视频时切片/导出可重叠；超分与去水印仍串行，避免 GPU/磁盘互抢"
+        )
+        par_row.addWidget(self._max_parallel, 1)
+        out_col.addLayout(par_row)
+
+        quota_row = QHBoxLayout()
+        quota_row.addWidget(self._field_label("产物上限"))
+        self._max_output_gb = QComboBox()
+        self._max_output_gb.addItem("不限制", 0.0)
+        self._max_output_gb.addItem("10 GB", 10.0)
+        self._max_output_gb.addItem("20 GB（推荐）", 20.0)
+        self._max_output_gb.addItem("50 GB", 50.0)
+        self._max_output_gb.setCurrentIndex(2)
+        self._max_output_gb.setToolTip(
+            "输出目录超过上限时，按最旧文件自动清理常见媒体产物（mp4/png/txt…）"
+        )
+        quota_row.addWidget(self._max_output_gb, 1)
+        out_col.addLayout(quota_row)
         col.addWidget(self._wrap_section(out_wrap))
 
         col.addStretch(1)
@@ -558,6 +607,22 @@ class PipelineQueuePage(QWidget):
                     f" border: 1px solid {BORDER if on else '#1E2530'};"
                     f" border-radius: 10px; }}"
                 )
+
+    @Slot()
+    def _on_film_tpl(self):
+        from core.film_templates import get_film_template
+
+        key = str(self._film_tpl.currentData() or "")
+        tpl = get_film_template(key)
+        if tpl is None:
+            self._film_tpl_hint.setText("不套模板时行为与原先一致。")
+            return
+        self._film_tpl_hint.setText(
+            f"{tpl.hint} · 封面「{tpl.cover_title}」· 话题 {' '.join(tpl.topics[:3])}"
+        )
+        if not self._chip_slice.isChecked():
+            self._chip_slice.setChecked(True)
+            self._sync_step_enabled()
 
     # ── 业务逻辑（与原先一致） ────────────────────────────
 
@@ -676,6 +741,10 @@ class PipelineQueuePage(QWidget):
             watermark_backend=str(self._wm_backend.currentData()),
             watermark_corner=str(self._wm_corner.currentData() or "top_right"),
             output_root=self._out_dir,
+            max_parallel=int(self._max_parallel.currentData() or 2),
+            max_retries=1,
+            max_output_gb=float(self._max_output_gb.currentData() or 0.0),
+            film_template=str(self._film_tpl.currentData() or ""),
         )
 
     def _on_start(self):
@@ -687,6 +756,23 @@ class PipelineQueuePage(QWidget):
         settings = self._collect_settings()
         if settings is None:
             return
+        # 磁盘占用预警（输出根或首个视频所在盘）
+        try:
+            import shutil
+            check_path = settings.output_root.strip() or os.path.dirname(self._paths[0])
+            usage = shutil.disk_usage(check_path if check_path else ".")
+            free_gb = usage.free / (1024 ** 3)
+            if free_gb < 5.0:
+                ans = QMessageBox.question(
+                    self,
+                    "磁盘空间不足",
+                    f"目标盘剩余约 {free_gb:.1f} GB（建议 ≥5 GB）。\n超分会写大量临时帧，是否继续？",
+                    QMessageBox.Yes | QMessageBox.No,
+                )
+                if ans != QMessageBox.Yes:
+                    return
+        except Exception:
+            pass
         self._set_running_ui(True)
         self._progress.setValue(0)
         self._status.setText("队列启动…")

@@ -37,12 +37,18 @@ public:
         bool hwTransfer = false;
         int width = 0;
         int height = 0;
+        int stride = 0; // RGB 行跨度（字节）
     };
 
     /// 播放时缩小输出（0=原始分辨率），降低 IPC/显示开销
     void setPlaybackScale(int width, int height);
 
-    /// 解码并输出一帧 RGB24；minTimestampSec>=0 时在 C++ 内跳帧（不写盘/不过滤）
+    /// 解码到紧密打包或带 stride 的 RGB24 缓冲区；capacity 为字节数
+    /// 成功时 result->width/height/stride 有效；像素写入 outRgb（按 stride）
+    bool decodeNextFrameToBuffer(uint8_t* outRgb, size_t capacity, DecodeFrameResult* result,
+        double minTimestampSec = -1.0, bool applyFilter = true);
+
+    /// 兼容：解码并写出 RGB24 文件（测试/回退）
     bool decodeNextFrameToFile(const std::string& rgbFilePath, DecodeFrameResult* result,
         double minTimestampSec = -1.0, bool applyFilter = true);
 

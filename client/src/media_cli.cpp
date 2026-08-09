@@ -6,11 +6,14 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 static void printUsage() {
@@ -328,7 +331,7 @@ static int cmdWatermarkInpaint(int argc, char* argv[]) {
     return 0;
 }
 
-static std::vector<std::string> collectPngFrames(const char* dirPath) {
+static std::vector<std::string> collectFrameFiles(const char* dirPath) {
     namespace fs = std::filesystem;
     std::vector<std::string> files;
     std::error_code ec;
@@ -338,7 +341,9 @@ static std::vector<std::string> collectPngFrames(const char* dirPath) {
     for (const auto& entry : fs::directory_iterator(dirPath, ec)) {
         if (ec || !entry.is_regular_file()) continue;
         const auto ext = entry.path().extension().string();
-        if (ext == ".png" || ext == ".PNG") {
+        if (ext == ".png" || ext == ".PNG"
+            || ext == ".jpg" || ext == ".JPG"
+            || ext == ".jpeg" || ext == ".JPEG") {
             files.push_back(entry.path().string());
         }
     }
@@ -359,7 +364,7 @@ static int cmdWatermarkInpaintFrames(int argc, char* argv[]) {
     std::error_code ec;
     std::filesystem::create_directories(outDir, ec);
 
-    auto frameFiles = collectPngFrames(inDir);
+    auto frameFiles = collectFrameFiles(inDir);
     if (frameFiles.empty()) {
         fprintf(stderr, "WATERMARK_ERROR:no_frames\n");
         return -3;
@@ -494,7 +499,7 @@ static int cmdUpscaleFrames(int argc, char* argv[]) {
     std::error_code ec;
     std::filesystem::create_directories(outDir, ec);
 
-    auto frameFiles = collectPngFrames(inDir);
+    auto frameFiles = collectFrameFiles(inDir);
     if (frameFiles.empty()) {
         fprintf(stderr, "UPSCALE_ERROR:no_frames\n");
         return -3;
@@ -516,22 +521,66 @@ static int cmdUpscaleFrames(int argc, char* argv[]) {
     fflush(stderr);
 
     const int total = static_cast<int>(frameFiles.size());
-    for (int i = 0; i < total; ++i) {
-        const std::string& inPath = frameFiles[static_cast<size_t>(i)];
-        const std::string outPath =
-            (std::filesystem::path(outDir) / std::filesystem::path(inPath).filename()).string();
+    const bool opencvParallel = media_upscale_uses_opencv_fallback() != 0;
+    int workers = 1;
+    if (opencvParallel) {
+        const unsigned hc = std::thread::hardware_concurrency();
+        workers = static_cast<int>(std::max(2u, hc > 0 ? hc / 2 : 2u));
+        workers = std::min(workers, total);
+    }
+    fprintf(stderr, "UPSCALE_WORKERS:%d\n", workers);
+    fflush(stderr);
 
-        ret = media_upscale_image(inPath.c_str(), outPath.c_str(), scale, strength);
-        if (ret != 0) {
-            printUpscaleError(ret);
-            fprintf(stderr, "frame=%s\n", inPath.c_str());
-            fflush(stderr);
-            media_engine_shutdown();
-            return ret;
+    std::atomic<int> nextIndex{0};
+    std::atomic<int> doneCount{0};
+    std::atomic<int> firstError{0};
+    std::mutex progressMu;
+
+    auto workerFn = [&]() {
+        while (firstError.load() == 0) {
+            const int i = nextIndex.fetch_add(1);
+            if (i >= total) {
+                break;
+            }
+            const std::string& inPath = frameFiles[static_cast<size_t>(i)];
+            const std::string outPath =
+                (std::filesystem::path(outDir) / std::filesystem::path(inPath).filename()).string();
+            const int retOne = media_upscale_image(inPath.c_str(), outPath.c_str(), scale, strength);
+            if (retOne != 0) {
+                int expected = 0;
+                if (firstError.compare_exchange_strong(expected, retOne)) {
+                    fprintf(stderr, "frame=%s\n", inPath.c_str());
+                    fflush(stderr);
+                }
+                break;
+            }
+            const int finished = doneCount.fetch_add(1) + 1;
+            {
+                std::lock_guard<std::mutex> lock(progressMu);
+                printf("PROGRESS:%d:%d\n", finished, total);
+                fflush(stdout);
+            }
         }
+    };
 
-        printf("PROGRESS:%d:%d\n", i + 1, total);
-        fflush(stdout);
+    if (workers <= 1) {
+        workerFn();
+    } else {
+        std::vector<std::thread> pool;
+        pool.reserve(static_cast<size_t>(workers));
+        for (int w = 0; w < workers; ++w) {
+            pool.emplace_back(workerFn);
+        }
+        for (auto& t : pool) {
+            t.join();
+        }
+    }
+
+    const int err = firstError.load();
+    if (err != 0) {
+        printUpscaleError(err);
+        media_engine_shutdown();
+        return err;
     }
 
     printf("UPSCALE_FRAMES_OK\n");

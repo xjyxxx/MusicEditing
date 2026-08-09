@@ -14,6 +14,7 @@
 | [feature_flows.md](feature_flows.md) | 各业务端到端链路（UI → 引擎） |
 | [deps_and_extending.md](deps_and_extending.md) | 模块依赖树、扩展与路线图 |
 | [player_decode_flow.md](player_decode_flow.md) | 首页播放器调用链（OPEN/NEXT/SEEK、音画双通道） |
+| [release_checklist.md](release_checklist.md) | 发版前短测 / 冒烟清单 |
 | [流程图/README.md](../流程图/README.md) | 播放器分层 mermaid 总览 |
 
 ## 产品对照（只读）

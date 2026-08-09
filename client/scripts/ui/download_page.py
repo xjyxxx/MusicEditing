@@ -267,6 +267,8 @@ class DownloadPage(QWidget):
         self.setStyleSheet(hot_comments_stylesheet())
         self._vm = vm
         self._busy = False
+        self._last_fail_url = ""
+        self._last_fail_hint = None
         self._probe_for_select = False
         self._awaiting_fetch = False
         self._play_after_download = False
@@ -455,7 +457,8 @@ class DownloadPage(QWidget):
         cookie_row.addWidget(btn_cookie_clear)
         lay.addLayout(cookie_row)
         cookie_hint = QLabel(
-            "抖音须含 douyin 域名条目的 Netscape cookies.txt（勿选 app.conf / 空文件）"
+            "抖音须含 douyin 域名的 Netscape cookies.txt（勿选 app.conf）；"
+            "失败会自动加重试；B 站请勾「音画合并」（无声时会分轨再 ffmpeg 合并）"
         )
         cookie_hint.setObjectName("HotPathMuted")
         cookie_hint.setWordWrap(True)
@@ -1519,7 +1522,21 @@ class DownloadPage(QWidget):
             self._status.setText(f"已导出: {os.path.basename(out)}")
             QMessageBox.information(self, "导出完成", tip)
         except Exception as e:
-            QMessageBox.warning(self, "导出失败", str(e))
+            from core.download_recover import classify_comment_export_error
+
+            hint = classify_comment_export_error(str(e))
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle(hint.title)
+            box.setText(hint.message)
+            if hint.action == "retry":
+                retry = box.addButton(hint.action_label or "重试", QMessageBox.AcceptRole)
+            else:
+                retry = None
+            box.addButton("关闭", QMessageBox.RejectRole)
+            box.exec()
+            if retry is not None and box.clickedButton() is retry:
+                self._on_export_comments()
 
     @Slot()
     def _on_send_home(self):
@@ -1632,6 +1649,17 @@ class DownloadPage(QWidget):
 
     @Slot(str)
     def _on_error(self, msg: str):
+        from core.download_recover import classify_download_error
+
+        url = ""
+        try:
+            url = (self._url_edit.text() or "").strip()
+        except Exception:
+            url = ""
+        hint = classify_download_error(url, msg)
+        self._last_fail_url = url
+        self._last_fail_hint = hint
+
         if self._probe_for_select:
             self._probe_for_select = False
             self._set_busy(False)
@@ -1639,8 +1667,8 @@ class DownloadPage(QWidget):
             self._status.setProperty("tone", "danger")
             self._status.style().unpolish(self._status)
             self._status.style().polish(self._status)
-            self._status.setText("获取失败")
-            QMessageBox.warning(self, "获取失败", msg)
+            self._status.setText(hint.title)
+            self._show_recover_dialog(hint, context="获取")
             return
         if self._awaiting_fetch or self._manual_download or self._busy:
             self._awaiting_fetch = False
@@ -1653,8 +1681,38 @@ class DownloadPage(QWidget):
             self._status.setProperty("tone", "danger")
             self._status.style().unpolish(self._status)
             self._status.style().polish(self._status)
-            self._status.setText("拉取失败")
-            QMessageBox.warning(self, "拉取失败", msg)
+            self._status.setText(hint.title)
+            self._show_recover_dialog(hint, context="拉取")
+
+    def _show_recover_dialog(self, hint, *, context: str = "操作") -> None:
+        """白话失败提示 + Cookie / 重试。"""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(f"{context}失败 · {hint.title}")
+        box.setText(hint.message)
+        btn_cookie = None
+        btn_retry = None
+        if hint.action == "cookie":
+            btn_cookie = box.addButton(
+                hint.action_label or "换 Cookie…", QMessageBox.AcceptRole,
+            )
+            btn_retry = box.addButton("换完后重试获取", QMessageBox.ActionRole)
+        elif hint.action == "retry":
+            btn_retry = box.addButton(
+                hint.action_label or "重试", QMessageBox.AcceptRole,
+            )
+        box.addButton("关闭", QMessageBox.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if btn_cookie is not None and clicked is btn_cookie:
+            self._on_pick_cookies()
+            return
+        if btn_retry is not None and clicked is btn_retry:
+            if hint.action == "cookie":
+                # 用户可能刚换完 Cookie，再走获取
+                self._on_fetch()
+            else:
+                self._on_fetch()
 
     @Slot()
     def _cleanup_comment_worker(self):

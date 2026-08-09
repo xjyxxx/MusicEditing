@@ -1,0 +1,46 @@
+{
+  "time": "2026-08-10T00:24:14",
+  "platform": "Windows-10-10.0.26100-SP0",
+  "python": "3.10.6",
+  "cwd": "E:\\code_2026\\MusicEditing",
+  "project_root": "E:\\code_2026\\MusicEditing",
+  "engine": {
+    "media_cli": {
+      "path": "E:\\code_2026\\MusicEditing\\build_x64\\bin\\Release\\media_cli.exe",
+      "exists": true
+    },
+    "media_player": {
+      "path": "E:\\code_2026\\MusicEditing\\build_x64\\bin\\Release\\media_player.exe",
+      "exists": true
+    },
+    "media_engine": {
+      "path": "E:\\code_2026\\MusicEditing\\build_x64\\bin\\Release\\media_engine.dll",
+      "exists": true
+    },
+    "onnxruntime": {
+      "path": "E:\\code_2026\\MusicEditing\\build_x64\\bin\\Release\\onnxruntime.dll",
+      "exists": true
+    }
+  },
+  "media_cli_version": "N-117275-g04182b5549-20240930",
+  "ort": {
+    "import_ok": true,
+    "providers": [
+      "AzureExecutionProvider",
+      "CPUExecutionProvider"
+    ],
+    "cuda_ep": false,
+    "message": "无 CUDA EP（超分/LaMa 将用 CPU）",
+    "version": "1.23.2"
+  },
+  "env": {
+    "MUSIC_ORT_CUDA": "",
+    "MUSIC_UPSCALE_BACKEND": "",
+    "MUSIC_LOG_LEVEL": ""
+  },
+  "extra": {
+    "auth": "试用版",
+    "gpu": "NVIDIA GeForce RTX 4060",
+    "output_dir": ""
+  }
+}

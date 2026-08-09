@@ -101,6 +101,21 @@ class MediaEngineCtypes:
 
         lib.media_decoder_hwaccel_name.restype = ctypes.c_char_p
 
+        # 超分（可选；缺符号则图片超分仍走 CLI）
+        self._has_upscale = hasattr(lib, "media_upscale_load_model")
+        if self._has_upscale:
+            lib.media_upscale_load_model.argtypes = [ctypes.c_char_p]
+            lib.media_upscale_load_model.restype = ctypes.c_int
+            lib.media_upscale_image.argtypes = [
+                ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_int,
+            ]
+            lib.media_upscale_image.restype = ctypes.c_int
+            lib.media_upscale_uses_opencv_fallback.restype = ctypes.c_int
+            lib.media_upscale_uses_cuda.restype = ctypes.c_int
+            lib.media_upscale_execution_provider.restype = ctypes.c_char_p
+
+        self._upscale_loaded_key: str | None = None
+
     def last_error(self) -> str:
         try:
             p = self._lib.media_engine_last_error()
@@ -187,6 +202,61 @@ class MediaEngineCtypes:
         out.parent.mkdir(parents=True, exist_ok=True)
         _write_ppm(out, rgb, ow, oh)
         return str(out.resolve())
+
+    def upscale_load(self, model_path: str, *, backend: str = "realesrgan") -> str:
+        """加载超分模型并常驻；返回执行后端 cuda/cpu/opencv。"""
+        if not self._has_upscale:
+            raise RuntimeError("media_engine 未导出超分 API")
+        be = (backend or "realesrgan").strip().lower()
+        key = f"{be}|{model_path or '-'}"
+        with self._lock:
+            # 通过环境变量影响 C++ 后端选择（与 CLI 一致）
+            if be in ("opencv", "cv", "fast", "bicubic"):
+                os.environ["MUSIC_UPSCALE_BACKEND"] = "opencv"
+                path_arg = "-"
+            else:
+                os.environ["MUSIC_UPSCALE_BACKEND"] = "realesrgan"
+                path_arg = model_path or "-"
+            if self._upscale_loaded_key == key:
+                return self.upscale_ep()
+            ret = int(self._lib.media_upscale_load_model(os.fsencode(path_arg)))
+            if ret != 0:
+                raise RuntimeError(self.last_error() or f"media_upscale_load_model={ret}")
+            self._upscale_loaded_key = key
+            return self.upscale_ep()
+
+    def upscale_ep(self) -> str:
+        if not self._has_upscale:
+            return "none"
+        try:
+            p = self._lib.media_upscale_execution_provider()
+            if not p:
+                return "unknown"
+            return p.decode("utf-8", errors="replace")
+        except Exception:
+            return "unknown"
+
+    def upscale_image_file(
+        self,
+        input_path: str,
+        output_path: str,
+        *,
+        scale: int = 4,
+        strength: int = 65,
+    ) -> None:
+        if not self._has_upscale:
+            raise RuntimeError("media_engine 未导出超分 API")
+        sc = 2 if int(scale) == 2 else 4
+        sp = max(0, min(100, int(strength)))
+        with self._lock:
+            ret = int(self._lib.media_upscale_image(
+                os.fsencode(os.path.abspath(input_path)),
+                os.fsencode(os.path.abspath(output_path)),
+                sc,
+                sp,
+            ))
+        if ret != 0:
+            raise RuntimeError(self.last_error() or f"media_upscale_image={ret}")
 
 
 _ENGINE: Optional[MediaEngineCtypes] = None

@@ -21,10 +21,11 @@ from core.image_loader import load_preview, probe_size
 from ui.elided_label import ElidedPathLabel
 from ui.exif_panel import ExifPanel, attach_exif_overlay
 from ui.theme import BG, PLAYER_BG, TEXT_MUTED, enhance_page_stylesheet
+from ui.studio_kit import make_studio_hero, studio_page_stylesheet
 from ui.workflow_link import TAB_WATERMARK, ask_video_handoff
 from viewmodels.main_vm import MainViewModel
 
-_STYLE = enhance_page_stylesheet()
+_STYLE = enhance_page_stylesheet() + "\n" + studio_page_stylesheet("EnhancePage")
 
 
 class _FramePreviewWorker(QObject):
@@ -325,17 +326,14 @@ class EnhancePage(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         root = QVBoxLayout(self)
-        root.setSpacing(8)
+        root.setContentsMargins(12, 10, 12, 12)
+        root.setSpacing(10)
 
-        hint = QLabel(
-            "图片/视频超分：左原图右结果对比（视频超分默认试前 2 秒）。"
-            "视频补帧：默认处理全程，区间与超分独立。"
-            "一键调色：电影暖调/冷调/复古（与播放器滤镜同预设，导出走 lut3d）。"
-        )
-        hint.setObjectName("HintLabel")
-        hint.setWordWrap(True)
-        hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        root.addWidget(hint)
+        root.addWidget(make_studio_hero(
+            "画质增强",
+            "图片/视频超分（左原图右结果）· 补帧 · 一键调色。视频超分默认试前 2 秒。",
+            "超分",
+        ))
 
         self._ai_hint = QLabel("")
         self._ai_hint.setObjectName("MutedText")
@@ -426,11 +424,12 @@ class EnhancePage(QWidget):
         tile_row = QHBoxLayout()
         tile_row.addWidget(QLabel("高级 tile"))
         tile = QComboBox()
-        tile.addItem("默认 384", 0)
+        tile.addItem("自动（GPU≈512）", 0)
         tile.addItem("256（省显存）", 256)
+        tile.addItem("384", 384)
         tile.addItem("512", 512)
         tile.addItem("768（大图）", 768)
-        tile.setToolTip("Real-ESRGAN 分块尺寸（MUSIC_UPSCALE_TILE）")
+        tile.setToolTip("Real-ESRGAN 分块；自动时有 CUDA EP 用 512，否则 384")
         tile_row.addWidget(tile)
         tile_row.addStretch()
         col.addLayout(tile_row)

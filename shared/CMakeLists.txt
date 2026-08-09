@@ -5,6 +5,7 @@ add_library(media_shared STATIC
     src/protocol.cpp
     src/file_path.cpp
     src/ffmpeg_compat.cpp
+    src/frame_shm.cpp
 )
 
 if(MUSIC_FFMPEG_HWACCEL)

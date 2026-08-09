@@ -21,6 +21,7 @@ class PipelinePhase(str, Enum):
     PROBE = "探测"
     SLICE = "切片分析"
     EXPORT = "导出成片"
+    VERTICAL = "竖屏成片"
     ENHANCE = "超分"
     WATERMARK = "去水印"
     DONE = "完成"
@@ -40,12 +41,20 @@ class PipelineSettings:
     enhance_backend: str = "opencv"  # opencv | realesrgan
     enhance_scale: int = 2
     enhance_strength: int = 65
-    # 0 = 对成片/原片全程超分；>0 仅处理前 N 秒（试跑）
-    enhance_max_sec: float = 0.0
+    # 0 = 全程；默认 8 秒试跑，避免队列一上来就超分整片
+    enhance_max_sec: float = 8.0
     watermark_backend: str = "opencv"
     # none | top_left | top_right | bottom_left | bottom_right
     watermark_corner: str = "top_right"
     output_root: str = ""
+    # 有限并行：切片/导出可重叠；超分+去水印仍串行（1–4）
+    max_parallel: int = 2
+    # 失败重试次数（不含首次）
+    max_retries: int = 1
+    # 队列产物目录体积上限（GB）；≤0 不限制；超限按最旧文件删除
+    max_output_gb: float = 20.0
+    # 一键竖屏成片模板键：douyin_hook / bili_highlight / kuaishou_fast；空=不套模板
+    film_template: str = ""
 
 
 @dataclass

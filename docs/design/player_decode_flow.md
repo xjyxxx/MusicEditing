@@ -1,8 +1,10 @@
 # 首页播放器：解码 / 接口调用链
 
-> 视频：`media_player.exe`（FFmpeg）按帧写出 RGB → Python 上屏  
+> 视频：`media_player.exe`（FFmpeg）解码 RGB → **命名共享内存双缓冲** → Python 上屏（失败回退写盘）  
 > 音频：同文件走 Qt `QMediaPlayer`，不经 C++  
 > 协议：子进程 **stdin 命令 / stdout 一行响应**；日志走 stderr  
+> 预取：PlayerBackend 1 帧槽 + UI 侧 1 帧 lookahead；`FrameStats.from_prefetch`  
+> Seek：`seek_and_frame` 原子 SEEK+首帧，避免预取空窗 / 旧帧闪烁
 
 **相关：** [implementation_flow.md](implementation_flow.md) · [mvvm_and_ui.md](mvvm_and_ui.md) · [流程图/README.md](../流程图/README.md)
 
@@ -11,10 +13,11 @@
 ```
 client/scripts/ui/video_player.py          VideoPlayerWidget
 client/scripts/ui/gl_video_widget.py       GlVideoWidget
-client/scripts/core/player_backend.py      PlayerBackend（IPC）
+client/scripts/core/player_backend.py      PlayerBackend（IPC + SHM + 预取）
 client/scripts/core/qt_audio_output.py     QtAudioOutput
 client/src/player_main.cpp                 media_player 命令循环
 client/src/core/video_player_engine.cpp    VideoPlayerEngine
+shared/src/frame_shm.cpp                   FrameSharedMemory
 ```
 
 ---
@@ -28,7 +31,8 @@ test.mp4
     │     VideoPlayerWidget
     │       → PlayerBackend  ←stdin/stdout→  media_player.exe
     │                                              └─ VideoPlayerEngine (FFmpeg)
-    │       → 读 %TEMP%\me_player_*\frame.rgb
+    │       → 命名共享内存双缓冲 MusicEditing_rgb_*_0/_1（首选）
+    │       → 失败回退 %TEMP%\me_player_*\frame.rgb
     │       → GlVideoWidget.set_rgb_frame()
     │
     └─► 音频通道（OPEN_OK audio=1 时）
@@ -50,12 +54,11 @@ test.mp4
 VideoPlayerWidget.open_file(path)
     └─► _do_open_file(path)                    # 非音频走视频分支
             │
-            ├─► PlayerBackend.set_hwaccel(pref)
-            │       └─► stdin: HWACCEL on|off
-            │       └─► stdout: HWACCEL_OK enabled=0|1
+            ├─► PlayerBackend.set_hwaccel(pref)   # 仅记偏好；进程未起不发 IPC
             │
             ├─► PlayerBackend.open(path)
             │       ├─► _restart()             # QUIT 旧进程 → Popen media_player.exe
+            │       ├─► （若偏好硬解）stdin: HWACCEL on
             │       ├─► stdin: OPEN E:\...\test.mp4
             │       └─► stdout: OPEN_OK duration=… fps=… width=… height=…
             │                     audio=0|1 hw=0|1 hw_name=cpu|d3d11va
@@ -161,16 +164,9 @@ stop()
     └─ …
 
 拖进度条松开 _on_seek_released()
-    ├─ position_sec = slider ratio × duration
-    ├─ PlayerBackend.seek(sec)
-    │       └─ stdin: SEEK <sec>
-    │       └─ VideoPlayerEngine::seek
-    │             ├─ av_rescale_q(sec → stream time_base)
-    │             ├─ av_seek_frame(..., AVSEEK_FLAG_BACKWARD)
-    │             └─ flushCodec() + needKeyFrameAfterSeek
-    │       └─ stdout: SEEK_OK timestamp=…
-    ├─ QtAudioOutput.seek(sec)
-    ├─ _pull_and_show_frame()
+    ├─ 保持 _seeking，后台 ThreadPool：seek_and_frame
+    ├─ 收割首帧 → _show_frame + 预热 lookahead
+    ├─ 抑制软校正约 3.5s
     └─ [拖前在播] play()
 ```
 
@@ -181,11 +177,13 @@ stop()
 ```
 有音频播放 tick:
     audio_sec = QtAudioOutput.position_sec()     # 主时钟
-    [软校正] 开播 4s 后；画面落后≥450ms 或超前≥350ms 连续约 20 次
-           → 仅 backend.seek（不 seek 音轨）；冷却 6s
+    [软校正] 开播 2.5s 后；画面落后≥380ms 或超前≥300ms 连续约 12 次
+           → seek_and_frame（不 seek 音轨）；冷却 3.5s；用户 Seek 后同样冷却
+    [预取] UI 保持 1 帧 lookahead；PlayerBackend 另有 1 帧 SHM 预取槽
+           → FrameStats.from_prefetch=True 时命中预取
     want_idx  = 已显示帧 index + 1（落后太多则跳到 audio_idx 附近）
     next_frame(min_ts = want_idx * frame_interval)
-        → C++ 丢弃过旧帧（skipped）再写 RGB
+        → C++ 写入双缓冲交替槽（slot=0|1），Python 从对应槽读出
     进度条 ≈ audio_sec
 
 无音频:
@@ -193,7 +191,7 @@ stop()
 ```
 
 对齐点：`play` / `pause` / `seek` 两端一起动；跳帧追音频为主。  
-**漂移软校正**仅在画面落后 ≥450ms 或超前 ≥350ms、且开播 4s 后、冷却 6s，且**只 seek 视频不碰音轨**（避免爆音/卡顿）。常态 200~300ms 解码滞后不触发。
+**漂移软校正**仅在画面落后 ≥380ms 或超前 ≥300ms、且开播 2.5s 后、冷却 3.5s，且**只 seek 视频不碰音轨**。常态百毫秒级解码滞后不触发。
 
 **媒体信息（封装层洞察）：** 控制栏「信息」→ `core/media_probe.probe_media`（ffprobe JSON）→ `MediaInfoDialog` 键值表 + 复制摘要；打开文件后标题 Tooltip 也会异步写入一行摘要。
 
@@ -204,9 +202,11 @@ stop()
 | stdin | stdout（成功） | 引擎调用 |
 |-------|----------------|----------|
 | `HWACCEL on\|off` | `HWACCEL_OK enabled=` | `setHwAccelPreferred` |
+| `SHM <name0> <capacity> [name1]` | `SHM_OK name= capacity= dual=0\|1` | 打开 1/2 个命名映射 |
 | `OPEN <path>` | `OPEN_OK duration= fps= width= height= audio= hw= hw_name=` | `open` |
-| `NEXT <rgb> [minTs] [filter]` | `FRAME_OK …` / `FRAME_EOF` | `decodeNextFrameToFile` |
-| `SEEK <sec>` | `SEEK_OK timestamp=` | `seek` |
+| `NEXT shm <minTs> <filter>` | `FRAME_OK … shm=1 slot=0\|1 bytes=` | `decodeNextFrameToBuffer` → 双缓冲槽 |
+| `NEXT <path> <minTs> <filter>` | `FRAME_OK … shm=0 path=` | `decodeNextFrameToFile`（回退） |
+| `SEEK <sec>` | `SEEK_OK timestamp=` | `seek`（Python `seek` / `seek_and_frame`） |
 | `PAUSE` / `RESUME` | `PAUSE_OK` / `RESUME_OK` | `pause` / `resume` |
 | `SCALE w h` | `SCALE_OK width= height=` | `setPlaybackScale` |
 | `FILTER <mode>` | `FILTER_OK mode= device= active=` | `setFrameFilter` |
@@ -215,16 +215,20 @@ stop()
 | `CLOSE` | `CLOSE_OK` | `close` |
 | `QUIT` | `BYE` | 退出进程 |
 
-失败：`ERROR <reason>`。Python 侧封装：`open` / `next_frame` / `seek` / `pause` / `resume` / `shutdown`。
+失败：`ERROR <reason>`。Python 侧封装：`open` / `next_frame` / `seek` / `seek_and_frame` / `pause` / `resume` / `shutdown`。
 
 ---
 
 ## 7. 进程生命周期
 
 ```
-首次 PlayerBackend.open / _ensure_running
+VideoPlayerWidget 构造
+    └─ PlayerBackend() + set_hwaccel(pref)   # 只记偏好，不拉起子进程
+
+首次打开本地视频 → PlayerBackend.open / _ensure_running
     └─ Popen(media_player.exe)  stdin/stdout/stderr PIPE
               cwd = exe 目录（便于找 FFmpeg DLL）
+              再绑定 SHM（双缓冲）并 OPEN
 
 再次 open
     └─ _restart(): QUIT → wait/kill → 新进程再 OPEN
@@ -232,6 +236,8 @@ stop()
 可选 PlayerBackend.shutdown / Widget 销毁
     └─ _restart() 清掉子进程 + 临时目录随进程结束
 ```
+
+> 启动卡顿根因曾是：首页一创建就 `set_hwaccel` → `_send` → 立刻拉起 `media_player` + 分配约 50MB SHM。现已改为「打开文件时才起进程」。
 
 ---
 

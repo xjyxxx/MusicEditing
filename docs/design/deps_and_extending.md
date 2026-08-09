@@ -44,7 +44,7 @@ main.py
     ├── ui/export_options_dialog.py (高光/竖屏/抖音预设 + 封面话题)
     ├── ui/setup_wizard.py         (首次开箱依赖向导)
     ├── ui/media_library_page.py   (本地素材库)
-    ├── ui/profile_page.py         (个人中心：卡密 / GPU / 输出目录 / 向导)
+    ├── ui/profile_page.py         (个人中心：卡密 / GPU / 诊断打包 / 清理临时帧)
     ├── ui/cover_page.py           (封面工厂)
     │   └── core/cover_factory.py  (最清晰帧 + 标题 PNG)
     ├── ui/stego_page.py           (溯源：频域/回声/LSB/EXIF)
@@ -67,8 +67,16 @@ main.py
         ├── core/app_logic.py      (GPU 检测 / 卡密持久化)
         ├── core/network.py        (本地卡密校验)
         ├── core/weather_service.py (IP 定位 + Open-Meteo 天气)
-        ├── core/pipeline_runner.py (批量全流程：切片→超分→去水印)
+        ├── core/pipeline_runner.py (批量全流程：切片→超分→去水印；产物配额)
+        ├── core/diag_pack.py (诊断 zip：player/cli/ORT)
+        ├── core/resource_cleanup.py (临时帧清理 / 输出上限)
         ├── core/scene_detect.py (PySceneDetect 游戏高光切点)
+        ├── core/game_semantic.py (切点+HUD；可选 game_event.onnx)
+        ├── core/film_templates.py (一键竖屏成片模板)
+        ├── core/download_recover.py (下载失败白话与可恢复动作)
+        ├── core/trial_run.py (开箱试跑 15 秒)
+        ├── core/export_naming.py (成片规范命名)
+        ├── core/setup_status.py (开箱依赖检测)
         ├── core/asr_engine.py (Vosk)
         ├── core/media_bridge.py   (ctypes 优先 + media_cli / FFmpeg)
         └── core/media_engine_ctypes.py  (直连 media_engine.dll)
@@ -92,17 +100,25 @@ main.py
 
 1. 在 `client/` 或 `shared/` 新增模块，`target_link_libraries(... music_llama)`
 2. 封装 `llama_model_load` / `llama_decode` 为 C API，经 `media_cli` 暴露给 Python
-3. 演讲链路已接 Vosk + analyze-speech；游戏高光已接 PySceneDetect（feature_flows §5.2），语义级「击杀检测」仍可另接视觉模型
+3. 演讲链路已接 Vosk + analyze-speech；游戏高光已接 PySceneDetect + `game_semantic`（运动/闪光/HUD + 可选 `game_event.onnx`）
 
 构建选项见 [media_engine.md](media_engine.md) §2。
 
 ### 2.3 接入 PyTorch / 视觉模型
 
-游戏「击杀/高光事件」若接视觉模型：可在 `_analyze_game_fallback` 中叠在 PySceneDetect 结果之上；演讲链路已走 ASR。
+游戏「击杀/高光事件」：`game_semantic` 已叠 HUD；有 `models/game_event.onnx` 时走 ORT。可用 `scripts/make_game_event_stub_onnx.py` 生成占位模型。
 
-### 2.4 GPU 加速待办
+### 2.4 GPU 加速
 
-已完成：播放器 D3D11VA、`VideoDecoder`/`iterate --hw`、个人中心开关、ONNX CUDA EP（失败回退 CPU）。
+已完成：播放器 D3D11VA、`VideoDecoder`/`iterate --hw`、个人中心开关、ONNX CUDA EP、llama `n_gpu_layers` 随 `use_gpu`（`MUSIC_LLM_N_GPU_LAYERS`）。
 
-**待做：** llama `GGML_CUDA=ON` + `n_gpu_layers` 随 `use_gpu`（见 [mvvm_and_ui.md](mvvm_and_ui.md)）。
+**构建：** 推荐 `python scripts\setup_llama_gpu.py vulkan`（Vulkan SDK，免 CUDA Toolkit）。有 Toolkit 时可用 `cuda`。无 GPU 后端时仍用 prebuilt CPU。
+
+详见 [media_engine.md](media_engine.md) §2 与 `third_party/llama.cpp.README.md`。
+
+**播放路径优化（已落地）：** 双缓冲 SHM + 预取 + Seek 异步首帧；音画软校正。详见 [player_decode_flow.md](player_decode_flow.md)。
+
+**吞吐（已落地）：** OpenCV 超分 JPEG+多线程；AI 超分 ctypes 常驻 Session + 自动 tile；CUDA EP 缺失时进度/顶栏明示；全流程队列有限并行 + 失败重试 + 磁盘预警 + 分阶段 ETA。
+
+**llama GPU：** 推荐 Vulkan（`setup_llama_gpu.py`），不必下载巨型 CUDA Toolkit。
 

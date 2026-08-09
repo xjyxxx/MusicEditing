@@ -312,19 +312,36 @@ media_cli upscale-frames <model.onnx|-> <输入帧目录> <输出帧目录> [sca
 ### 2.0 目录与构建
 
 ```
-third_party/llama.cpp/          ← junction 指向 PDFSearchEngine 同目录
-third_party/CMakeLists.txt      ← MUSIC_ENABLE_LLAMA 开关 + add_subdirectory
-third_party/llama.cpp.README.md ← 联接/clone 说明
+third_party/llama.cpp/          ← 源码（CUDA / Vulkan / FROM_SOURCE 时用）
+third_party/llama_prebuilt/     ← CPU 预编译（默认）
+third_party/CMakeLists.txt      ← MUSIC_ENABLE_LLAMA / MUSIC_GGML_CUDA / MUSIC_GGML_VULKAN
+scripts/setup_llama_gpu.py      ← 推荐 Vulkan；可选 CUDA
 ```
 
-**CMake 选项（默认仅编核心库）：**
+**CMake 选项：**
 
-| 选项 | 默认值 | 说明 |
-|------|--------|------|
-| `MUSIC_ENABLE_LLAMA` | ON | 是否编译 llama.cpp |
-| `LLAMA_BUILD_TOOLS` | OFF | 不编 CLI/server 工具 |
-| `LLAMA_BUILD_TESTS` | OFF | 不编测试 |
-| `BUILD_SHARED_LIBS` | OFF | 静态库 `llama.lib` |
+| 选项 | 默认 | 说明 |
+|------|------|------|
+| `MUSIC_ENABLE_LLAMA` | ON | 是否启用 llama |
+| `MUSIC_LLAMA_FROM_SOURCE` | OFF | 强制用源码，忽略 prebuilt |
+| `MUSIC_GGML_VULKAN` | OFF | Vulkan GPU（**无需 CUDA Toolkit**，推荐） |
+| `MUSIC_GGML_CUDA` | OFF | CUDA GPU（需 Toolkit，体积大） |
+| `CMAKE_CUDA_ARCHITECTURES` | `75;80;86;89` | 仅 CUDA；4060=89 |
+
+**从 prebuilt(CPU) 切到 GPU（推荐 Vulkan）：**
+
+```powershell
+python scripts\setup_llama_gpu.py install-vulkan   # 若缺 SDK
+# 新开终端或设置:
+$env:VULKAN_SDK="C:\VulkanSDK\<version>"
+python scripts\setup_llama_gpu.py vulkan           # 源码链入 media_cli
+```
+
+CMake 日志应出现 `GGML_VULKAN=ON`。个人中心打开 GPU，`models\` 放置 `.gguf` 后演讲金句可走 GPU 层（`MUSIC_LLM_N_GPU_LAYERS=-1`）。
+
+（CUDA：`setup_llama_gpu.py install-cuda` / `cuda`，需下载完整 Toolkit。）
+
+运行时：`MUSIC_LLM_N_GPU_LAYERS`（`MediaBridge.set_prefer_cuda`：开=-1，关=0）。
 
 **链接示例：**
 
@@ -334,8 +351,8 @@ if(MUSIC_HAS_LLAMA)
 endif()
 ```
 
-**产物：** `build/lib/Release/llama.lib` + ggml 依赖库
+**产物：** 源码模式下由 llama 目标传递依赖（含 ggml-cuda）；prebuilt 为静态 `llama.lib` + ggml-cpu。
 
-**架构：** 与主工程相同（推荐 x64 `build_x64`）；Win32 亦可编（视预编译包而定）。
+**架构：** 推荐 x64 `build_x64`。
 
 ---
