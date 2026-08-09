@@ -7,13 +7,14 @@
 - **智能高光切片**：演讲金句（Vosk/规则）/ 手动切片；**缩略图时间轴**
 - **画质增强**：Real-ESRGAN / OpenCV 超分；**FFmpeg 视频补帧**（快速 blend / 精细 MCI）
 - **一键去水印**：视频快速(OpenCV) / 图片精修(LaMa)；帧批复用
-- **链接下载 / 外挂字幕 / 热评滚动** 等（详见技术文档）
-- **个人中心**：授权管理（预留）
+- **链接下载 / 热评滚动** 等（详见技术文档）
+- **个人中心**：授权管理（本地卡密）
 
 ## 技术文档
 
-- 主文档：[docs/design/implementation_flow.md](docs/design/implementation_flow.md)
-- 索引：[docs/design/README.md](docs/design/README.md)
+- **总索引**：[docs/README.md](docs/README.md)
+- 枢纽（架构 / 状态 / 命令）：[docs/design/implementation_flow.md](docs/design/implementation_flow.md)
+- 业务链路：[docs/design/feature_flows.md](docs/design/feature_flows.md)
 
 ## 环境要求
 
@@ -78,16 +79,17 @@ run_ui_x64.bat
 pip install -r client\scripts\requirements.txt
 ```
 
-### 2.1 下载模型（智能分析必需）
+### 下载模型（智能分析必需）
 
 **Vosk 语音识别**（必需）：
 - 下载 [vosk-model-small-cn-0.22](https://alphacephei.com/vosk/models)
 - 解压到 `models/vosk-model-small-cn-0.22/`
+- 或运行 `scripts\download_vosk_model.bat`
 
 **LLM 语义分析**（可选，留空则用规则打分）：
 - 准备任意 `.gguf` 小模型，在 `client/resources/config/app.conf` 设置 `llm_model_path=`
 
-### 3. 运行与测试
+### 运行与测试
 
 ```bat
 run_ui.bat          rem Win32
@@ -102,15 +104,22 @@ run_test_x64.bat
 
 ```
 MusicEditing/
-├── CMakeLists.txt          # 顶层 CMake
-├── CMakePresets.json       # VS2022 构建预设
-├── build.bat / build_x64.bat   # Win32 / x64 构建
-├── third_party/ffmpeg/         # FFmpeg（x86/ 与 x64/ 分架构）
+├── CMakeLists.txt / CMakePresets.json
+├── build.bat / build_x64.bat / run_ui.bat / run_ui_x64.bat
+├── client/                 # C++ 引擎 + Python UI
+│   ├── src/ include/       # media_engine / media_cli / media_player
+│   └── scripts/            # PySide6：models / viewmodels / ui / core
+├── shared/                 # 公共 C++（日志、FFmpeg 兼容、硬解）
+├── docs/                   # 文档（见 docs/README.md）
+│   └── design/             # 实现枢纽与专文
+├── models/                 # 本地模型（不进 git）
+├── scripts/                # 下载/导入第三方与模型
+└── third_party/            # FFmpeg / OpenCV / ONNX / llama…
 ```
 
 ## 架构说明
 
-采用 **MVVM**；Python（64-bit）经 **子进程** 调用 C++ `media_cli` / `media_player`（及捆绑 ffmpeg），详见 [docs/design/implementation_flow.md](docs/design/implementation_flow.md) §1。
+采用 **MVVM**；Python（64-bit）经 **MediaBridge / PlayerBackend** 调用 C++：`probe`/`thumbnail` 优先 ctypes 直连 `media_engine.dll`，播放用 `media_player` 子进程。详见 [docs/design/implementation_flow.md](docs/design/implementation_flow.md) §1。
 
 | 层 | 技术 | 职责 |
 |---|---|---|
@@ -127,6 +136,6 @@ MusicEditing/
 
 ## 开发说明
 
-- 功能变更请同步更新 `docs/design/implementation_flow.md`（§5 链路、§7 状态）
-- x64 为推荐开发/运行路径；Win32 旧 API 兼容见文档 §4
+- 功能变更请同步更新 `docs/design/` 对应专文与枢纽状态表（见 `.cursor/skills/music-editing-feature-docs/`）
+- x64 为推荐开发/运行路径
 - 播放器细节见 `docs/design/player_decode_flow.md`

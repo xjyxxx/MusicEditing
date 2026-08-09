@@ -4,7 +4,7 @@
 > 音频：同文件走 Qt `QMediaPlayer`，不经 C++  
 > 协议：子进程 **stdin 命令 / stdout 一行响应**；日志走 stderr  
 
-**相关：** [implementation_flow.md](implementation_flow.md) · [../流程图/README.md](../流程图/README.md)
+**相关：** [implementation_flow.md](implementation_flow.md) · [mvvm_and_ui.md](mvvm_and_ui.md) · [流程图/README.md](../流程图/README.md)
 
 **源码入口：**
 

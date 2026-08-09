@@ -6,7 +6,7 @@
 
 | Skill | 路径 | 用途 |
 |-------|------|------|
-| 功能开发 + 文档同步 | `.cursor/skills/music-editing-feature-docs/SKILL.md` | **每次加功能必须同步更新** `docs/design/implementation_flow.md` |
+| 功能开发 + 文档同步 | `.cursor/skills/music-editing-feature-docs/SKILL.md` | **每次加功能必须同步更新** `docs/design/` 对应专文与枢纽状态表 |
 
 ## 使用方式
 
@@ -16,6 +16,11 @@
 
 ## 技术文档
 
-- 实现流程（**功能变更必更新**）：`docs/design/implementation_flow.md`
+- 总索引：`docs/README.md`
+- 枢纽（架构 / 状态 / 命令）：`docs/design/implementation_flow.md`
+- 业务链路：`docs/design/feature_flows.md`
+- MVVM / UI：`docs/design/mvvm_and_ui.md`
+- 媒体引擎 / CLI：`docs/design/media_engine.md`
+- 依赖与扩展：`docs/design/deps_and_extending.md`
+- 播放器解码：`docs/design/player_decode_flow.md`
 - 产品交互（对照用）：`AI本地音视频处理工具-产品交互设计文档（开发落地版）.md`
-- 目录规划：`技术方案.txt`
