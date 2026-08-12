@@ -1,0 +1,642 @@
+"""Facade module coordinating image adjustment executors.
+
+This module provides the main public API for image adjustments, selecting
+the appropriate executor based on available features and gracefully falling
+back when needed.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+import numpy as np
+from PySide6.QtGui import QImage
+
+from ..color_resolver import ColorStats, compute_color_statistics
+from ..curve_resolver import (
+    CurveParams,
+    CurveChannel,
+    CurvePoint,
+    generate_curve_lut,
+    apply_curve_lut_to_image,
+)
+from ..levels_resolver import (
+    DEFAULT_LEVELS_HANDLES,
+    build_levels_lut,
+    apply_levels_lut_to_image,
+)
+from ..selective_color_resolver import (
+    apply_selective_color,
+    is_identity as sc_is_identity,
+)
+from ..definition_resolver import apply_definition as apply_definition_cpu
+from ..sharpen_resolver import apply_sharpen as apply_sharpen_cpu
+from ..denoise_resolver import apply_denoise as apply_denoise_cpu
+from ..vignette_resolver import apply_vignette as apply_vignette_cpu
+from ..wb_resolver import WBParams, apply_wb
+from .fallback_executor import apply_adjustments_fallback, apply_bw_using_qcolor
+from .jit_executor import (
+    apply_adjustments_fast_qimage,
+    apply_color_adjustments_inplace_qimage,
+)
+from .numpy_executor import apply_bw_only
+from .pillow_executor import apply_adjustments_with_lut, build_adjustment_lut
+
+
+def _normalise_bw_param(value: float) -> float:
+    """Return *value* mapped from legacy ``[-1, 1]`` to ``[0, 1]`` when needed."""
+
+    numeric = float(value)
+    if numeric < 0.0 or numeric > 1.0:
+        numeric = (numeric + 1.0) * 0.5
+    if numeric < 0.0:
+        return 0.0
+    if numeric > 1.0:
+        return 1.0
+    return numeric
+
+
+def apply_adjustments(
+    image: QImage,
+    adjustments: Mapping[str, Any],
+    color_stats: ColorStats | None = None,
+) -> QImage:
+    """Return a new :class:`QImage` with *adjustments* applied.
+
+    The function intentionally works on a copy of *image* so that the caller can
+    reuse the original QImage as the immutable source of truth for subsequent
+    recalculations.  Each adjustment operates on normalised channel intensities
+    (``0.0`` - ``1.0``) and relies on simple tone curves so the preview remains
+    responsive without requiring external numeric libraries.
+
+    Parameters
+    ----------
+    image:
+        The base image to transform.  The function accepts any format supported
+        by :class:`QImage` and converts it to ``Format_ARGB32`` before applying
+        the tone adjustments so per-pixel manipulation remains predictable.
+    adjustments:
+        Mapping of adjustment names (for example ``"Exposure"``) to floating
+        point values in the ``[-1.0, 1.0]`` range.
+    color_stats:
+        Optional pre-computed color statistics for white balance. If not
+        provided, will be computed when needed for color adjustments.
+    """
+
+    if image.isNull():
+        return image
+
+    # ``convertToFormat`` already returns a detached copy when the source image
+    # has a different pixel format.  Cloning again would therefore waste memory
+    # for the common case where a conversion is required, but performing a
+    # ``copy()`` first would skip the optimisation entirely.  Converting once and
+    # relying on Qt's copy-on-write semantics keeps the function efficient while
+    # guaranteeing we never mutate the caller's instance in-place.
+    result = image.convertToFormat(QImage.Format.Format_ARGB32)
+
+    # ``convertToFormat`` can return a shallow copy that still references the
+    # original pixel buffer when no conversion was required.  Creating an
+    # explicit deep copy ensures Qt allocates a dedicated, writable buffer so
+    # the fast adjustment path below never attempts to mutate a read-only view.
+    # Without this defensive copy, edits made to previously cached images could
+    # crash when the shared buffer exposes a read-only ``memoryview``.
+    result = result.copy()
+
+    # Extract and normalize all adjustment parameters
+    brilliance = float(adjustments.get("Brilliance", 0.0))
+    exposure = float(adjustments.get("Exposure", 0.0))
+    highlights = float(adjustments.get("Highlights", 0.0))
+    shadows = float(adjustments.get("Shadows", 0.0))
+    brightness = float(adjustments.get("Brightness", 0.0))
+    contrast = float(adjustments.get("Contrast", 0.0))
+    black_point = float(adjustments.get("BlackPoint", 0.0))
+    saturation = float(adjustments.get("Saturation", 0.0))
+    vibrance = float(adjustments.get("Vibrance", 0.0))
+    cast = float(adjustments.get("Cast", 0.0))
+    gain_r = float(adjustments.get("Color_Gain_R", 1.0))
+    gain_g = float(adjustments.get("Color_Gain_G", 1.0))
+    gain_b = float(adjustments.get("Color_Gain_B", 1.0))
+    gain_provided = (
+        "Color_Gain_R" in adjustments
+        or "Color_Gain_G" in adjustments
+        or "Color_Gain_B" in adjustments
+    )
+
+    bw_flag = adjustments.get("BW_Enabled")
+    if bw_flag is None:
+        bw_flag = adjustments.get("BWEnabled")
+    bw_enabled = bool(bw_flag)
+    bw_intensity = _normalise_bw_param(
+        adjustments.get("BW_Intensity", adjustments.get("BWIntensity", 0.5))
+    )
+    bw_neutrals = _normalise_bw_param(
+        adjustments.get("BW_Neutrals", adjustments.get("BWNeutrals", 0.0))
+    )
+    bw_tone = _normalise_bw_param(
+        adjustments.get("BW_Tone", adjustments.get("BWTone", 0.0))
+    )
+    bw_grain = _normalise_bw_param(
+        adjustments.get("BW_Grain", adjustments.get("BWGrain", 0.0))
+    )
+    apply_bw = bw_enabled
+
+    # Extract curve parameters
+    curve_enabled = bool(adjustments.get("Curve_Enabled", False))
+
+    # Extract levels parameters – treat as disabled when handles are identity
+    # to avoid unnecessary full-image processing.
+    _levels_flag = bool(adjustments.get("Levels_Enabled", False))
+    _levels_handles = adjustments.get("Levels_Handles")
+    _levels_identity = (
+        not isinstance(_levels_handles, list)
+        or len(_levels_handles) != 5
+        or all(abs(h - d) < 1e-6 for h, d in zip(_levels_handles, DEFAULT_LEVELS_HANDLES))
+    )
+    levels_enabled = _levels_flag and not _levels_identity
+
+    # Extract Selective Color parameters
+    _sc_flag = bool(adjustments.get("SelectiveColor_Enabled", False))
+    _sc_ranges = adjustments.get("SelectiveColor_Ranges")
+    sc_enabled = _sc_flag and not sc_is_identity(_sc_ranges)
+
+    # Extract Definition parameters
+    _def_flag = bool(adjustments.get("Definition_Enabled", False))
+    _def_value = float(adjustments.get("Definition_Value", 0.0))
+    definition_enabled = _def_flag and abs(_def_value) > 1e-6
+
+    # Extract Denoise parameters
+    _dn_flag = bool(adjustments.get("Denoise_Enabled", False))
+    _dn_amount = float(adjustments.get("Denoise_Amount", 0.0))
+    denoise_enabled = _dn_flag and abs(_dn_amount) > 1e-6
+
+    # Extract Sharpen parameters
+    _sh_flag = bool(adjustments.get("Sharpen_Enabled", False))
+    _sh_intensity = float(adjustments.get("Sharpen_Intensity", 0.0))
+    _sh_edges = float(adjustments.get("Sharpen_Edges", 0.0))
+    _sh_falloff = float(adjustments.get("Sharpen_Falloff", 0.0))
+    sharpen_enabled = _sh_flag and abs(_sh_intensity) > 1e-6
+
+    # Extract Vignette parameters
+    _vig_flag = bool(adjustments.get("Vignette_Enabled", False))
+    _vig_strength = float(adjustments.get("Vignette_Strength", 0.0))
+    _vig_radius = float(adjustments.get("Vignette_Radius", 0.50))
+    _vig_softness = float(adjustments.get("Vignette_Softness", 0.0))
+    vignette_enabled = _vig_flag and abs(_vig_strength) > 1e-6
+
+    # Extract white balance parameters
+    wb_flag = adjustments.get("WB_Enabled")
+    if wb_flag is None:
+        wb_flag = adjustments.get("WBEnabled")
+    wb_enabled = bool(wb_flag)
+    wb_warmth = float(adjustments.get("WB_Warmth", adjustments.get("WBWarmth", 0.0)))
+    wb_temperature = float(adjustments.get("WB_Temperature", adjustments.get("WBTemperature", 0.0)))
+    wb_tint = float(adjustments.get("WB_Tint", adjustments.get("WBTint", 0.0)))
+
+    # Early exit if no adjustments are needed
+    if all(
+        abs(value) < 1e-6
+        for value in (
+            brilliance,
+            exposure,
+            highlights,
+            shadows,
+            brightness,
+            contrast,
+            black_point,
+        )
+    ) and all(abs(value) < 1e-6 for value in (saturation, vibrance)) and cast < 1e-6:
+        if not apply_bw and not curve_enabled and not levels_enabled and not wb_enabled and not sc_enabled and not definition_enabled and not denoise_enabled and not sharpen_enabled and not vignette_enabled:
+            # Nothing to do - return a cheap copy so callers still get a detached
+            # instance they are free to mutate independently.
+            return QImage(result)
+
+    width = result.width()
+    height = result.height()
+
+    # ``exposure`` and ``brightness`` both affect overall luminance.  Treat the
+    # exposure slider as a stronger variant so highlights bloom more quickly.
+    exposure_term = exposure * 1.5
+    brightness_term = brightness * 0.75
+
+    # ``brilliance`` targets mid-tones while preserving highlights and deep
+    # shadows.  Computing the strength once keeps the lookup-table builder
+    # simple and avoids recalculating identical values inside tight loops.
+    brilliance_strength = brilliance * 0.6
+
+    # Pre-compute the contrast factor.  ``contrast`` is expressed as a delta
+    # relative to the neutral slope of 1.0.
+    contrast_factor = 1.0 + contrast
+
+    # Try Pillow/LUT path first for tone adjustments (fastest for large images)
+    lut = build_adjustment_lut(
+        exposure_term,
+        brightness_term,
+        brilliance_strength,
+        highlights,
+        shadows,
+        contrast_factor,
+        black_point,
+    )
+
+    transformed = apply_adjustments_with_lut(result, lut)
+    if transformed is not None:
+        # Pillow path succeeded, now apply color and B&W if needed
+        try:
+            apply_color_adjustments_inplace_qimage(
+                transformed,
+                saturation,
+                vibrance,
+                cast,
+                gain_r,
+                gain_g,
+                gain_b,
+            )
+        except (BufferError, RuntimeError, TypeError):
+            # Color adjustment failed, apply color adjustments using fallback path
+            apply_adjustments_fallback(
+                transformed,
+                transformed.width(),
+                transformed.height(),
+                exposure_term,
+                brightness_term,
+                brilliance_strength,
+                highlights,
+                shadows,
+                contrast_factor,
+                black_point,
+                saturation,
+                vibrance,
+                cast,
+                gain_r,
+                gain_g,
+                gain_b,
+                False,  # Don't apply B&W here; handled below if needed
+                0.0,    # bw_intensity
+                0.0,    # bw_neutrals
+                0.0,    # bw_tone
+                0.0,    # bw_grain
+            )
+
+        # Apply white balance after color/B&W
+        if wb_enabled:
+            wb_params = WBParams(warmth=wb_warmth, temperature=wb_temperature, tint=wb_tint)
+            if not wb_params.is_identity():
+                transformed = apply_wb(transformed, wb_params)
+
+        # Apply curve adjustment after WB
+        if curve_enabled:
+            transformed = _apply_curve_to_qimage(transformed, adjustments)
+
+        # Apply levels adjustment after curve but before B&W (matching GL shader order)
+        if levels_enabled:
+            transformed = _apply_levels_to_qimage(transformed, adjustments)
+
+        # Apply Selective Color after levels, before B&W
+        if sc_enabled:
+            transformed = _apply_selective_color_to_qimage(transformed, adjustments)
+
+        # Apply Definition after selective color, before denoise
+        if definition_enabled:
+            transformed = _apply_definition_to_qimage(transformed, _def_value)
+
+        # Apply Denoise after definition, before sharpen
+        if denoise_enabled:
+            transformed = _apply_denoise_to_qimage(transformed, _dn_amount)
+
+        # Apply Sharpen after denoise, before vignette
+        if sharpen_enabled:
+            transformed = _apply_sharpen_to_qimage(
+                transformed, _sh_intensity, _sh_edges, _sh_falloff
+            )
+
+        # Apply Vignette after sharpen, before B&W
+        if vignette_enabled:
+            transformed = _apply_vignette_to_qimage(
+                transformed, _vig_strength, _vig_radius, _vig_softness
+            )
+
+        if apply_bw:
+            if not apply_bw_only(
+                transformed,
+                bw_intensity,
+                bw_neutrals,
+                bw_tone,
+                bw_grain,
+            ):
+                # NumPy vectorized path failed, use QColor fallback
+                apply_bw_using_qcolor(
+                    transformed,
+                    bw_intensity,
+                    bw_neutrals,
+                    bw_tone,
+                    bw_grain,
+                )
+
+        return transformed
+
+    # Pillow path not available, use JIT or fallback path
+    bytes_per_line = result.bytesPerLine()
+
+    # Compute color statistics if needed
+    if color_stats is not None:
+        gain_r, gain_g, gain_b = color_stats.white_balance_gain
+    elif not gain_provided and (
+        abs(saturation) > 1e-6
+        or abs(vibrance) > 1e-6
+        or cast > 1e-6
+    ):
+        color_stats = compute_color_statistics(result)
+        gain_r, gain_g, gain_b = color_stats.white_balance_gain
+
+    # Try JIT fast path
+    try:
+        apply_adjustments_fast_qimage(
+            result,
+            width,
+            height,
+            bytes_per_line,
+            exposure_term,
+            brightness_term,
+            brilliance_strength,
+            highlights,
+            shadows,
+            contrast_factor,
+            black_point,
+            saturation,
+            vibrance,
+            cast,
+            gain_r,
+            gain_g,
+            gain_b,
+            apply_bw,
+            bw_intensity,
+            bw_neutrals,
+            bw_tone,
+            bw_grain,
+        )
+    except (BufferError, RuntimeError, TypeError):
+        # If the fast path fails we degrade gracefully to the slower, but very
+        # reliable, QColor based implementation.  This keeps the editor usable
+        # on platforms where the Qt binding exposes a read-only buffer or an
+        # unsupported wrapper type.  The performance hit is preferable to a
+        # crash that renders the feature unusable.
+        apply_adjustments_fallback(
+            result,
+            width,
+            height,
+            exposure_term,
+            brightness_term,
+            brilliance_strength,
+            highlights,
+            shadows,
+            contrast_factor,
+            black_point,
+            saturation,
+            vibrance,
+            cast,
+            gain_r,
+            gain_g,
+            gain_b,
+            apply_bw,
+            bw_intensity,
+            bw_neutrals,
+            bw_tone,
+            bw_grain,
+        )
+
+    # Apply white balance after all other processing (JIT/fallback path)
+    if wb_enabled:
+        wb_params = WBParams(warmth=wb_warmth, temperature=wb_temperature, tint=wb_tint)
+        if not wb_params.is_identity():
+            result = apply_wb(result, wb_params)
+
+    # Apply curve adjustment after WB
+    if curve_enabled:
+        result = _apply_curve_to_qimage(result, adjustments)
+
+    # Apply levels adjustment after curve
+    # NOTE: In the JIT/fallback path, B&W is baked into the per-pixel kernel above,
+    # so levels is applied after B&W here. The GL shader and Pillow path apply levels
+    # before B&W for consistency.
+    if levels_enabled:
+        result = _apply_levels_to_qimage(result, adjustments)
+
+    # Apply Selective Color after levels
+    if sc_enabled:
+        result = _apply_selective_color_to_qimage(result, adjustments)
+
+    # Apply Definition after selective color
+    if definition_enabled:
+        result = _apply_definition_to_qimage(result, _def_value)
+
+    # Apply Denoise after definition
+    if denoise_enabled:
+        result = _apply_denoise_to_qimage(result, _dn_amount)
+
+    # Apply Sharpen after denoise
+    if sharpen_enabled:
+        result = _apply_sharpen_to_qimage(
+            result, _sh_intensity, _sh_edges, _sh_falloff
+        )
+
+    # Apply Vignette after sharpen
+    if vignette_enabled:
+        result = _apply_vignette_to_qimage(
+            result, _vig_strength, _vig_radius, _vig_softness
+        )
+
+    return result
+
+
+def _apply_curve_to_qimage(image: QImage, adjustments: Mapping[str, Any]) -> QImage:
+    """Apply curve LUT to a QImage."""
+    # Build CurveParams from adjustment data
+    params = CurveParams(enabled=True)
+
+    for key, attr in [
+        ("Curve_RGB", "rgb"),
+        ("Curve_Red", "red"),
+        ("Curve_Green", "green"),
+        ("Curve_Blue", "blue"),
+    ]:
+        raw = adjustments.get(key)
+        if raw and isinstance(raw, list):
+            # Validate that each point is a 2-element numeric tuple/list before unpacking
+            points: list[CurvePoint] = []
+            for pt in raw:
+                if (
+                    isinstance(pt, (list, tuple))
+                    and len(pt) >= 2
+                    and isinstance(pt[0], (int, float))
+                    and isinstance(pt[1], (int, float))
+                ):
+                    points.append(CurvePoint(x=float(pt[0]), y=float(pt[1])))
+            if points:
+                setattr(params, attr, CurveChannel(points=points))
+
+    # Check if all curves are identity (no adjustment needed)
+    if params.is_identity():
+        return image
+
+    # Generate LUT
+    try:
+        lut = generate_curve_lut(params)
+    except Exception:
+        return image
+
+    # Convert QImage to numpy array
+    img = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    width = img.width()
+    height = img.height()
+    ptr = img.bits()
+    byte_count = img.sizeInBytes()
+    if hasattr(ptr, "setsize"):
+        ptr.setsize(byte_count)
+
+    arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width, 4)).copy()
+
+    # Apply curve LUT
+    arr = apply_curve_lut_to_image(arr, lut)
+
+    # Convert back to QImage
+    result = QImage(arr.data, width, height, arr.strides[0], QImage.Format.Format_RGBA8888).copy()
+    return result.convertToFormat(QImage.Format.Format_ARGB32)
+
+
+def _apply_levels_to_qimage(image: QImage, adjustments: Mapping[str, Any]) -> QImage:
+    """Apply levels LUT to a QImage."""
+    handles = adjustments.get("Levels_Handles")
+    if not isinstance(handles, list) or len(handles) != 5:
+        return image
+
+    # Check if identity
+    if all(abs(h - d) < 1e-6 for h, d in zip(handles, DEFAULT_LEVELS_HANDLES)):
+        return image
+
+    try:
+        lut = build_levels_lut(handles)
+    except Exception:
+        return image
+
+    img = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    width = img.width()
+    height = img.height()
+    ptr = img.bits()
+    byte_count = img.sizeInBytes()
+    if hasattr(ptr, "setsize"):
+        ptr.setsize(byte_count)
+
+    arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width, 4)).copy()
+    arr = apply_levels_lut_to_image(arr, lut)
+
+    result = QImage(arr.data, width, height, arr.strides[0], QImage.Format.Format_RGBA8888).copy()
+    return result.convertToFormat(QImage.Format.Format_ARGB32)
+
+
+def _apply_selective_color_to_qimage(image: QImage, adjustments: Mapping[str, Any]) -> QImage:
+    """Apply Selective Color adjustments to a QImage."""
+    ranges = adjustments.get("SelectiveColor_Ranges")
+    if not isinstance(ranges, list) or len(ranges) != 6:
+        return image
+
+    if sc_is_identity(ranges):
+        return image
+
+    img = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    width = img.width()
+    height = img.height()
+    ptr = img.bits()
+    byte_count = img.sizeInBytes()
+    if hasattr(ptr, "setsize"):
+        ptr.setsize(byte_count)
+
+    arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width, 4)).copy()
+    arr = apply_selective_color(arr, ranges)
+
+    result = QImage(arr.data, width, height, arr.strides[0], QImage.Format.Format_RGBA8888).copy()
+    return result.convertToFormat(QImage.Format.Format_ARGB32)
+
+
+def _apply_definition_to_qimage(image: QImage, strength: float) -> QImage:
+    """Apply definition (clarity) adjustment to a QImage."""
+    if abs(strength) < 1e-6:
+        return image
+
+    img = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    width = img.width()
+    height = img.height()
+    ptr = img.bits()
+    byte_count = img.sizeInBytes()
+    if hasattr(ptr, "setsize"):
+        ptr.setsize(byte_count)
+
+    arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width, 4)).copy()
+    arr = apply_definition_cpu(arr, strength)
+
+    result = QImage(arr.data, width, height, arr.strides[0], QImage.Format.Format_RGBA8888).copy()
+    return result.convertToFormat(QImage.Format.Format_ARGB32)
+
+
+def _apply_denoise_to_qimage(image: QImage, amount: float) -> QImage:
+    """Apply bilateral-filter noise reduction to a QImage."""
+    if abs(amount) < 1e-6:
+        return image
+
+    img = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    width = img.width()
+    height = img.height()
+    ptr = img.bits()
+    byte_count = img.sizeInBytes()
+    if hasattr(ptr, "setsize"):
+        ptr.setsize(byte_count)
+
+    arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width, 4)).copy()
+    arr = apply_denoise_cpu(arr, amount)
+
+    result = QImage(arr.data, width, height, arr.strides[0], QImage.Format.Format_RGBA8888).copy()
+    return result.convertToFormat(QImage.Format.Format_ARGB32)
+
+
+def _apply_sharpen_to_qimage(
+    image: QImage, intensity: float, edges: float, falloff: float
+) -> QImage:
+    """Apply Unsharp Mask sharpening with edge masking to a QImage."""
+    if abs(intensity) < 1e-6:
+        return image
+
+    img = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    width = img.width()
+    height = img.height()
+    ptr = img.bits()
+    byte_count = img.sizeInBytes()
+    if hasattr(ptr, "setsize"):
+        ptr.setsize(byte_count)
+
+    arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width, 4)).copy()
+    arr = apply_sharpen_cpu(arr, intensity, edges, falloff)
+
+    result = QImage(arr.data, width, height, arr.strides[0], QImage.Format.Format_RGBA8888).copy()
+    return result.convertToFormat(QImage.Format.Format_ARGB32)
+
+
+def _apply_vignette_to_qimage(
+    image: QImage, strength: float, radius: float, softness: float
+) -> QImage:
+    """Apply vignette edge-darkening to a QImage."""
+    if abs(strength) < 1e-6:
+        return image
+
+    img = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    width = img.width()
+    height = img.height()
+    ptr = img.bits()
+    byte_count = img.sizeInBytes()
+    if hasattr(ptr, "setsize"):
+        ptr.setsize(byte_count)
+
+    arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width, 4)).copy()
+    arr = apply_vignette_cpu(arr, strength, radius, softness)
+
+    result = QImage(arr.data, width, height, arr.strides[0], QImage.Format.Format_RGBA8888).copy()
+    return result.convertToFormat(QImage.Format.Format_ARGB32)

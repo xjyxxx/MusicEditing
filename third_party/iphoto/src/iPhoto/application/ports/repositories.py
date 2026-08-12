@@ -1,0 +1,279 @@
+"""Repository ports owned by the application layer."""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Iterator
+from contextlib import AbstractContextManager
+from pathlib import Path
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+from ...domain.models.query import CollectionQuery, PageCursor, PageResult, WindowResult
+
+
+@dataclass(frozen=True)
+class LocationWriteJobRecord:
+    job_id: str
+    asset_rel: str
+    asset_path: Path
+    gps: dict[str, float]
+    location: str
+    media_kind: str
+    status: str
+    attempts: int = 0
+    last_error: str | None = None
+
+    @property
+    def is_video(self) -> bool:
+        return self.media_kind == "video"
+
+
+class LocationAssignmentRepositoryPort(Protocol):
+    def assign_location(
+        self,
+        *,
+        asset_rel: str,
+        asset_path: Path,
+        gps: dict[str, float],
+        location: str,
+        is_video: bool,
+        metadata_updates: dict[str, Any],
+    ) -> LocationWriteJobRecord:
+        """Atomically persist local geodata and create a write-back job."""
+
+
+class AssetRepositoryPort(Protocol):
+    """Read and merge rebuildable scan facts for one library."""
+
+    library_root: Path
+    path: Path
+
+    def transaction(
+        self,
+        *,
+        begin_mode: str | None = None,
+    ) -> AbstractContextManager[Any]:
+        """Return a transaction boundary for batched repository operations."""
+
+    def merge_scan_rows(
+        self,
+        rows: Iterable[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Merge scanned facts while preserving durable user state."""
+
+    def append_rows(self, rows: Iterable[dict[str, Any]]) -> None:
+        """Append or replace already-materialized asset rows."""
+
+    def remove_rows(self, rels: Iterable[str]) -> None:
+        """Remove rows identified by library-relative paths."""
+
+    def get_rows_by_rels(self, rels: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """Return existing rows keyed by library-relative path."""
+
+    def read_all(
+        self,
+        sort_by_date: bool = False,
+        filter_hidden: bool = False,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield all asset rows."""
+
+    def read_album_assets(
+        self,
+        album_path: str,
+        include_subalbums: bool = False,
+        sort_by_date: bool = True,
+        filter_hidden: bool = True,
+        filter_params: dict[str, Any] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield asset rows for an album scope."""
+
+    def count(
+        self,
+        filter_hidden: bool = False,
+        filter_params: dict[str, Any] | None = None,
+        album_path: str | None = None,
+        include_subalbums: bool = True,
+    ) -> int:
+        """Return the number of assets matching a query."""
+
+    def get_assets_page(
+        self,
+        cursor_dt: str | None = None,
+        cursor_id: str | None = None,
+        limit: int = 100,
+        album_path: str | None = None,
+        include_subalbums: bool = False,
+        filter_hidden: bool = True,
+        filter_params: dict[str, Any] | None = None,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Return one paginated asset page."""
+
+    def count_collection(self, query: CollectionQuery) -> int:
+        """Return the number of rows matching a collection query."""
+
+    def read_collection_page(
+        self,
+        query: CollectionQuery,
+        cursor: PageCursor | None = None,
+        limit: int = 100,
+    ) -> PageResult:
+        """Return one keyset-paginated collection page."""
+
+    def read_collection_window(
+        self,
+        query: CollectionQuery,
+        first: int,
+        limit: int,
+    ) -> WindowResult:
+        """Return a bounded collection window."""
+
+    def read_gallery_collection_window(
+        self,
+        query: CollectionQuery,
+        first: int,
+        limit: int,
+    ) -> WindowResult:
+        """Return a lightweight collection window for Gallery rendering."""
+
+    def read_thumbnail_hint_window(
+        self,
+        query: CollectionQuery,
+        first: int,
+        limit: int,
+    ) -> WindowResult:
+        """Return only paths and existing full-thumbnail cache keys."""
+
+    def read_thumbnail_backfill_candidates(
+        self,
+        query: CollectionQuery,
+        first: int,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Return stale thumbnail rows matching a collection query."""
+
+    def update_thumbnail_ready(
+        self,
+        rel: str,
+        *,
+        micro_thumbnail: bytes | None = None,
+        thumb_cache_key: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Update thumbnail readiness for one row."""
+
+    def create_scan_job(
+        self,
+        *,
+        job_id: str,
+        root: str,
+        scope: str,
+        status: str = "running",
+        stage: str = "discover",
+    ) -> None:
+        """Create scan job bookkeeping."""
+
+    def update_scan_job_stage(
+        self,
+        job_id: str,
+        *,
+        stage: str | None = None,
+        status: str | None = None,
+        found_count: int | None = None,
+        processed_count: int | None = None,
+        visible_count: int | None = None,
+        failed_count: int | None = None,
+        finished: bool = False,
+    ) -> None:
+        """Update scan job progress."""
+
+    def append_scan_event(
+        self,
+        job_id: str,
+        event_type: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """Append one scan event."""
+
+    def latest_scan_job(
+        self,
+        *,
+        root: str,
+        scope: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the newest scan job matching *root* and optional *scope*."""
+
+    def find_row_by_path(self, query: CollectionQuery, path: Path) -> int | None:
+        """Return a row index for *path* inside *query*."""
+
+    def find_live_partner(self, asset_id: str) -> dict[str, Any] | None:
+        """Return an asset's Live Photo partner row."""
+
+    def apply_live_role_updates(
+        self,
+        updates: Iterable[tuple[str, int, str | None]],
+    ) -> None:
+        """Replace Live Photo role state using library-relative updates."""
+
+    def apply_live_role_updates_for_prefix(
+        self,
+        prefix: str,
+        updates: Iterable[tuple[str, int, str | None]],
+    ) -> None:
+        """Replace Live Photo role state only inside a library-relative prefix."""
+
+
+class AlbumRepositoryPort(Protocol):
+    """Read and write album manifests without exposing legacy shims upstream."""
+
+    def exists(self, root: Path) -> bool:
+        """Return whether *root* is an album root with a manifest."""
+
+    def load_manifest(self, root: Path) -> dict[str, Any]:
+        """Return a normalized manifest for *root*."""
+
+    def save_manifest(self, root: Path, manifest: dict[str, Any]) -> None:
+        """Persist *manifest* for *root*."""
+
+
+class LibraryStateRepositoryPort(Protocol):
+    """Persist durable user choices for one library."""
+
+    def set_favorite_status(self, rel: str, is_favorite: bool) -> None:
+        """Persist favorite state for one asset."""
+
+    def sync_favorites(self, featured_rels: Iterable[str]) -> None:
+        """Synchronize favorite state from a compatibility source."""
+
+    def update_location(self, rel: str, location: str) -> None:
+        """Persist a display location string."""
+
+    def update_asset_geodata(
+        self,
+        rel: str,
+        *,
+        gps: dict[str, float] | None,
+        location: str | None,
+        metadata_updates: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist GPS, location, and metadata overlays for one asset."""
+
+
+class PinnedStateRepositoryPort(Protocol):
+    """Persist pinned sidebar state for all libraries."""
+
+    def load_pinned_items_payload(self) -> dict[str, list[dict[str, object]]]:
+        """Return the raw pinned-items payload keyed by normalized library root."""
+
+    def save_pinned_items_payload(
+        self,
+        payload: dict[str, list[dict[str, object]]],
+    ) -> None:
+        """Persist the raw pinned-items payload."""
+
+
+class AssetFavoriteQueryPort(Protocol):
+    """Read favorite state through a session-owned query surface."""
+
+    def favorite_status_for_path(self, path: Path) -> bool | None:
+        """Return favorite state for *path*, or None when no indexed row exists."""

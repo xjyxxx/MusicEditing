@@ -1,0 +1,286 @@
+"""Service that owns the asynchronous import workflow for the GUI."""
+
+from __future__ import annotations
+
+import shutil
+import uuid
+from pathlib import Path
+from typing import Callable, Iterable, List, Optional, Sequence
+
+from PySide6.QtCore import QObject, Signal, Slot
+
+from ..background_task_manager import BackgroundTaskManager
+from ..ui.tasks.import_worker import ImportSignals, ImportWorker
+from .album_metadata_service import AlbumMetadataService
+from .library_update_service import LibraryUpdateService
+from .session_service_resolver import (
+    bound_asset_lifecycle_service,
+    bound_scan_service,
+)
+
+
+class AssetImportService(QObject):
+    """Coordinate file imports and surface lifecycle events to the UI."""
+
+    importStarted = Signal(Path)
+    importProgress = Signal(Path, int, int)
+    importFinished = Signal(Path, bool, str)
+    errorRaised = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        task_manager: BackgroundTaskManager,
+        current_album_root: Callable[[], Optional[Path]],
+        update_service: Optional[LibraryUpdateService] = None,
+        refresh_callback: Optional[Callable[[Path], None]] = None,
+        metadata_service: AlbumMetadataService,
+        library_manager_getter: Optional[Callable[[], "LibraryRuntimeController | None"]] = None,
+        parent: Optional[QObject] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._task_manager = task_manager
+        self._current_album_root = current_album_root
+        # ``update_service`` became the preferred integration point during the
+        # facade refactor, however the unit tests – and potentially 3rd party
+        # tooling – still rely on the historical ``refresh_callback``.  Allowing
+        # both keeps the public surface backwards compatible while letting the
+        # GUI bind directly to :class:`LibraryUpdateService` when available.
+        if update_service is None and refresh_callback is None:
+            raise ValueError(
+                "AssetImportService requires either an update service or a refresh callback."
+            )
+        self._update_service = update_service
+        self._refresh_callback = refresh_callback
+        self._metadata_service = metadata_service
+        self._library_manager_getter = library_manager_getter
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def import_files(
+        self,
+        sources: Iterable[Path],
+        *,
+        destination: Optional[Path] = None,
+        mark_featured: bool = False,
+    ) -> None:
+        """Normalise *sources* and import them into the selected destination."""
+
+        normalized = self._normalise_sources(sources)
+        if not normalized:
+            target_root = self._resolve_import_destination(destination)
+            if target_root is not None:
+                self.importFinished.emit(target_root, False, "No files were imported.")
+            return
+
+        target_root = self._resolve_import_destination(destination)
+        if target_root is None:
+            return
+
+        signals = ImportSignals()
+        signals.started.connect(self._on_import_started)
+        signals.progress.connect(self._on_import_progress)
+
+        service_root, scan_service, lifecycle_service = self._import_services_for_target(
+            target_root,
+        )
+
+        worker = ImportWorker(
+            normalized,
+            target_root,
+            self._copy_into_album,
+            signals,
+            library_root=service_root,
+            scan_service=scan_service,
+            asset_lifecycle_service=lifecycle_service,
+        )
+        unique_task_id = f"import:{target_root}:{uuid.uuid4().hex}"
+        # The BackgroundTaskManager refuses duplicate task identifiers so we append a
+        # UUID suffix to ensure that repeated imports into the same album can be queued
+        # without tripping the collision guard.
+        self._task_manager.submit_task(
+            task_id=unique_task_id,
+            worker=worker,
+            started=signals.started,
+            progress=signals.progress,
+            finished=signals.finished,
+            error=signals.error,
+            pause_watcher=True,
+            on_finished=lambda root, imported, rescan_ok: self._handle_import_finished(
+                root,
+                imported,
+                rescan_ok,
+                mark_featured,
+            ),
+            on_error=self._handle_worker_error,
+            result_payload=lambda root, imported, rescan_ok: imported,
+        )
+
+    # ------------------------------------------------------------------
+    # Helpers used by the worker lifecycle
+    # ------------------------------------------------------------------
+    def _normalise_sources(self, sources: Iterable[Path]) -> List[Path]:
+        """Return a deduplicated list of input files suitable for importing."""
+
+        normalized: List[Path] = []
+        seen: set[Path] = set()
+        for candidate in sources:
+            try:
+                expanded = Path(candidate).expanduser()
+            except TypeError:
+                continue
+            try:
+                resolved = expanded.resolve()
+            except OSError:
+                resolved = expanded
+            if resolved in seen:
+                continue
+            if not resolved.exists() or not resolved.is_file():
+                continue
+            seen.add(resolved)
+            normalized.append(resolved)
+        return normalized
+
+    def _resolve_import_destination(self, destination: Optional[Path]) -> Optional[Path]:
+        """Return the absolute album root that should receive imported files."""
+
+        if destination is not None:
+            try:
+                target = Path(destination).expanduser().resolve()
+            except OSError as exc:
+                self.errorRaised.emit(f"Import destination is not accessible: {exc}")
+                return None
+        else:
+            target = self._current_album_root()
+            if target is None:
+                self.errorRaised.emit("No album is currently open.")
+                return None
+
+        if not target.exists() or not target.is_dir():
+            self.errorRaised.emit(f"Import destination is not a directory: {target}")
+            return None
+        return target
+
+    def _import_services_for_target(self, target_root: Path):
+        manager = (
+            self._library_manager_getter()
+            if self._library_manager_getter is not None
+            else None
+        )
+        library_root: Optional[Path] = manager.root() if manager is not None else None
+        if (
+            manager is not None
+            and library_root is not None
+            and self._path_is_descendant(target_root, library_root)
+        ):
+            scan_service = bound_scan_service(manager, library_root=library_root)
+            lifecycle_service = bound_asset_lifecycle_service(
+                manager,
+                library_root=library_root,
+            )
+            if scan_service is not None and lifecycle_service is not None:
+                return library_root, scan_service, lifecycle_service
+
+        raise RuntimeError(
+            "Active library session is unavailable; imports require a bound "
+            "LibrarySession target."
+        )
+
+    def _copy_into_album(self, source: Path, destination: Path) -> Path:
+        """Copy *source* into *destination* using collision-safe filenames."""
+
+        base_name = source.name
+        target = destination / base_name
+        stem = target.stem
+        suffix = target.suffix
+        counter = 1
+        while target.exists():
+            target = destination / f"{stem} ({counter}){suffix}"
+            counter += 1
+        destination.mkdir(parents=True, exist_ok=True)
+        return Path(shutil.copy2(source, target)).resolve()
+
+    def _handle_import_finished(
+        self,
+        root: Path,
+        imported: Sequence[Path],
+        rescan_succeeded: bool,
+        mark_featured: bool,
+    ) -> None:
+        """Finalise the import workflow once the worker reports completion."""
+
+        imported_paths = [Path(path) for path in imported]
+        success = bool(imported_paths) and rescan_succeeded
+
+        if mark_featured and imported_paths:
+            self._metadata_service.ensure_featured_entries(root, imported_paths)
+
+        if rescan_succeeded and imported_paths:
+            if self._update_service is not None:
+                # When the dedicated library update service is available we let
+                # it broadcast the refresh so that all observers receive
+                # consistent indexing and reload notifications.
+                self._update_service.announce_album_refresh(root)
+            elif self._refresh_callback is not None:
+                # Older call sites still inject a plain callback; honour it to
+                # keep the service usable in isolation and inside the existing
+                # unit tests.
+                self._refresh_callback(root)
+
+        if imported_paths:
+            label = "file" if len(imported_paths) == 1 else "files"
+            if rescan_succeeded:
+                message = f"Imported {len(imported_paths)} {label}."
+            else:
+                message = (
+                    f"Imported {len(imported_paths)} {label}, but refreshing the album failed."
+                )
+        else:
+            message = "No files were imported."
+
+        self.importFinished.emit(root, success, message)
+
+    @Slot(str)
+    def _handle_worker_error(self, message: str) -> None:
+        """Forward worker error messages through the public signal safely.
+
+        Nuitka disallows connecting Qt signals directly to
+        :py:meth:`Signal.emit`, so we surface a dedicated slot that performs the
+        forwarding.  The slot keeps the runtime behaviour unchanged while
+        ensuring that the compiled binary passes the connection validation
+        checks.
+        """
+
+        self.errorRaised.emit(message)
+
+    @Slot(Path)
+    def _on_import_started(self, root: Path) -> None:
+        """Emit :attr:`importStarted` while satisfying Nuitka's slot requirements."""
+
+        self.importStarted.emit(root)
+
+    @Slot(Path, int, int)
+    def _on_import_progress(self, root: Path, current: int, total: int) -> None:
+        """Emit :attr:`importProgress` for worker updates via a dedicated slot."""
+
+        self.importProgress.emit(root, current, total)
+
+    @staticmethod
+    def _path_is_descendant(candidate: Path, ancestor: Path) -> bool:
+        try:
+            candidate_norm = Path(candidate).resolve()
+            ancestor_norm = Path(ancestor).resolve()
+        except OSError:
+            candidate_norm = Path(candidate)
+            ancestor_norm = Path(ancestor)
+        if candidate_norm == ancestor_norm:
+            return True
+        try:
+            candidate_norm.relative_to(ancestor_norm)
+        except ValueError:
+            return False
+        return True
+
+
+__all__ = ["AssetImportService"]

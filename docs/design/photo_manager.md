@@ -1,7 +1,42 @@
 # 本地照片管理器架构与非破坏编辑方案
 
-> 状态：核心闭环已实现；本文是照片管理功能的设计真源。  
-> 相关：[MVVM 与 UI](mvvm_and_ui.md) · [媒体引擎](media_engine.md) · [依赖与扩展](deps_and_extending.md)
+> 状态：**主路径已嵌入上游 iPhotron（vendor）**；经典 `PhotoLibraryPage` 保留为降级。  
+> 相关：[MVVM 与 UI](mvvm_and_ui.md) · [媒体引擎](media_engine.md) · [依赖与扩展](deps_and_extending.md) · [业务链路 §5.24](feature_flows.md) · [流程图总览](../流程图/README.md) · [third_party/iphoto/README.md](../../third_party/iphoto/README.md)
+
+## 0. 总览图（速览）
+
+```mermaid
+flowchart LR
+    Menu["工作流菜单\n照片图库"]
+    Host["IPhotoHostPage"]
+    Vendor["third_party/iphoto\niPhoto MainWindow"]
+    Legacy["PhotoLibraryPage\n经典降级"]
+    Player["VideoPlayerWidget\n本仓播放器"]
+    Side["*.ipo / *.musicediting.photo.json"]
+
+    Menu --> Host
+    Host -->|默认| Vendor
+    Host -->|导入/启动失败| Legacy
+    Host -->|"用本应用播放"| Player
+    Vendor --> Side
+    Legacy --> Side
+```
+
+更完整的扫描时序与双渲染路径见 [流程图/README.md §2](../流程图/README.md)。
+
+## 0.1 与上游 iPhotron 的关系
+
+| 项 | 说明 |
+|----|------|
+| 源码位置 | `third_party/iphoto/src/iPhoto`（MIT，上游 [iPhotron](https://github.com/OliverZhaohaibin/iPhotron-LocalPhotoAlbumManager)） |
+| 注入 | `core/iphoto_bootstrap.py` 把 vendor `src` 加入 `sys.path`，并为 Py3.10 补 `enum.StrEnum` |
+| UI 宿主 | `ui/iphoto_host_page.py`：嵌入 `MainWindow`（失败则 Tool 子窗口 / 经典图库） |
+| 地图 | `third_party/iphoto/src/maps` 仅 Python；font / OBF 扩展见 `maps/ASSETS.md` |
+| **播放器边界** | **不修改** `VideoPlayerWidget` / `media_player.exe`。详情页 Live 可用 iPhoto 自带 `VideoArea`；需要进本应用工作流时用宿主栏「用本应用播放 / 图片增强 / 去水印」回调 |
+| 依赖 | 核心：`requirements.txt`；完整图库：`requirements-iphoto.txt`（勿塞进每次 `run_ui` 的默认 pip） |
+| 启动 | 默认**嵌入**「照片图库」页；大图用 `SoftImageViewer`（`MUSIC_IPHOTO_SOFT_VIEWER=1`）避免 QRhi 空白；`MUSIC_IPHOTO_TOPLEVEL=1` 可改独立窗口；方向键切图；经典/iPhotron 可互切 |
+
+经典路径（`PhotoLibraryPage` + `services/photo_library_service.py` + `core/photo_*`）仍保留：Folder-native、SQLite、简化 sidecar v2、GL/NumPy 编辑对话框。
 
 ## 1. 目标与边界
 
@@ -116,6 +151,21 @@ w_i = exp(-0.5 * ((x_i-focus)/sigma)^2) / Σw
 
 ### 6.3 双渲染路径与黑屏回退
 
+```mermaid
+flowchart TB
+    Prep["先准备软件画面"]
+    TryGL["尝试 OpenGL Shader"]
+    Soft["NumPy/OpenCV 软件预览"]
+    OK["renderReady → 切 GPU 页"]
+    Fail["renderFailed 或 900ms 超时"]
+
+    Prep --> TryGL
+    TryGL -->|成功| OK
+    TryGL -->|失败| Fail
+    Fail --> Soft
+    Prep --> Soft
+```
+
 ```text
 QImage
  ├─ OpenGL 3.3 Shader：曝光/对比度/饱和度/色温实时预览
@@ -161,16 +211,19 @@ GPS 默认只在本地索引。只有用户点击“在地图中查看”时才�
 
 ## 10. 当前状态与后续扩展
 
-已实现：Folder-native、SQLite 迁移/upsert、ExifTool/GPS、视频缩略图、智能相册、Live Photo 匹配、QThreadPool、Services、自适应网格、v2 sidecar、Gaussian 大师滑块、OpenGL 色彩预览、NumPy 回退、透视/旋转安全 AABB。
+已实现：
 
-后续扩展按以下顺序：
+- **主路径**：vendor 嵌入 iPhotron（完整图库网格 / 胶片条 / 详情 / 编辑侧栏 / Live 配对 / HEIC 依赖路径 / 回收站等上游能力，随上游包演进）
+- **宿主桥**：`IPhotoHostPage` + 本仓播放/增强/去水印回调；「经典图库」一键降级
+- **经典路径**：Folder-native、SQLite、ExifTool/GPS、智能相册、Live 匹配、v2 sidecar、Gaussian 大师滑块、OpenGL/NumPy、透视安全 AABB
 
-1. 用户自定义智能相册规则与最近删除。
-2. Live Photo 在沉浸式预览中按压播放、胶片条导航。
-3. 将 homography 作为 OpenGL uniform，实现透视 GPU 实时预览；仍使用同一安全 AABB。
-4. 编辑后缩略图缓存键加入 sidecar mtime；导出器消费同一 recipe。
-5. 独立离线地图模块：PBF 解析、Tile LRU 缓存、聚类和 MapLibre 样式。
-6. RAW/HEIF 能力探测与色彩管理（ICC/线性工作空间）。
+后续扩展：
+
+1. 宿主栏稳定暴露当前选中路径（已接 `MainWindow.current_selection` / detail VM）；可选把「发送到首页播放」挂到 iPhoto 菜单。
+2. 同步安装可选依赖（`pillow-heif`、`mapbox-vector-tile`、`rawpy` 等）写入便携包清单。
+3. 按需补齐 `maps/font` 与 OBF 扩展，启用离线地图（见 `ASSETS.md`）。
+4. 经典路径：自定义智能相册、导出器消费 sidecar、透视 GPU uniform（仅在不走 iPhoto 编辑时仍有价值）。
+5. 记录 vendor 对应上游 tag/commit，建立更新脚本。
 
 ## 11. 验证清单
 

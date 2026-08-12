@@ -67,7 +67,7 @@
 | 封面工厂 | `CoverPage` | 趣味 | 最清晰帧 + 标题 PNG（[feature_flows](feature_flows.md) §5.14） |
 | 音频趣味 | `AudioFunPage` | 趣味 | 整轨趣味 + 梗音叠加/倍数（[feature_flows](feature_flows.md) §5.15） |
 | 个人中心 | `ProfilePage` | 帮助 | 卡密/联网激活、试用配额、购买页、GPU、输出目录、诊断 |
-| 照片图库 | `PhotoLibraryPage` + `PhotoEditDialog` | 工作流 | Folder-native 索引、智能相册、Live Photo、非破坏编辑；见 [photo_manager.md](photo_manager.md) |
+| 照片图库 | `IPhotoHostPage`（iPhotron）/ 降级 `PhotoLibraryPage` | 工作流 | vendor 嵌入完整图库编辑；播放回调本仓播放器；见 [photo_manager.md](photo_manager.md) |
 
 播放器组件：`client/scripts/ui/video_player.py`（`GlVideoWidget` OpenGL + `PlayerBackend` → `media_player.exe`）
 

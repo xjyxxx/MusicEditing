@@ -111,6 +111,7 @@ run_ui_x64.bat
 | 核心 → 去水印 | 去水印 | [mvvm_and_ui.md](design/mvvm_and_ui.md)；批量与角标见 [feature_flows.md](design/feature_flows.md) §5.18；队列内去水印见 §5.9.1 |
 | 工作流 → 全流程队列 | 全流程队列 | §5.9 / §5.9.1 |
 | 工作流 → 本地素材库 | 本地素材库 | §5.19 |
+| 工作流 → 照片图库 | 照片图库 | §5.24 · [photo_manager.md](design/photo_manager.md) · [流程图](流程图/README.md) |
 | 工作流 → 下载与热评 | 下载与热评 | §5.6 · §5.2.1 |
 | 工作流 → BGM 混音 | BGM 混音 | §5.16 |
 | 趣味 → 热评弹幕 | 同「下载与热评」页（聚焦热评子 Tab） | §5.2.1 |

@@ -1,0 +1,656 @@
+"""Detail page showing the focused asset with related controls."""
+
+from __future__ import annotations
+
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QAction, QActionGroup, QColor, QFont
+from PySide6.QtWidgets import (
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QSlider,
+    QStackedWidget,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ....gui.i18n import tr
+from ..icon import load_icon
+from ..palette import SIDEBAR_TEXT_COLOR, viewer_surface_color
+from .edit_sidebar import EditSidebar
+from .edit_topbar import SegmentedTopBar
+from .face_name_overlay import FaceNameOverlayWidget
+from .filmstrip_view import FilmstripView
+from .gl_image_viewer import GLImageViewer
+from .live_badge import LiveBadge
+from .main_window_metrics import (
+    EDIT_DONE_BUTTON_BACKGROUND,
+    EDIT_DONE_BUTTON_BACKGROUND_DISABLED,
+    EDIT_DONE_BUTTON_BACKGROUND_HOVER,
+    EDIT_DONE_BUTTON_BACKGROUND_PRESSED,
+    EDIT_DONE_BUTTON_TEXT_COLOR,
+    EDIT_DONE_BUTTON_TEXT_DISABLED,
+    EDIT_HEADER_BUTTON_HEIGHT,
+    HEADER_BUTTON_SIZE,
+    HEADER_ICON_GLYPH_SIZE,
+)
+from .video_area import VideoArea
+from .video_trim_bar import VideoTrimBar
+
+
+class DetailPageWidget(QWidget):
+    """Composite widget that mirrors the behaviour of the original detail page."""
+
+    def __init__(
+        self,
+        main_window: QWidget,
+        parent: QWidget | None = None,
+        *,
+        image_viewer: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("detailPage")
+
+        # Block the WA_TranslucentBackground cascade from the main window so
+        # this page always has an opaque backing in the view stack.
+        self.setAutoFillBackground(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+
+        # Initialised in ``_build_player_area()``; set here so that
+        # ``hide_rhi_init_cover()`` and ``resizeEvent`` always find the attr.
+        self._rhi_init_cover: QWidget | None = None
+
+        # Edit chrome -------------------------------------------------------
+        self.edit_mode_group = QActionGroup(main_window)
+        self.edit_mode_group.setExclusive(True)
+
+        self.edit_adjust_action = QAction(main_window)
+        self.edit_adjust_action.setCheckable(True)
+        self.edit_adjust_action.setChecked(True)
+        self.edit_mode_group.addAction(self.edit_adjust_action)
+
+        self.edit_crop_action = QAction(main_window)
+        self.edit_crop_action.setCheckable(True)
+        self.edit_mode_group.addAction(self.edit_crop_action)
+
+        self.edit_compare_button = QToolButton(self)
+        self.edit_reset_button = QPushButton(self)
+        self.edit_done_button = QPushButton(self)
+        self.edit_rotate_left_button = QToolButton(self)
+        self.edit_zoom_host = QWidget(self)
+        self.edit_zoom_host_layout = QHBoxLayout(self.edit_zoom_host)
+        self.edit_zoom_host_layout.setContentsMargins(0, 0, 0, 0)
+        self.edit_zoom_host_layout.setSpacing(4)
+        self.edit_sidebar = EditSidebar()
+        self.edit_sidebar.setObjectName("editSidebar")
+
+        # Header widgets -----------------------------------------------------
+        self.back_button = QToolButton(self)
+        self.info_button = QToolButton(self)
+        self.share_button = QToolButton(self)
+        self.favorite_button = QToolButton(self)
+        self.favorite_button.setEnabled(False)
+        self.rotate_left_button = QToolButton(self)
+        self.edit_button = QPushButton(tr("DetailPage", "Edit"), self)
+        self.edit_button.setEnabled(False)
+
+        self.zoom_widget = QWidget(self)
+        self.zoom_slider = QSlider(Qt.Orientation.Horizontal, self.zoom_widget)
+        self.zoom_in_button = QToolButton(self.zoom_widget)
+        self.zoom_out_button = QToolButton(self.zoom_widget)
+
+        self.location_label = QLabel(self)
+        self.timestamp_label = QLabel(self)
+
+        # Viewer widgets -----------------------------------------------------
+        self.player_stack = QStackedWidget(self)
+        self._placeholder_default_text = self.default_placeholder_text()
+        self.player_placeholder = QLabel(self._placeholder_default_text, self.player_stack)
+        self.image_viewer = image_viewer or GLImageViewer()
+        # SoftImageViewer / GLImageViewer 均可；统一按 QWidget 处理父子关系
+        if self.image_viewer.parent() not in (None, self.player_stack):
+            self.image_viewer.setParent(None)
+        self.video_area = VideoArea()
+        self.player_bar = self.video_area.player_bar
+        self.video_trim_bar = VideoTrimBar()
+        self.video_trim_bar.hide()
+        self.face_name_overlay = FaceNameOverlayWidget()
+
+        self.filmstrip_view = FilmstripView()
+
+        self.live_badge = LiveBadge(main_window)
+        self.live_badge.hide()
+        self.badge_host: QWidget | None = None
+
+        # References controllers rely on when shuffling widgets.
+        self.detail_actions_layout: QHBoxLayout | None = None
+        self.detail_info_button_index = -1
+        self.detail_favorite_button_index = -1
+        self.detail_header_layout: QHBoxLayout | None = None
+        self.detail_zoom_widget_index = -1
+        self.detail_header: QWidget | None = None
+        self.detail_chrome_container: QWidget | None = None
+        self.detail_header_separator: QFrame | None = None
+        self.player_container: QWidget | None = None
+        self.player_column: QWidget | None = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self._build_header(main_window, layout)
+        self._build_player_area()
+        self._build_edit_container(main_window, layout)
+        layout.addWidget(self.filmstrip_view)
+        self.retranslate_ui()
+
+    @classmethod
+    def default_placeholder_text(cls) -> str:
+        return tr("DetailPage", "Select a photo or video to preview.")
+
+    def retranslate_ui(self) -> None:
+        self.back_button.setToolTip(tr("DetailPage", "Return to grid view"))
+        self.zoom_out_button.setToolTip(tr("DetailPage", "Zoom Out"))
+        self.zoom_slider.setToolTip(tr("DetailPage", "Zoom"))
+        self.zoom_in_button.setToolTip(tr("DetailPage", "Zoom In"))
+        self.info_button.setToolTip(tr("DetailPage", "Info"))
+        self.share_button.setToolTip(tr("DetailPage", "Share"))
+        self.favorite_button.setToolTip(tr("DetailPage", "Add to Favorites"))
+        self.rotate_left_button.setToolTip(tr("DetailPage", "Rotate Left"))
+        self.edit_button.setText(tr("DetailPage", "Edit"))
+        edit_adjust_action = getattr(self, "edit_adjust_action", None)
+        edit_crop_action = getattr(self, "edit_crop_action", None)
+        edit_mode_control = getattr(self, "edit_mode_control", None)
+        if edit_adjust_action is not None and edit_crop_action is not None:
+            edit_adjust_action.setText(tr("DetailPage", "Adjust"))
+            edit_crop_action.setText(tr("DetailPage", "Crop"))
+        if (
+            edit_mode_control is not None
+            and edit_adjust_action is not None
+            and edit_crop_action is not None
+        ):
+            edit_mode_control.setItems(
+                (
+                    edit_adjust_action.text(),
+                    edit_crop_action.text(),
+                )
+            )
+        edit_compare_button = getattr(self, "edit_compare_button", None)
+        if edit_compare_button is not None:
+            edit_compare_button.setToolTip(
+                tr("DetailPage", "Press and hold to preview the unedited photo")
+            )
+        edit_reset_button = getattr(self, "edit_reset_button", None)
+        if edit_reset_button is not None:
+            edit_reset_button.setText(tr("DetailPage", "Revert to Original"))
+            edit_reset_button.setToolTip(
+                tr("DetailPage", "Restore every adjustment to its original value")
+            )
+        edit_done_button = getattr(self, "edit_done_button", None)
+        if edit_done_button is not None:
+            edit_done_button.setText(tr("DetailPage", "Done"))
+        self.edit_rotate_left_button.setToolTip(tr("DetailPage", "Rotate counter-clockwise"))
+        default_placeholder_text = self.default_placeholder_text()
+        if (
+            self.player_stack.currentWidget() is self.player_placeholder
+            and self.player_placeholder.text() == self._placeholder_default_text
+        ):
+            self.player_placeholder.setText(default_placeholder_text)
+        self._placeholder_default_text = default_placeholder_text
+        self.player_bar.retranslate_ui()
+        for child_name in ("video_trim_bar", "edit_sidebar", "face_name_overlay"):
+            child = getattr(self, child_name, None)
+            method = getattr(child, "retranslate_ui", None)
+            if callable(method):
+                method()
+
+    def _build_header(self, main_window: QWidget, parent_layout: QVBoxLayout) -> None:
+        """Create the header row containing navigation and metadata controls."""
+
+        header = QWidget(self)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(12, 0, 12, 0)
+        header_layout.setSpacing(8)
+
+        self._configure_header_button(
+            self.back_button,
+            "chevron.left.svg",
+            "Return to grid view",
+        )
+        header_layout.addWidget(self.back_button)
+
+        info_container = QWidget(header)
+        info_layout = QVBoxLayout(info_container)
+        info_layout.setContentsMargins(0, 0, 0, 0)
+        info_layout.setSpacing(0)
+        info_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        base_font = main_window.font()
+        location_font = QFont(base_font)
+        if location_font.pointSize() > 0:
+            location_font.setPointSize(location_font.pointSize() + 2)
+        else:
+            location_font.setPointSize(14)
+        location_font.setBold(True)
+
+        timestamp_font = QFont(base_font)
+        if timestamp_font.pointSize() > 0:
+            timestamp_font.setPointSize(max(timestamp_font.pointSize() + 1, 1))
+        else:
+            timestamp_font.setPointSize(12)
+        timestamp_font.setBold(False)
+
+        self.location_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.location_label.setFont(location_font)
+        self.location_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.location_label.setMinimumWidth(0)
+        self.location_label.setVisible(False)
+
+        self.timestamp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.timestamp_label.setFont(timestamp_font)
+        self.timestamp_label.setVisible(False)
+
+        info_layout.addWidget(self.location_label)
+        info_layout.addWidget(self.timestamp_label)
+
+        zoom_layout = QHBoxLayout(self.zoom_widget)
+        zoom_layout.setContentsMargins(0, 0, 0, 0)
+        zoom_layout.setSpacing(4)
+
+        small_button_size = QSize(
+            int(HEADER_BUTTON_SIZE.width() / 2),
+            int(HEADER_BUTTON_SIZE.height() / 2),
+        )
+        self._configure_header_button(self.zoom_out_button, "minus.svg", "Zoom Out")
+        self.zoom_out_button.setFixedSize(small_button_size)
+        zoom_layout.addWidget(self.zoom_out_button)
+
+        self.zoom_slider.setRange(10, 400)
+        self.zoom_slider.setSingleStep(5)
+        self.zoom_slider.setPageStep(25)
+        self.zoom_slider.setValue(100)
+        self.zoom_slider.setFixedWidth(90)
+        zoom_layout.addWidget(self.zoom_slider)
+
+        self._configure_header_button(self.zoom_in_button, "plus.svg", "Zoom In")
+        self.zoom_in_button.setFixedSize(small_button_size)
+        zoom_layout.addWidget(self.zoom_in_button)
+        zoom_width = (
+            small_button_size.width() * 2
+            + self.zoom_slider.width()
+            + zoom_layout.spacing() * 2
+        )
+        self.zoom_widget.setMinimumWidth(zoom_width)
+        self.zoom_widget.setSizePolicy(
+            QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Fixed,
+        )
+
+        actions_container = QWidget(header)
+        actions_layout = QHBoxLayout(actions_container)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.setSpacing(8)
+
+        for button, icon_name, tooltip in (
+            (self.info_button, "info.circle.svg", "Info"),
+            (self.share_button, "square.and.arrow.up.svg", "Share"),
+            (self.favorite_button, "suit.heart.svg", "Add to Favorites"),
+        ):
+            self._configure_header_button(button, icon_name, tooltip)
+            actions_layout.addWidget(button)
+
+        self.rotate_left_button.setIcon(load_icon("rotate.left.svg", color=(0, 0, 0)))
+        self.rotate_left_button.setIconSize(HEADER_ICON_GLYPH_SIZE)
+        self.rotate_left_button.setFixedSize(HEADER_BUTTON_SIZE)
+        self.rotate_left_button.setAutoRaise(True)
+        actions_layout.addWidget(self.rotate_left_button)
+
+        self.edit_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.edit_button.setFixedHeight(30)
+
+        bg_hex = viewer_surface_color(self)
+        border_c = QColor(SIDEBAR_TEXT_COLOR)
+        border_c.setAlpha(30)
+        border_hex = border_c.name(QColor.NameFormat.HexArgb)
+        text_hex = "#000000"
+
+        # Calculate hover/pressed states based on background
+        bg_color = QColor(bg_hex)
+        hover_hex = bg_color.darker(105).name(QColor.NameFormat.HexArgb)
+        pressed_hex = bg_color.darker(110).name(QColor.NameFormat.HexArgb)
+        disabled_text = QColor(0, 0, 0, 90).name(QColor.NameFormat.HexArgb)  # Approximate disabled text
+
+        self.edit_button.setStyleSheet(
+            "QPushButton {"
+            f"  background-color: {bg_hex};"
+            f"  border: 1px solid {border_hex};"
+            "  border-radius: 8px;"
+            f"  color: {text_hex};"
+            "  font-weight: 600;"
+            "  padding-left: 20px;"
+            "  padding-right: 20px;"
+            "}"
+            f"QPushButton:hover {{ background-color: {hover_hex}; }}"
+            f"QPushButton:pressed {{ background-color: {pressed_hex}; }}"
+            f"QPushButton:disabled {{ color: {disabled_text}; border-color: {border_hex}; }}"
+        )
+        actions_layout.addWidget(self.edit_button)
+
+        self.detail_actions_layout = actions_layout
+        self.detail_info_button_index = actions_layout.indexOf(self.info_button)
+        self.detail_favorite_button_index = actions_layout.indexOf(self.favorite_button)
+
+        header_layout.addWidget(self.zoom_widget)
+        self.zoom_widget.hide()
+        header_layout.addWidget(info_container, 1)
+        header_layout.addWidget(actions_container)
+        self.detail_header_layout = header_layout
+        self.detail_zoom_widget_index = header_layout.indexOf(self.zoom_widget)
+
+        detail_chrome_container = QWidget(self)
+        detail_chrome_layout = QVBoxLayout(detail_chrome_container)
+        detail_chrome_layout.setContentsMargins(0, 0, 0, 0)
+        detail_chrome_layout.setSpacing(6)
+        detail_chrome_layout.addWidget(header)
+        self.detail_header = header
+
+        header_separator = QFrame(detail_chrome_container)
+        header_separator.setObjectName("detailHeaderSeparator")
+        header_separator.setFrameShape(QFrame.Shape.HLine)
+        header_separator.setFrameShadow(QFrame.Shadow.Plain)
+        header_separator.setFixedHeight(2)
+        base_surface = viewer_surface_color(self)
+        separator_tint = QColor(base_surface).darker(108)
+        header_separator.setStyleSheet(
+            "QFrame#detailHeaderSeparator {"
+            f"  background-color: {separator_tint.name()};"
+            "  border: none;"
+            "}"
+        )
+        separator_shadow = QGraphicsDropShadowEffect(header_separator)
+        separator_shadow.setBlurRadius(14)
+        separator_shadow.setColor(QColor(0, 0, 0, 45))
+        separator_shadow.setOffset(0, 1)
+        header_separator.setGraphicsEffect(separator_shadow)
+        detail_chrome_layout.addWidget(header_separator)
+        self.detail_header_separator = header_separator
+
+        parent_layout.addWidget(detail_chrome_container)
+        self.detail_chrome_container = detail_chrome_container
+
+    def _build_player_area(self) -> None:
+        """Create the stacked media viewer inside its container."""
+
+        self.player_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.player_placeholder.setStyleSheet(
+            "background-color: palette(window); "
+            "color: palette(window-text); font-size: 16px;"
+        )
+        self.player_placeholder.setMinimumHeight(320)
+
+        self.player_stack.addWidget(self.player_placeholder)
+        if self.image_viewer.parent() is not self.player_stack:
+            self.image_viewer.setParent(self.player_stack)
+        self.player_stack.addWidget(self.image_viewer)
+        self.player_stack.addWidget(self.video_area)
+        self.player_stack.setCurrentWidget(self.player_placeholder)
+
+        # Give the stacked widget an opaque palette-derived background so that
+        # the very first frame transition (placeholder → viewer) never flashes
+        # a transparent surface while the GL/RHI widget is still initialising.
+        # Using ``palette(window)`` keeps it in sync across light / dark mode.
+        self.player_stack.setAutoFillBackground(True)
+        self.player_stack.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground, False,
+        )
+        self.player_stack.setStyleSheet(
+            "QStackedWidget { background-color: palette(window); }"
+        )
+
+        player_container = QWidget(self)
+        player_container.setAutoFillBackground(True)
+        player_container.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground, False,
+        )
+        # Use QGridLayout so the init cover and the player_stack can share
+        # the same cell (0, 0).  The layout automatically sizes both
+        # children to fill the available space without manual geometry
+        # management.
+        player_layout = QGridLayout(player_container)
+        player_layout.setContentsMargins(0, 0, 0, 0)
+        player_layout.setSpacing(0)
+        player_layout.addWidget(self.player_stack, 0, 0)
+        self.face_name_overlay.setParent(player_container)
+        self.face_name_overlay.set_viewer(self.image_viewer)
+        player_layout.addWidget(self.face_name_overlay, 0, 0)
+        self.face_name_overlay.hide()
+        self.player_container = player_container
+
+        # Opaque cover that hides the QRhiWidget area until its first frame
+        # has been rendered.  QRhiWidget replaces its backing-store region
+        # with its own texture; before the first render() call that texture
+        # is uninitialised / transparent.  This cover occupies the same
+        # grid cell as the player_stack and is raised above it so it
+        # visually hides any transparent texture.  It is removed by
+        # ``hide_rhi_init_cover()`` once any QRhiWidget child signals
+        # ``firstFrameReady``.
+        self._rhi_init_cover = QWidget(player_container)
+        self._rhi_init_cover.setAutoFillBackground(True)
+        self._rhi_init_cover.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground, False,
+        )
+        self._rhi_init_cover.setStyleSheet(
+            "background-color: palette(window);"
+        )
+        player_layout.addWidget(self._rhi_init_cover, 0, 0)
+        self._rhi_init_cover.raise_()
+
+        self.live_badge.setParent(player_container)
+        self.badge_host = player_container
+        self.live_badge.raise_()
+
+    def _build_edit_container(self, main_window: QWidget, parent_layout: QVBoxLayout) -> None:
+        """Wrap the shared viewer with the edit header and sidebar."""
+
+        del main_window  # The metrics come from module-level constants.
+
+        edit_container = QWidget(self)
+        edit_container.setObjectName("editPage")
+        self.edit_container = edit_container
+        edit_layout = QVBoxLayout(edit_container)
+        edit_layout.setContentsMargins(0, 0, 0, 0)
+        edit_layout.setSpacing(6)
+
+        self.edit_header_container = self._build_edit_header()
+        edit_layout.addWidget(self.edit_header_container)
+
+        edit_body = QWidget(edit_container)
+        edit_body_layout = QHBoxLayout(edit_body)
+        edit_body_layout.setContentsMargins(0, 0, 0, 0)
+        edit_body_layout.setSpacing(12)
+
+        self.player_column = QWidget(edit_body)
+        player_column_layout = QVBoxLayout(self.player_column)
+        player_column_layout.setContentsMargins(0, 0, 0, 0)
+        player_column_layout.setSpacing(0)
+        player_column_layout.addWidget(self.player_container, 1)
+        player_column_layout.addWidget(self.video_trim_bar)
+
+        edit_body_layout.addWidget(self.player_column, 1)
+        edit_body_layout.addWidget(self.edit_sidebar)
+        edit_layout.addWidget(edit_body, 1)
+
+        default_sidebar_min = self.edit_sidebar.minimumWidth()
+        default_sidebar_max = self.edit_sidebar.maximumWidth()
+        default_sidebar_hint = max(self.edit_sidebar.sizeHint().width(), default_sidebar_min)
+        self.edit_sidebar.setProperty("defaultMinimumWidth", default_sidebar_min)
+        self.edit_sidebar.setProperty("defaultMaximumWidth", default_sidebar_max)
+        self.edit_sidebar.setProperty("defaultPreferredWidth", default_sidebar_hint)
+        self.edit_sidebar.setMinimumWidth(0)
+        self.edit_sidebar.setMaximumWidth(0)
+        self.edit_sidebar.hide()
+
+        self.edit_header_container.hide()
+
+        parent_layout.addWidget(edit_container, 1)
+
+    def _build_edit_header(self) -> QWidget:
+        """Construct the toolbar shown while the edit chrome is visible."""
+
+        container = QWidget(self)
+        container.setObjectName("editHeaderContainer")
+        container_layout = QHBoxLayout(container)
+        container_layout.setContentsMargins(12, 0, 12, 0)
+        container_layout.setSpacing(12)
+
+        left_controls_container = QWidget(container)
+        left_controls_layout = QHBoxLayout(left_controls_container)
+        left_controls_layout.setContentsMargins(0, 0, 0, 0)
+        left_controls_layout.setSpacing(8)
+        left_controls_container.setSizePolicy(
+            QSizePolicy.Policy.Maximum,
+            QSizePolicy.Policy.Preferred,
+        )
+
+        self.edit_compare_button.setIcon(load_icon("square.fill.and.line.vertical.and.square.svg"))
+        self.edit_compare_button.setIconSize(HEADER_ICON_GLYPH_SIZE)
+        self.edit_compare_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.edit_compare_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.edit_compare_button.setAutoRaise(True)
+        self.edit_compare_button.setFixedSize(HEADER_BUTTON_SIZE)
+        left_controls_layout.addWidget(self.edit_compare_button)
+
+        self.edit_reset_button.setAutoDefault(False)
+        self.edit_reset_button.setDefault(False)
+        self.edit_reset_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.edit_reset_button.setFixedHeight(EDIT_HEADER_BUTTON_HEIGHT)
+        left_controls_layout.addWidget(self.edit_reset_button)
+
+        self.edit_zoom_host_layout.setContentsMargins(0, 0, 0, 0)
+        self.edit_zoom_host_layout.setSpacing(4)
+        left_controls_layout.addWidget(self.edit_zoom_host)
+
+        container_layout.addWidget(left_controls_container)
+
+        self.edit_mode_control = SegmentedTopBar(
+            (
+                self.edit_adjust_action.text() or "Adjust",
+                self.edit_crop_action.text() or "Crop",
+            ),
+            container,
+        )
+        container_layout.addWidget(self.edit_mode_control, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        right_controls_container = QWidget(container)
+        right_controls_layout = QHBoxLayout(right_controls_container)
+        right_controls_layout.setContentsMargins(0, 0, 0, 0)
+        right_controls_layout.setSpacing(8)
+        right_controls_container.setSizePolicy(
+            QSizePolicy.Policy.Maximum,
+            QSizePolicy.Policy.Preferred,
+        )
+
+        # The rotate button in the Edit interface uses a white icon
+        self.edit_rotate_left_button.setIcon(load_icon("rotate.left.svg", color=(255, 255, 255)))
+        self.edit_rotate_left_button.setIconSize(HEADER_ICON_GLYPH_SIZE)
+        self.edit_rotate_left_button.setFixedSize(HEADER_BUTTON_SIZE)
+        self.edit_rotate_left_button.setAutoRaise(True)
+        right_controls_layout.addWidget(self.edit_rotate_left_button)
+
+        self.edit_done_button.setObjectName("editDoneButton")
+        self.edit_done_button.setAutoDefault(False)
+        self.edit_done_button.setDefault(False)
+        self.edit_done_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.edit_done_button.setFixedHeight(30)
+        self.edit_done_button.setStyleSheet(
+            "QPushButton#editDoneButton {"
+            f"  background-color: {EDIT_DONE_BUTTON_BACKGROUND};"
+            "  border: none;"
+            "  border-radius: 8px;"
+            f"  color: {EDIT_DONE_BUTTON_TEXT_COLOR};"
+            "  font-weight: 600;"
+            "  padding-left: 20px;"
+            "  padding-right: 20px;"
+            "}"
+            "QPushButton#editDoneButton:hover {"
+            f"  background-color: {EDIT_DONE_BUTTON_BACKGROUND_HOVER};"
+            "}"
+            "QPushButton#editDoneButton:pressed {"
+            f"  background-color: {EDIT_DONE_BUTTON_BACKGROUND_PRESSED};"
+            "}"
+            "QPushButton#editDoneButton:disabled {"
+            f"  background-color: {EDIT_DONE_BUTTON_BACKGROUND_DISABLED};"
+            f"  color: {EDIT_DONE_BUTTON_TEXT_DISABLED};"
+            "}"
+        )
+        right_controls_layout.addWidget(self.edit_done_button)
+
+        container_layout.addWidget(right_controls_container)
+        self.edit_right_controls_layout = right_controls_layout
+
+        return container
+
+    def _configure_header_button(self, button: QToolButton, icon_name: str, tooltip: str) -> None:
+        """Normalize header button appearance to the design defaults."""
+
+        button.setIcon(load_icon(icon_name))
+        button.setIconSize(HEADER_ICON_GLYPH_SIZE)
+        button.setFixedSize(HEADER_BUTTON_SIZE)
+        button.setAutoRaise(True)
+        button.setToolTip(tooltip)
+
+    # ------------------------------------------------------------------
+    # QRhiWidget init cover
+    # ------------------------------------------------------------------
+
+    def hide_rhi_init_cover(self) -> None:
+        """Remove the opaque cover once the first QRhiWidget frame is ready."""
+        if self._rhi_init_cover is not None:
+            self._rhi_init_cover.hide()
+            self._rhi_init_cover.deleteLater()
+            self._rhi_init_cover = None
+        self.face_name_overlay.raise_()
+        self.live_badge.raise_()
+
+    def show_rhi_init_cover(self) -> None:
+        """Re-create and show the opaque init cover.
+
+        Called when the player stack is about to switch to a QRhiWidget
+        that has never rendered.  The backing texture of an uninitialised
+        ``QRhiWidget`` is transparent; this cover hides the transparent
+        region until ``hide_rhi_init_cover()`` is called after the widget
+        renders its first opaque frame.
+        """
+        if self._rhi_init_cover is not None:
+            # Cover still exists – just make sure it is visible and on top.
+            self._rhi_init_cover.show()
+            self._rhi_init_cover.raise_()
+            return
+
+        player_container = self.player_container
+        if player_container is None:
+            return
+
+        self._rhi_init_cover = QWidget(player_container)
+        self._rhi_init_cover.setAutoFillBackground(True)
+        self._rhi_init_cover.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground, False,
+        )
+        self._rhi_init_cover.setStyleSheet(
+            "background-color: palette(window);"
+        )
+        layout = player_container.layout()
+        if layout is not None:
+            layout.addWidget(self._rhi_init_cover, 0, 0)
+        self._rhi_init_cover.raise_()
+
+
+__all__ = ["DetailPageWidget"]

@@ -1,0 +1,1566 @@
+"""
+GPU-accelerated image viewer with platform-selected QRhi rendering.
+
+Windows/Linux keep the existing raw OpenGL texture path inside QRhiWidget.
+macOS uses a pure QRhi path so photo and adjusted-video previews render on
+Metal without ``beginExternal()`` raw GL interop.
+"""
+
+from __future__ import annotations
+
+import logging
+import sys
+import time
+from collections.abc import Mapping
+from typing import Any
+
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import (
+    QColor,
+    QImage,
+    QMouseEvent,
+    QOpenGLContext,
+    QPixmap,
+    QRhiCommandBuffer,
+    QRhiDepthStencilClearValue,
+    QWheelEvent,
+)
+from PySide6.QtWidgets import QRhiWidget
+
+try:  # pragma: no cover - optional Qt module
+    from PySide6.QtMultimedia import QVideoFrame, QVideoFrameFormat
+except (ModuleNotFoundError, ImportError):  # pragma: no cover
+    QVideoFrame = None  # type: ignore[assignment, misc]
+    QVideoFrameFormat = None  # type: ignore[assignment, misc]
+
+from ..gl_crop_controller import CropInteractionController
+from ..render_backend import is_opengl_api, qrhi_api_name, select_qrhi_widget_api
+from ..rhi_image_renderer import RhiImageRenderer
+from ..view_transform_controller import ViewTransformController
+from . import crop_viewport, geometry
+from .adjustment_applicator import AdjustmentApplicator
+from .components import LoadingOverlay
+from .fullscreen_handler import FullscreenHandler
+from .input_handler import InputEventHandler
+from .offscreen import OffscreenRenderer
+from .resources import TextureResourceManager
+from .utils import normalise_colour
+from .zoom_controller import ZoomController
+
+_LOGGER = logging.getLogger(__name__)
+gl: Any | None = None
+GLRenderer: Any | None = None
+
+
+def _load_gl_module():
+    global gl
+    if gl is None:
+        from OpenGL import GL as _gl
+
+        gl = _gl
+    return gl
+
+
+def _load_gl_renderer_class():
+    global GLRenderer
+    if GLRenderer is None:
+        from ..gl_renderer import GLRenderer as _GLRenderer
+
+        GLRenderer = _GLRenderer
+    return GLRenderer
+
+# 如果你的工程没有这个函数，可以改成固定背景色
+try:
+    from ...palette import viewer_surface_color  # type: ignore
+except Exception:
+    def viewer_surface_color(_):  # fallback
+        return QColor(0, 0, 0)
+
+
+class GLImageViewer(QRhiWidget):
+    """A QWidget that displays GPU-rendered images with pixel-accurate zoom.
+
+    Internally selects either the legacy raw OpenGL path or the Metal-capable
+    QRhi path at construction time.  The class name and public API remain
+    stable for controllers that still refer to ``GLImageViewer``.
+    """
+
+    # Signals（保持与旧版一致）
+    replayRequested = Signal()
+    zoomChanged = Signal(float)
+    viewTransformChanged = Signal()
+    nextItemRequested = Signal()
+    prevItemRequested = Signal()
+    fullscreenExitRequested = Signal()
+    fullscreenToggleRequested = Signal()
+    cropChanged = Signal(float, float, float, float)
+    cropInteractionStarted = Signal()
+    cropInteractionFinished = Signal()
+    colorPicked = Signal(float, float, float)
+    firstFrameReady = Signal()
+    """Emitted once after the first opaque frame has been rendered."""
+
+    def __init__(self, parent: QRhiWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setMouseTracking(True)
+
+        # Use the same platform-selected QRhi backend as the video renderer.
+        # macOS defaults to Metal; Windows/Linux keep the current OpenGL path.
+        # Must be called in the constructor — Qt docs state that calling
+        # setApi() after the widget is shown may have no effect.
+        self._rhi_api = select_qrhi_widget_api()
+        self._uses_raw_gl = is_opengl_api(self._rhi_api)
+        self.setApi(self._rhi_api)
+
+        # Declare that this widget always produces fully opaque output so
+        # the compositor never expects transparency from the first paint.
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        # Prevent the main window's WA_TranslucentBackground from cascading
+        # into this widget and causing transparent first-frame flashes.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+
+        self._gl_funcs: Any | None = None
+        self._renderer: Any | RhiImageRenderer | None = None
+        self._gl_initialized = False
+        self._first_render_done = False
+        self._pending_post_load_view_transform = False
+        self._post_load_view_transform_scheduled = False
+
+        # 状态
+        self._image: QImage | None = None
+        self._video_frame = None
+        self._pending_video_image: QImage | None = None
+        self._pending_video_image_pre_rotated = False
+        self._video_frame_dirty = False
+        self._using_video_frame_source = False
+        self._pending_video_reset_view = False
+        self._reset_zoom_frames_crop = True
+        self._crop_center_zoom_strength = 0.5
+        self._fill_viewport_enabled = False
+        self._transparent_rounded_clip_enabled = False
+        self._rounded_clip_radius = 0.0
+        self._source_rotate90_steps = 0
+        self._pending_source_rotate90_steps: int | None = None
+        self._last_render_target_size = QSize()
+        self._diag_video_frame_set_count = 0
+        self._diag_video_render_count = 0
+        self._adjustments: dict[str, Any] = {}
+        self._eyedropper_active = False
+
+        # Texture resource manager
+        self._texture_manager = TextureResourceManager(
+            renderer_provider=lambda: self._renderer,
+            context_provider=lambda: self.rhi(),
+            make_current=self._make_gl_current,
+            done_current=self._done_gl_current,
+        )
+
+        # Adjustment LUT applicator
+        self._adjustment_applicator = AdjustmentApplicator(
+            renderer_provider=lambda: self._renderer,
+            make_current=self._make_gl_current,
+            done_current=self._done_gl_current,
+        )
+
+        # Surface colour / fullscreen handler
+        self._fullscreen_handler = FullscreenHandler(
+            default_color=normalise_colour(viewer_surface_color(self)),
+            set_stylesheet=self.setStyleSheet,
+            request_update=self.update,
+        )
+        self._fullscreen_handler._apply()
+
+        # ``_time_base`` anchors the monotonic clock used by the shader grain generator.
+        self._time_base = time.monotonic()
+
+        # Loading overlay component
+        self._loading_overlay = LoadingOverlay(self)
+        self._transform_controller = ViewTransformController(
+            self,
+            texture_size_provider=self._display_texture_dimensions,
+            on_zoom_changed=self.zoomChanged.emit,
+            on_view_transform_changed=self.viewTransformChanged.emit,
+            on_next_item=self.nextItemRequested.emit,
+            on_prev_item=self.prevItemRequested.emit,
+            display_texture_size_provider=self._display_texture_dimensions,
+            device_view_size_provider=self._render_target_device_size,
+        )
+        self._transform_controller.reset_zoom()
+
+        # Coordinate-transform helper
+        self._zoom_ctrl = ZoomController(
+            transform_controller=self._transform_controller,
+            renderer_provider=lambda: self._renderer,
+            display_texture_dimensions=self._display_texture_dimensions,
+        )
+
+        # Crop interaction controller
+        self._crop_controller = CropInteractionController(
+            texture_size_provider=self._display_texture_dimensions,
+            clamp_image_center_to_crop=self._zoom_ctrl.create_clamp_function(),
+            transform_controller=self._transform_controller,
+            on_crop_changed=self._handle_crop_interaction_changed,
+            on_cursor_change=self._handle_cursor_change,
+            on_request_update=self.update,
+            timer_parent=self,
+            on_interaction_started=self.cropInteractionStarted.emit,
+            on_interaction_finished=self.cropInteractionFinished.emit,
+        )
+        self._auto_crop_view_locked: bool = False
+        self._auto_crop_center_locked: bool = False
+        self._update_crop_perspective_state()
+
+        # Input event handler
+        self._input_handler = InputEventHandler(
+            crop_controller=self._crop_controller,
+            transform_controller=self._transform_controller,
+            on_replay_requested=self.replayRequested.emit,
+            on_fullscreen_exit=self.fullscreenExitRequested.emit,
+            on_fullscreen_toggle=self.fullscreenToggleRequested.emit,
+            on_cancel_auto_crop_lock=self._cancel_auto_crop_lock,
+        )
+
+    def render_backend_name(self) -> str:
+        """Return the active QRhi backend name for diagnostics/tests."""
+
+        return qrhi_api_name(self._rhi_api)
+
+    # ------------------------------------------------------------------
+    # GL context helpers (replace QOpenGLWidget.makeCurrent/doneCurrent)
+    # ------------------------------------------------------------------
+    def _make_gl_current(self) -> None:
+        """Make the underlying OpenGL context current for raw GL calls.
+
+        Used by helpers that need to issue GL calls outside the
+        ``initialize()``/``render()`` cycle (e.g. texture deletion,
+        LUT upload, offscreen render).
+        """
+        rhi = self.rhi()
+        if self._uses_raw_gl and rhi is not None:
+            rhi.makeThreadLocalNativeContextCurrent()
+
+    @staticmethod
+    def _done_gl_current() -> None:
+        """Release the GL context after out-of-render-cycle GL work.
+
+        With ``QRhiWidget`` / ``QRhi`` the context lifetime is managed by
+        the framework, so this is intentionally a no-op.  It exists solely
+        to satisfy the callback signature expected by
+        ``TextureResourceManager``, ``AdjustmentApplicator`` and
+        ``OffscreenRenderer``.
+        """
+
+    def _render_target_device_size(self) -> tuple[float, float] | None:
+        """Return the latest QRhi render-target size in device pixels."""
+
+        if self._last_render_target_size.isEmpty():
+            return None
+        return (
+            float(self._last_render_target_size.width()),
+            float(self._last_render_target_size.height()),
+        )
+
+    @staticmethod
+    def _should_log_diag_frame(index: int) -> bool:
+        """Throttle noisy Linux playback diagnostics."""
+
+        return index <= 12 or index % 30 == 0
+
+    def _diag_video_frame_summary(self, frame) -> str:
+        """Return a compact summary of a pending QVideoFrame."""
+
+        if QVideoFrame is None or frame is None:
+            return "none"
+        try:
+            size = frame.size()
+            width = size.width()
+            height = size.height()
+        except Exception:  # pragma: no cover - defensive
+            width = -1
+            height = -1
+        try:
+            pixel_format = int(frame.pixelFormat())
+        except Exception:  # pragma: no cover - defensive
+            pixel_format = -1
+        return f"valid={frame.isValid()} size={width}x{height} fmt={pixel_format}"
+
+    # --------------------------- Public API ---------------------------
+
+    def shutdown(self) -> None:
+        """Clean up GL resources."""
+        self._make_gl_current()
+        try:
+            if self._renderer is not None:
+                self._renderer.destroy_resources()
+        finally:
+            self._done_gl_current()
+
+    def set_image(
+        self,
+        image: QImage | None,
+        adjustments: Mapping[str, float] | None = None,
+        *,
+        image_source: object | None = None,
+        reset_view: bool = True,
+        force_texture_refresh: bool = False,
+    ) -> None:
+        """Display *image* together with optional colour *adjustments*.
+
+        Parameters
+        ----------
+        image:
+            ``QImage`` backing the GL texture. ``None`` clears the viewer.
+        adjustments:
+            Mapping of Photos-style adjustment values to apply in the shader.
+        image_source:
+            Stable identifier describing where *image* originated.  When the
+            identifier matches the one from the previous call the viewer keeps
+            the existing GPU texture, avoiding redundant uploads during view
+            transitions.
+        reset_view:
+            ``True`` preserves the historic behaviour of resetting the zoom and
+            pan state.  Passing ``False`` keeps the current transform so edit
+            mode can reuse the detail view framing without a visible jump.
+        """
+        self._video_frame = None
+        self._pending_video_image = None
+        self._pending_video_image_pre_rotated = False
+        self._video_frame_dirty = False
+        self._using_video_frame_source = False
+        self._pending_video_reset_view = False
+        self._pending_source_rotate90_steps = None
+        self._pending_post_load_view_transform = False
+
+        # Check if we can reuse the existing texture
+        if (
+            not force_texture_refresh
+            and self._texture_manager.should_reuse_texture(image_source)
+        ):
+            if image is not None and not image.isNull():
+                # Skip texture re-upload, only update adjustments. Preserve the
+                # current zoom/pan state so adjustment previews stay anchored
+                # to the user's active viewport.
+                self.set_adjustments(adjustments)
+                return
+
+        # Update texture resource tracking
+        self._texture_manager.set_image(
+            image,
+            image_source,
+            force_upload=force_texture_refresh,
+        )
+        self._image = image
+        self._adjustments = dict(adjustments or {})
+        self._update_crop_perspective_state()
+        self._adjustment_applicator.update_curve_lut_if_needed(self._adjustments)
+        self._adjustment_applicator.update_levels_lut_if_needed(self._adjustments)
+        self._loading_overlay.hide()
+        self._time_base = time.monotonic()
+
+        if image is None or image.isNull():
+            # Clear resources and reset state
+            self._texture_manager.clear_image()
+            self._auto_crop_view_locked = False
+            self._auto_crop_center_locked = False
+            self._transform_controller.set_image_cover_scale(1.0)
+            self._pending_post_load_view_transform = False
+        else:
+            self._pending_post_load_view_transform = True
+
+        if reset_view:
+            # Reset the interactive transform so every new asset begins in the
+            # same fit-to-window baseline that the QWidget-based viewer
+            # exposes.  ``reset_view`` lets callers preserve the zoom when the
+            # user toggles between detail and edit modes.
+            self.reset_zoom()
+
+    def set_video_frame(
+        self,
+        frame,
+        adjustments: Mapping[str, float] | None = None,
+        *,
+        reset_view: bool = True,
+    ) -> None:
+        """Display *frame* directly through the OpenGL shader pipeline."""
+
+        if QVideoFrame is None or frame is None or not frame.isValid():
+            return
+
+        starting_video_source = not self._using_video_frame_source
+        if starting_video_source:
+            self._texture_manager.clear_image()
+        self._using_video_frame_source = True
+        self._image = None
+        self._video_frame = frame
+        self._pending_video_image = None
+        self._pending_video_image_pre_rotated = False
+        self._video_frame_dirty = True
+        self._pending_post_load_view_transform = False
+        if (
+            sys.platform.startswith("linux")
+            and QVideoFrameFormat is not None
+            and self._should_snapshot_video_frame_as_image(frame)
+        ):
+            snapshot = frame.toImage()
+            if not snapshot.isNull():
+                self._pending_video_image = snapshot
+                self._pending_video_image_pre_rotated = self._is_image_snapshot_prerotated(frame, snapshot)
+                self._video_frame = None
+        if adjustments is not None and adjustments != self._adjustments:
+            self.set_adjustments(dict(adjustments))
+        self._loading_overlay.hide()
+        if starting_video_source:
+            self._time_base = time.monotonic()
+
+        if reset_view:
+            self._pending_video_reset_view = True
+        self._diag_video_frame_set_count += 1
+        if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_video_frame_set_count):
+            _LOGGER.warning(
+                "[diag][gl_viewer] set_video_frame #%s reset_view=%s visible=%s dirty=%s pending_reset=%s widget=%sx%s rt=%sx%s frame=%s",
+                self._diag_video_frame_set_count,
+                reset_view,
+                self.isVisible(),
+                self._video_frame_dirty,
+                self._pending_video_reset_view,
+                self.width(),
+                self.height(),
+                self._last_render_target_size.width(),
+                self._last_render_target_size.height(),
+                self._diag_video_frame_summary(frame),
+            )
+        self._upload_video_frame_immediately_if_possible()
+        self.update()
+
+    @staticmethod
+    def _should_snapshot_video_frame_as_image(frame) -> bool:
+        """Return whether Linux should snapshot *frame* into ``QImage`` immediately."""
+
+        if QVideoFrameFormat is None:
+            return False
+        try:
+            pixel_format = frame.pixelFormat()
+            pixel_enum = QVideoFrameFormat.PixelFormat
+        except (AttributeError, RuntimeError, TypeError) as exc:
+            _LOGGER.debug(
+                "Falling back to snapshot upload due to pixel-format probe failure: %s",
+                type(exc).__name__,
+            )
+            return True
+        packed_names = (
+            "Format_RGBA8888",
+            "Format_BGRA8888",
+            "Format_RGBX8888",
+            "Format_BGRX8888",
+        )
+        for name in packed_names:
+            value = getattr(pixel_enum, name, None)
+            if value is not None and pixel_format == value:
+                return False
+        return True
+
+    @staticmethod
+    def _is_image_snapshot_prerotated(frame, image: QImage) -> bool:
+        """Return ``True`` when ``frame.toImage()`` dimensions already include rotation."""
+
+        if image.isNull():
+            return False
+        try:
+            fmt = frame.surfaceFormat()
+        except (AttributeError, RuntimeError, TypeError) as exc:
+            _LOGGER.debug(
+                "Could not determine whether frame snapshot is pre-rotated: %s",
+                type(exc).__name__,
+            )
+            return False
+        width = int(fmt.frameWidth())
+        height = int(fmt.frameHeight())
+        return width > 0 and height > 0 and image.width() == height and image.height() == width
+
+    def _upload_pending_video_source(self) -> bool:
+        """Upload pending video source and return whether snapshot path was pre-rotated."""
+
+        if self._renderer is None:
+            return False
+
+        pending_rotation = self._pending_source_rotate90_steps
+        if pending_rotation is None:
+            pending_rotation = self._source_rotate90_steps
+
+        pre_rotated = False
+        if self._pending_video_image is not None:
+            self._renderer.upload_texture(self._pending_video_image)
+            pre_rotated = self._pending_video_image_pre_rotated
+            self._pending_video_image = None
+            self._pending_video_image_pre_rotated = False
+            self._video_frame = None
+        elif self._video_frame is not None:
+            self._renderer.upload_video_frame(self._video_frame)
+            pre_rotated = self._renderer.last_video_upload_pre_rotated()
+        else:
+            return False
+
+        final_rotation = 0 if pre_rotated else pending_rotation
+        self._apply_video_source_rotation_steps(
+            final_rotation,
+            request_update=False,
+        )
+        self._pending_source_rotate90_steps = None
+        self._video_frame = None
+        self._video_frame_dirty = False
+        straighten, rotate_steps, _ = self._rotation_parameters()
+        self._update_cover_scale(straighten, rotate_steps)
+        if self._pending_video_reset_view:
+            self._pending_video_reset_view = False
+            self.reset_zoom()
+        return pre_rotated
+
+    def _upload_video_frame_immediately_if_possible(self) -> None:
+        """Best-effort immediate Linux upload for edit-preview video frames.
+
+        Some Linux backends expose short-lived mapped frame handles. Uploading
+        only in ``render()`` may happen too late and produce intermittent black
+        output in edit preview while gallery playback remains correct. This
+        helper opportunistically uploads right after ``set_video_frame`` when
+        GL resources are ready, then falls back to normal ``render()`` upload.
+        """
+
+        if not sys.platform.startswith("linux"):
+            return
+        if not self._using_video_frame_source or not self._video_frame_dirty:
+            return
+        if (
+            (self._video_frame is None and self._pending_video_image is None)
+            or self._renderer is None
+            or not self._gl_initialized
+        ):
+            return
+
+        self._make_gl_current()
+        try:
+            self._upload_pending_video_source()
+        except (AttributeError, RuntimeError, ValueError, TypeError):
+            _LOGGER.exception("Failed immediate Linux video-frame upload in GLImageViewer")
+        finally:
+            self._done_gl_current()
+
+    def set_placeholder(self, pixmap: QPixmap | None) -> None:
+        """Display *pixmap* without changing the tracked image source."""
+
+        if pixmap and not pixmap.isNull():
+            self.set_image(pixmap.toImage(), {}, image_source=self.current_image_source())
+        else:
+            self.set_image(None, {}, image_source=None)
+
+    def set_pixmap(
+        self,
+        pixmap: QPixmap | None,
+        image_source: object | None = None,
+        *,
+        reset_view: bool = True,
+    ) -> None:
+        """Compatibility wrapper mirroring :class:`ImageViewer`.
+
+        The optional *image_source* is forwarded to :meth:`set_image` so callers
+        can keep the existing texture alive when reusing the same asset.
+        """
+
+        if pixmap is None or pixmap.isNull():
+            self.set_image(None, {}, image_source=None, reset_view=reset_view)
+            return
+        self.set_image(
+            pixmap.toImage(),
+            {},
+            image_source=image_source if image_source is not None else self.current_image_source(),
+            reset_view=reset_view,
+        )
+
+    def clear(self) -> None:
+        """Reset the viewer to an empty state."""
+
+        self.set_image(None, {}, image_source=None)
+
+    def set_adjustments(self, adjustments: Mapping[str, Any] | None = None) -> None:
+        """Update the active adjustment uniforms without replacing the texture."""
+
+        mapped_adjustments = dict(adjustments or {})
+        self._adjustments = mapped_adjustments
+        self._update_crop_perspective_state()
+
+        # Handle curve LUT update if curve data changed
+        self._adjustment_applicator.update_curve_lut_if_needed(mapped_adjustments)
+
+        # Handle levels LUT update if levels data changed
+        self._adjustment_applicator.update_levels_lut_if_needed(mapped_adjustments)
+
+        if self._crop_controller.is_active():
+            # Refresh the crop overlay in logical space so it stays aligned when rotation
+            # or perspective adjustments change while the interaction mode is active.
+            self._crop_controller.set_active(True, self._logical_crop_values(mapped_adjustments))
+        if self._auto_crop_view_locked and not self._crop_controller.is_active():
+            self._reapply_locked_crop_view()
+        elif self._auto_crop_center_locked and not self._crop_controller.is_active():
+            self._reapply_locked_crop_center()
+        self.update()
+        self.viewTransformChanged.emit()
+
+    def current_image_source(self) -> object | None:
+        """Return the identifier describing the currently displayed image."""
+
+        return self._texture_manager.get_current_image_source()
+
+    def has_image_content(self) -> bool:
+        """Return whether a still image is currently loaded into the viewer."""
+
+        image = self._image
+        return image is not None and not image.isNull()
+
+    def _schedule_post_load_view_transform(self) -> None:
+        """Queue one transform refresh after a new still frame has rendered."""
+
+        if not self._pending_post_load_view_transform or self._post_load_view_transform_scheduled:
+            return
+        self._post_load_view_transform_scheduled = True
+        QTimer.singleShot(0, self._emit_post_load_view_transform)
+
+    def _emit_post_load_view_transform(self) -> None:
+        """Flush the queued transform refresh scheduled after still-frame upload."""
+
+        self._post_load_view_transform_scheduled = False
+        if not self._pending_post_load_view_transform:
+            return
+        self._pending_post_load_view_transform = False
+        self.viewTransformChanged.emit()
+
+    def pixmap(self) -> QPixmap | None:
+        """Return a defensive copy of the currently displayed frame."""
+
+        if self._image is None or self._image.isNull():
+            return None
+        return QPixmap.fromImage(self._image)
+
+    def set_loading(self, loading: bool) -> None:
+        """Toggle the translucent loading overlay."""
+
+        if loading:
+            self._loading_overlay.show()
+            self._loading_overlay.update_geometry(self.size())
+        else:
+            self._loading_overlay.hide()
+
+    def viewport_widget(self) -> GLImageViewer:
+        """Expose the drawable widget for API parity with :class:`ImageViewer`."""
+
+        return self
+
+    def set_live_replay_enabled(self, enabled: bool) -> None:
+        self._input_handler.set_live_replay_enabled(enabled)
+
+    def set_eyedropper_mode(self, active: bool) -> None:
+        """Enable or disable eyedropper picking mode."""
+
+        self._eyedropper_active = bool(active)
+        if self._eyedropper_active:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.unsetCursor()
+
+    def set_wheel_action(self, action: str) -> None:
+        self._transform_controller.set_wheel_action(action)
+
+    def image_to_viewport(
+        self,
+        x: float,
+        y: float,
+        *,
+        image_width: float | None = None,
+        image_height: float | None = None,
+    ) -> QPointF:
+        """Map original image-space coordinates into the current viewport."""
+
+        texture_width = float(image_width if image_width is not None else self._texture_dimensions()[0])
+        texture_height = float(image_height if image_height is not None else self._texture_dimensions()[1])
+        if texture_width <= 0.0 or texture_height <= 0.0:
+            return QPointF()
+        _, rotate_steps, flip_horizontal = self._rotation_parameters()
+        logical_x, logical_y = geometry.texture_point_to_logical(
+            x,
+            y,
+            texture_width=texture_width,
+            texture_height=texture_height,
+            rotate_steps=rotate_steps,
+            flip_horizontal=flip_horizontal,
+        )
+        return self._zoom_ctrl.image_to_viewport(logical_x, logical_y)
+
+    def viewport_to_image(
+        self,
+        point: QPointF,
+        *,
+        image_width: float | None = None,
+        image_height: float | None = None,
+    ) -> QPointF:
+        """Map a viewport-space point back into original image coordinates."""
+
+        logical_point = self._zoom_ctrl.viewport_to_image(point)
+        texture_width = float(image_width if image_width is not None else self._texture_dimensions()[0])
+        texture_height = float(
+            image_height if image_height is not None else self._texture_dimensions()[1]
+        )
+        if texture_width <= 0.0 or texture_height <= 0.0:
+            return QPointF()
+        _, rotate_steps, flip_horizontal = self._rotation_parameters()
+        image_x, image_y = geometry.logical_point_to_texture(
+            logical_point.x(),
+            logical_point.y(),
+            texture_width=texture_width,
+            texture_height=texture_height,
+            rotate_steps=rotate_steps,
+            flip_horizontal=flip_horizontal,
+        )
+        return QPointF(image_x, image_y)
+
+    def image_rect_to_viewport(
+        self,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+        *,
+        image_width: float | None = None,
+        image_height: float | None = None,
+    ) -> QRectF:
+        """Map an original image-space rectangle into the current viewport."""
+
+        texture_width = float(image_width if image_width is not None else self._texture_dimensions()[0])
+        texture_height = float(image_height if image_height is not None else self._texture_dimensions()[1])
+        if texture_width <= 0.0 or texture_height <= 0.0 or width <= 0.0 or height <= 0.0:
+            return QRectF()
+        _, rotate_steps, flip_horizontal = self._rotation_parameters()
+        logical_x, logical_y, logical_w, logical_h = geometry.texture_rect_to_logical(
+            x,
+            y,
+            width,
+            height,
+            texture_width=texture_width,
+            texture_height=texture_height,
+            rotate_steps=rotate_steps,
+            flip_horizontal=flip_horizontal,
+        )
+        top_left = self._zoom_ctrl.image_to_viewport(logical_x, logical_y)
+        bottom_right = self._zoom_ctrl.image_to_viewport(logical_x + logical_w, logical_y + logical_h)
+        left = min(top_left.x(), bottom_right.x())
+        top = min(top_left.y(), bottom_right.y())
+        right = max(top_left.x(), bottom_right.x())
+        bottom = max(top_left.y(), bottom_right.y())
+        return QRectF(left, top, right - left, bottom - top)
+
+    def set_surface_color_override(self, colour: str | None) -> None:
+        """Override the viewer backdrop with *colour* or restore the default."""
+        self._fullscreen_handler.set_surface_color_override(colour)
+
+    def set_crop_framing_enabled(self, enabled: bool) -> None:
+        """Control whether ``reset_zoom()`` frames the stored crop region."""
+
+        target = bool(enabled)
+        if self._reset_zoom_frames_crop == target:
+            return
+        self._reset_zoom_frames_crop = target
+        if not target:
+            self._auto_crop_view_locked = False
+        else:
+            self._auto_crop_center_locked = False
+
+    def crop_framing_enabled(self) -> bool:
+        """Return whether ``reset_zoom()`` currently frames the crop region."""
+
+        return self._reset_zoom_frames_crop
+
+    def set_crop_center_zoom_strength(self, strength: float) -> None:
+        """Tune how strongly playback follows the crop fit when framing is off."""
+
+        self._crop_center_zoom_strength = max(0.0, min(1.0, float(strength)))
+
+    def crop_center_zoom_strength(self) -> float:
+        """Return the partial crop-fit strength used outside crop framing mode."""
+
+        return self._crop_center_zoom_strength
+
+    def set_video_source_rotation(self, cw_degrees: int) -> None:
+        """Apply the resolved container rotation for streamed video frames."""
+
+        rotate_steps = (int(cw_degrees) // 90) % 4
+        self._pending_source_rotate90_steps = None
+        self._apply_video_source_rotation_steps(rotate_steps)
+
+    def set_pending_video_source_rotation(self, cw_degrees: int) -> None:
+        """Queue the container rotation for the next uploaded video frame."""
+
+        self._pending_source_rotate90_steps = (int(cw_degrees) // 90) % 4
+
+    def _apply_video_source_rotation_steps(
+        self,
+        rotate_steps: int,
+        *,
+        request_update: bool = True,
+    ) -> None:
+        if self._source_rotate90_steps == rotate_steps:
+            return
+        self._source_rotate90_steps = rotate_steps
+        self._update_crop_perspective_state()
+        if self._crop_controller.is_active():
+            self._crop_controller.set_active(True, self._logical_crop_values())
+        if self._auto_crop_view_locked and not self._crop_controller.is_active():
+            self._reapply_locked_crop_view()
+        elif self._auto_crop_center_locked and not self._crop_controller.is_active():
+            self._reapply_locked_crop_center()
+        if self._renderer is not None and self._renderer.has_texture():
+            straighten, rotate_steps, _ = self._rotation_parameters()
+            self._update_cover_scale(straighten, rotate_steps)
+        if request_update:
+            self.update()
+        self.viewTransformChanged.emit()
+
+    def _display_rotate_steps(self, values: Mapping[str, Any] | None = None) -> int:
+        mapped_values = values if values is not None else self._adjustments
+        user_steps = geometry.get_rotate_steps(mapped_values)
+        return (user_steps + self._source_rotate90_steps) % 4
+
+    def _display_adjustments(self, values: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        mapped = dict(values if values is not None else self._adjustments)
+        mapped["Crop_Rotate90"] = float(self._display_rotate_steps(mapped))
+        return mapped
+
+    def _logical_crop_values(self, values: Mapping[str, Any] | None = None) -> dict[str, float]:
+        return geometry.logical_crop_mapping_from_texture(self._display_adjustments(values))
+
+    def set_viewport_fill_enabled(self, enabled: bool) -> None:
+        """Control whether the viewer covers the viewport instead of fitting inside it."""
+
+        target = bool(enabled)
+        if self._fill_viewport_enabled == target:
+            return
+        self._fill_viewport_enabled = target
+        self._transform_controller.set_fill_viewport_enabled(target)
+        straighten, rotate_steps, _ = self._rotation_parameters()
+        self._update_cover_scale(straighten, rotate_steps)
+        self.update()
+
+    def set_transparent_rounded_clip(self, radius: float | None) -> None:
+        """Enable a smooth alpha-rounded clip when *radius* is positive."""
+
+        numeric = float(radius or 0.0)
+        enabled = numeric > 0.0
+        if (
+            self._transparent_rounded_clip_enabled == enabled
+            and abs(self._rounded_clip_radius - numeric) <= 1e-4
+        ):
+            return
+        self._transparent_rounded_clip_enabled = enabled
+        self._rounded_clip_radius = max(0.0, numeric)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, not enabled)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, enabled)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, enabled)
+        self.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, enabled)
+        self.setAutoFillBackground(not enabled)
+        self.update()
+
+    def _pass_clear_color(self) -> QColor:
+        """Return the QRhi clear colour for the current transparency mode."""
+
+        if self._transparent_rounded_clip_enabled:
+            return QColor(0, 0, 0, 0)
+        bg = self._fullscreen_handler.backdrop_color
+        return QColor.fromRgbF(bg.redF(), bg.greenF(), bg.blueF(), 1.0)
+
+    def _gl_clear_rgba(self) -> tuple[float, float, float, float]:
+        """Return the OpenGL clear colour matching the QRhi pass clear."""
+
+        if self._transparent_rounded_clip_enabled:
+            return (0.0, 0.0, 0.0, 0.0)
+        bg = self._fullscreen_handler.backdrop_color
+        return (bg.redF(), bg.greenF(), bg.blueF(), 1.0)
+
+    def set_immersive_background(self, immersive: bool) -> None:
+        """Toggle the pure black immersive backdrop used in immersive mode."""
+        self._fullscreen_handler.set_immersive_background(immersive)
+
+    def rotate_image_ccw(self) -> dict[str, float]:
+        """Rotate the photo 90° counter-clockwise without mutating crop geometry.
+
+        The crop box remains defined in texture space so the rotation merely updates the
+        quarter-turn counter.  The zoom stack is reset so the fit-to-view baseline adapts
+        to the swapped logical dimensions after the aspect ratio flips.
+        """
+
+        rotated_steps = (geometry.get_rotate_steps(self._adjustments) - 1) % 4
+
+        # Remap perspective sliders into the rotated coordinate frame so that the visual
+        # effect stays consistent with what the user saw pre-rotation.  Perspective
+        # values are expressed as a 2D vector aligned to the on-screen axes; rotating the
+        # image 90° counter-clockwise corresponds to rotating this vector 90° clockwise
+        # (swap axes and invert the previous vertical component).  If the image is
+        # horizontally flipped, the horizontal axis is mirrored, so we also invert the
+        # remapped horizontal component to preserve the perceived direction.
+        old_v = float(self._adjustments.get("Perspective_Vertical", 0.0))
+        old_h = float(self._adjustments.get("Perspective_Horizontal", 0.0))
+        old_flip = bool(self._adjustments.get("Crop_FlipH", False))
+
+        new_v = old_h
+        new_h = -old_v
+        if old_flip:
+            new_h = -new_h
+
+        updates: dict[str, float] = {
+            "Crop_Rotate90": float(rotated_steps),
+            "Perspective_Vertical": new_v,
+            "Perspective_Horizontal": new_h,
+        }
+
+        # Apply the rotation locally so the viewer updates immediately even before the
+        # session broadcasts the new adjustment mapping.
+        self.set_adjustments({**self._adjustments, **updates})
+
+        # Refresh the transform baseline to mirror the demo's post-rotation framing.
+        self.reset_zoom()
+        self.viewTransformChanged.emit()
+
+        return updates
+
+    def set_zoom(self, factor: float, anchor: QPointF | None = None) -> None:
+        """Adjust the zoom while preserving the requested *anchor* pixel."""
+
+        self._cancel_auto_crop_lock()
+        anchor_point = anchor or self.viewport_center()
+        self._transform_controller.set_zoom(float(factor), anchor_point)
+
+    def reset_zoom(self) -> None:
+        if self._crop_controller.is_active():
+            self._transform_controller.reset_zoom()
+            self.viewTransformChanged.emit()
+            return
+        if not self._reset_zoom_frames_crop:
+            self._auto_crop_view_locked = False
+            if not self._center_crop_if_available():
+                self._auto_crop_center_locked = False
+                self._transform_controller.reset_zoom()
+            self.viewTransformChanged.emit()
+            return
+        self._auto_crop_center_locked = False
+        if not self._frame_crop_if_available():
+            self._auto_crop_view_locked = False
+            self._transform_controller.reset_zoom()
+        self.viewTransformChanged.emit()
+
+    def zoom_in(self) -> None:
+        current = self._transform_controller.get_zoom_factor()
+        self.set_zoom(current * 1.1, anchor=self.viewport_center())
+
+    def zoom_out(self) -> None:
+        current = self._transform_controller.get_zoom_factor()
+        self.set_zoom(current / 1.1, anchor=self.viewport_center())
+
+    def viewport_center(self) -> QPointF:
+        return QPointF(self.width() / 2, self.height() / 2)
+
+    # --------------------------- Off-screen rendering ---------------------------
+
+    def render_offscreen_image(
+        self,
+        target_size: QSize,
+        adjustments: Mapping[str, float] | None = None,
+    ) -> QImage:
+        """Render the current texture into an off-screen framebuffer.
+
+        Parameters
+        ----------
+        target_size:
+            Final size of the rendered preview.
+        adjustments:
+            Mapping of shader uniform values to apply during rendering.  Passing
+            ``None`` renders the frame using the viewer's current adjustment state.
+
+        Returns
+        -------
+        QImage
+            CPU-side image containing the rendered frame. The image is always
+            in Format_ARGB32 for downstream consumers.
+
+        Notes
+        -----
+        The width and height of the rendered image are clamped to at least one pixel
+        to avoid driver errors. The returned image is always in Format_ARGB32 format.
+        """
+        if not self._uses_raw_gl:
+            if target_size.isEmpty() or self._image is None or self._image.isNull():
+                return QImage()
+            try:
+                from .....core.image_filters import apply_adjustments
+            except Exception:
+                _LOGGER.warning("render_offscreen_image: CPU adjustment fallback unavailable", exc_info=True)
+                return QImage()
+            rendered = apply_adjustments(self._image, adjustments or self._adjustments)
+            if rendered.isNull():
+                return QImage()
+            if rendered.size() != target_size:
+                rendered = rendered.scaled(
+                    target_size,
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            return rendered.convertToFormat(QImage.Format.Format_ARGB32)
+
+        return OffscreenRenderer.render(
+            renderer=self._renderer,
+            context=self.rhi(),
+            make_current=self._make_gl_current,
+            done_current=self._done_gl_current,
+            image=self._image,
+            adjustments=adjustments or self._adjustments,
+            target_size=target_size,
+            time_base=self._time_base,
+        )
+
+    # --------------------------- GL lifecycle ---------------------------
+
+    def initialize(self, cb) -> None:  # type: ignore[override]
+        """QRhiWidget override: initialise renderer resources once."""
+        if self._gl_initialized:
+            return
+        rhi = self.rhi()
+        if rhi is None:
+            _LOGGER.warning("QRhi not available - image rendering disabled")
+            return
+        if not self._uses_raw_gl:
+            renderer = RhiImageRenderer()
+            try:
+                renderer.initialize_resources(rhi, self.renderTarget().renderPassDescriptor(), cb)
+            except Exception:
+                _LOGGER.exception("Failed to initialise QRhi image renderer")
+                return
+            self._renderer = renderer
+            self._adjustment_applicator.invalidate_cache()
+            self._adjustment_applicator.update_curve_lut_if_needed(self._adjustments)
+            self._adjustment_applicator.update_levels_lut_if_needed(self._adjustments)
+            self._gl_initialized = True
+            return
+
+        # Make the underlying OpenGL context current so we can issue raw GL
+        # calls (create shaders, VAO, VBO, textures, …).
+        rhi.makeThreadLocalNativeContextCurrent()
+        current_context = QOpenGLContext.currentContext()
+        if current_context is None:
+            _LOGGER.warning("Current OpenGL context unavailable - image rendering disabled")
+            return
+        gf = current_context.extraFunctions()
+        self._gl_funcs = gf
+
+        if self._renderer is not None:
+            self._renderer.destroy_resources()
+
+        renderer_cls = _load_gl_renderer_class()
+        self._renderer = renderer_cls(gf, parent=self)
+        self._renderer.initialize_resources()
+        self._adjustment_applicator.invalidate_cache()
+        self._adjustment_applicator.update_curve_lut_if_needed(self._adjustments)
+        self._adjustment_applicator.update_levels_lut_if_needed(self._adjustments)
+
+        dpr = self.devicePixelRatioF()
+        gf.glViewport(0, 0, int(self.width() * dpr), int(self.height() * dpr))
+        self._gl_initialized = True
+
+    def releaseResources(self) -> None:  # type: ignore[override]
+        """QRhiWidget override: release renderer resources."""
+        self._gl_initialized = False
+        if self._renderer is not None:
+            rhi = self.rhi()
+            if self._uses_raw_gl and rhi is not None:
+                # Ensure the underlying OpenGL context is current before
+                # issuing raw GL deletes in GLRenderer.destroy_resources().
+                rhi.makeThreadLocalNativeContextCurrent()
+            self._renderer.destroy_resources()
+
+    def render(self, cb) -> None:  # type: ignore[override]
+        """QRhiWidget override: render the current image/video frame."""
+        if not self._uses_raw_gl:
+            self._render_rhi(cb)
+            return
+
+        if not self._gl_initialized:
+            # GL resources are not yet available but we MUST still clear the
+            # render target with an opaque colour so the surface is never
+            # transparent.  An early bare return would leave the texture
+            # uninitialised, compositing as transparent under the main
+            # window's WA_TranslucentBackground.
+            cb.beginPass(
+                self.renderTarget(),
+                self._pass_clear_color(),
+                QRhiDepthStencilClearValue(),
+            )
+            cb.endPass()
+            self._emit_first_frame_ready()
+            return
+        gf = self._gl_funcs
+        if gf is None or self._renderer is None:
+            cb.beginPass(
+                self.renderTarget(),
+                self._pass_clear_color(),
+                QRhiDepthStencilClearValue(),
+            )
+            cb.endPass()
+            self._emit_first_frame_ready()
+            return
+
+        output_size = self.renderTarget().pixelSize()
+        if output_size.isEmpty():
+            if sys.platform.startswith("linux"):
+                _LOGGER.warning(
+                    "[diag][gl_viewer] render skipped empty target using_video=%s dirty=%s widget=%sx%s",
+                    self._using_video_frame_source,
+                    self._video_frame_dirty,
+                    self.width(),
+                    self.height(),
+                )
+            return
+        self._last_render_target_size = QSize(output_size)
+
+        # Start a QRhi render pass (required by QRhiWidget) then immediately
+        # switch to raw OpenGL via beginExternal()/endExternal().  This lets
+        # us keep all existing GL 3.3 shader code unchanged while both
+        # widgets share the same QRhi rendering infrastructure.
+        cb.beginPass(
+            self.renderTarget(),
+            self._pass_clear_color(),
+            QRhiDepthStencilClearValue(),
+            flags=QRhiCommandBuffer.BeginPassFlag.ExternalContent,
+        )
+        cb.beginExternal()
+
+        # --- All raw OpenGL calls happen between beginExternal/endExternal ---
+        vw = max(1, output_size.width())
+        vh = max(1, output_size.height())
+        gl_module = _load_gl_module()
+        gf.glViewport(0, 0, vw, vh)
+        clear_r, clear_g, clear_b, clear_a = self._gl_clear_rgba()
+        gf.glClearColor(clear_r, clear_g, clear_b, clear_a)
+        gf.glClear(gl_module.GL_COLOR_BUFFER_BIT)
+
+        uploaded_new_still_texture = False
+        if (
+            self._using_video_frame_source
+            and self._video_frame_dirty
+            and (self._video_frame is not None or self._pending_video_image is not None)
+        ):
+            self._diag_video_render_count += 1
+            if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_video_render_count):
+                _LOGGER.warning(
+                    "[diag][gl_viewer] render #%s pre-upload rt=%sx%s widget=%sx%s pending_rot=%s source_rot=%s has_texture=%s frame=%s",
+                    self._diag_video_render_count,
+                    vw,
+                    vh,
+                    self.width(),
+                    self.height(),
+                    self._pending_source_rotate90_steps,
+                    self._source_rotate90_steps,
+                    self._renderer.has_texture(),
+                    self._diag_video_frame_summary(self._video_frame),
+                )
+            try:
+                pre_rotated = self._upload_pending_video_source()
+                if sys.platform.startswith("linux") and self._should_log_diag_frame(self._diag_video_render_count):
+                    logical_tex_w, logical_tex_h = self._display_texture_dimensions()
+                    _LOGGER.warning(
+                        "[diag][gl_viewer] render #%s post-upload pre_rotated=%s final_rot=%s logical_tex=%sx%s cover=%.5f zoom=%.5f pan=(%.2f,%.2f)",
+                        self._diag_video_render_count,
+                        pre_rotated,
+                        self._source_rotate90_steps,
+                        logical_tex_w,
+                        logical_tex_h,
+                        self._transform_controller.get_image_cover_scale(),
+                        self._transform_controller.get_effective_scale(),
+                        self._transform_controller.get_pan_pixels().x(),
+                        self._transform_controller.get_pan_pixels().y(),
+                    )
+            except Exception:
+                _LOGGER.exception("Failed to upload video frame into GLImageViewer")
+        elif (
+            self._image is not None
+            and not self._image.isNull()
+            and self._texture_manager.needs_texture_upload()
+        ):
+            self._texture_manager.upload_texture_if_needed(self._image)
+            straighten, rotate_steps, _ = self._rotation_parameters()
+            self._update_cover_scale(straighten, rotate_steps)
+            uploaded_new_still_texture = True
+        if not self._renderer.has_texture():
+            if sys.platform.startswith("linux") and self._using_video_frame_source:
+                _LOGGER.warning(
+                    "[diag][gl_viewer] render no-texture rt=%sx%s dirty=%s pending_reset=%s",
+                    vw,
+                    vh,
+                    self._video_frame_dirty,
+                    self._pending_video_reset_view,
+                )
+            cb.endExternal()
+            cb.endPass()
+            self._emit_first_frame_ready()
+            return
+
+        effective_scale = self._transform_controller.get_effective_scale()
+        cover_scale = self._transform_controller.get_image_cover_scale()
+
+        time_value = time.monotonic() - self._time_base
+        
+        view_pan = self._transform_controller.get_pan_pixels()
+
+        effective_adjustments: dict[str, float] | Mapping[str, float]
+        if self._crop_controller.is_active():
+            effective_adjustments = dict(self._display_adjustments())
+            # During crop interactions we want to preview the entire photo with
+            # a translucent overlay.  The fragment shader drives the crop
+            # window entirely from the ``Crop_*`` uniforms, therefore we
+            # override those values on-the-fly instead of mutating
+            # ``self._adjustments`` (which stores the persisted edit state).
+            effective_adjustments.update(
+                {
+                    "Crop_CX": 0.5,
+                    "Crop_CY": 0.5,
+                    "Crop_W": 1.0,
+                    "Crop_H": 1.0,
+                }
+            )
+        else:
+            # Convert texture-space crop to logical-space for shader
+            # Shader tests crop in pre-rotation space (uv_perspective),
+            # so it needs logical-space crop parameters
+            effective_adjustments = dict(self._display_adjustments())
+            logical_crop = geometry.logical_crop_mapping_from_texture(effective_adjustments)
+            effective_adjustments.update(logical_crop)
+
+
+        logical_tex_w, logical_tex_h = self._display_texture_dimensions()
+        if (
+            sys.platform.startswith("linux")
+            and self._using_video_frame_source
+            and self._should_log_diag_frame(self._diag_video_render_count)
+        ):
+            _LOGGER.warning(
+                "[diag][gl_viewer] draw #%s rt=%sx%s logical_tex=%sx%s cover=%.5f zoom=%.5f pan=(%.2f,%.2f) rounded=%s",
+                self._diag_video_render_count,
+                vw,
+                vh,
+                logical_tex_w,
+                logical_tex_h,
+                cover_scale,
+                effective_scale,
+                view_pan.x(),
+                view_pan.y(),
+                self._transparent_rounded_clip_enabled,
+            )
+
+        self._renderer.render(
+            view_width=float(vw),
+            view_height=float(vh),
+            scale=effective_scale,
+            pan=view_pan,
+            adjustments=effective_adjustments,
+            time_value=time_value,
+            img_scale=cover_scale,
+            logical_tex_size=(float(logical_tex_w), float(logical_tex_h)),
+            corner_radius_px=(
+                self._rounded_clip_radius * self.devicePixelRatioF()
+                if self._transparent_rounded_clip_enabled
+                else 0.0
+            ),
+        )
+
+        if self._crop_controller.is_active():
+            crop_rect = self._crop_controller.current_crop_rect_pixels()
+            if crop_rect is not None:
+                self._renderer.draw_crop_overlay(
+                    view_width=float(vw),
+                    view_height=float(vh),
+                    crop_rect=crop_rect,
+                    faded=self._crop_controller.is_faded_out(),
+                )
+
+        # --- End raw OpenGL block ---
+        cb.endExternal()
+        cb.endPass()
+        self._emit_first_frame_ready()
+        if uploaded_new_still_texture:
+            self._schedule_post_load_view_transform()
+
+    def _render_rhi(self, cb) -> None:
+        """Render the current image through QRhi without raw OpenGL."""
+
+        if not self._gl_initialized or self._renderer is None:
+            cb.beginPass(
+                self.renderTarget(),
+                self._pass_clear_color(),
+                QRhiDepthStencilClearValue(),
+            )
+            cb.endPass()
+            self._emit_first_frame_ready()
+            return
+
+        output_size = self.renderTarget().pixelSize()
+        if output_size.isEmpty():
+            return
+        self._last_render_target_size = QSize(output_size)
+
+        vw = max(1, output_size.width())
+        vh = max(1, output_size.height())
+
+        uploaded_new_still_texture = False
+        if (
+            self._using_video_frame_source
+            and self._video_frame_dirty
+            and (self._video_frame is not None or self._pending_video_image is not None)
+        ):
+            self._diag_video_render_count += 1
+            try:
+                self._upload_pending_video_source()
+            except Exception:
+                _LOGGER.exception("Failed to upload video frame into QRhi image viewer")
+        elif (
+            self._image is not None
+            and not self._image.isNull()
+            and self._texture_manager.needs_texture_upload()
+        ):
+            self._texture_manager.upload_texture_if_needed(self._image)
+            straighten, rotate_steps, _ = self._rotation_parameters()
+            self._update_cover_scale(straighten, rotate_steps)
+            uploaded_new_still_texture = True
+
+        if not self._renderer.has_texture():
+            cb.beginPass(
+                self.renderTarget(),
+                self._pass_clear_color(),
+                QRhiDepthStencilClearValue(),
+            )
+            cb.endPass()
+            self._emit_first_frame_ready()
+            return
+
+        effective_scale = self._transform_controller.get_effective_scale()
+        cover_scale = self._transform_controller.get_image_cover_scale()
+        time_value = time.monotonic() - self._time_base
+        view_pan = self._transform_controller.get_pan_pixels()
+
+        if self._crop_controller.is_active():
+            effective_adjustments = dict(self._display_adjustments())
+            effective_adjustments.update(
+                {
+                    "Crop_CX": 0.5,
+                    "Crop_CY": 0.5,
+                    "Crop_W": 1.0,
+                    "Crop_H": 1.0,
+                }
+            )
+        else:
+            effective_adjustments = dict(self._display_adjustments())
+            logical_crop = geometry.logical_crop_mapping_from_texture(effective_adjustments)
+            effective_adjustments.update(logical_crop)
+
+        logical_tex_w, logical_tex_h = self._display_texture_dimensions()
+        crop_rect = None
+        crop_faded = False
+        if self._crop_controller.is_active():
+            crop_rect = self._crop_controller.current_crop_rect_pixels()
+            crop_faded = self._crop_controller.is_faded_out()
+
+        self._renderer.render(
+            cb=cb,
+            render_target=self.renderTarget(),
+            clear_color=self._pass_clear_color(),
+            view_width=float(vw),
+            view_height=float(vh),
+            scale=effective_scale,
+            pan=view_pan,
+            adjustments=effective_adjustments,
+            time_value=time_value,
+            img_scale=cover_scale,
+            logical_tex_size=(float(logical_tex_w), float(logical_tex_h)),
+            corner_radius_px=(
+                self._rounded_clip_radius * self.devicePixelRatioF()
+                if self._transparent_rounded_clip_enabled
+                else 0.0
+            ),
+            crop_rect=crop_rect,
+            crop_faded=crop_faded,
+        )
+
+        self._emit_first_frame_ready()
+        if uploaded_new_still_texture:
+            self._schedule_post_load_view_transform()
+
+    def _emit_first_frame_ready(self) -> None:
+        """Notify listeners that the first opaque frame has been rendered."""
+        if not self._first_render_done:
+            self._first_render_done = True
+            self.firstFrameReady.emit()
+
+    # --------------------------- Crop helpers ---------------------------
+
+    def setCropMode(self, enabled: bool, values: Mapping[str, float] | None = None) -> None:
+        was_active = self._crop_controller.is_active()
+        source_values = values if values is not None else self._adjustments
+        self._crop_controller.set_active(enabled, self._logical_crop_values(source_values))
+        if enabled and not was_active:
+            self._cancel_auto_crop_lock()
+            self._transform_controller.reset_zoom()
+        elif not enabled and was_active:
+            self.reset_zoom()
+        self.update()
+
+    def crop_values(self) -> dict[str, float]:
+        logical_map = self._crop_controller.get_crop_values()
+        logical_tuple = geometry.normalised_crop_from_mapping(logical_map)
+        rotate_steps = self._display_rotate_steps()
+
+        tex_cx, tex_cy, tex_w, tex_h = geometry.logical_crop_to_texture(
+            logical_tuple, rotate_steps
+        )
+        return {
+            "Crop_CX": tex_cx,
+            "Crop_CY": tex_cy,
+            "Crop_W": tex_w,
+            "Crop_H": tex_h,
+        }
+
+    def start_perspective_interaction(self) -> None:
+        """Snapshot the crop before a perspective slider drag begins."""
+        self._crop_controller.start_perspective_interaction()
+
+    def end_perspective_interaction(self) -> None:
+        """Clear the cached baseline crop captured for perspective drags."""
+        self._crop_controller.end_perspective_interaction()
+
+    def set_crop_aspect_ratio(self, ratio: float) -> None:
+        """Forward the selected crop aspect-ratio constraint to the controller.
+
+        Parameters
+        ----------
+        ratio:
+            ``0.0`` for freeform, ``-1.0`` for *original* (uses the current
+            image's native ratio), or a positive ``w/h`` value.
+        """
+        if ratio < 0:
+            # "Original" – compute from the loaded texture
+            tex_w, tex_h = self._display_texture_dimensions()
+            if tex_w > 0 and tex_h > 0:
+                ratio = float(tex_w) / float(tex_h)
+            else:
+                ratio = 0.0
+        self._crop_controller.set_locked_aspect_ratio(ratio)
+
+    def _update_crop_perspective_state(self) -> None:
+        crop_viewport.update_crop_perspective_state(self)
+
+    def _rotation_parameters(self) -> tuple[float, int, bool]:
+        return crop_viewport.rotation_parameters(self)
+
+    def _update_cover_scale(self, straighten_deg: float, rotate_steps: int) -> None:
+        crop_viewport.update_cover_scale(self, straighten_deg, rotate_steps)
+
+
+    # --------------------------- Viewport helpers ---------------------------
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if self._eyedropper_active:
+            if self._handle_eyedropper_pick(event.position()):
+                event.accept()
+                return
+        handled = self._input_handler.handle_mouse_press(event)
+        if not handled:
+            super().mousePressEvent(event)
+
+    def _handle_eyedropper_pick(self, position: QPointF) -> bool:
+        return crop_viewport.handle_eyedropper_pick(self, position)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        handled = self._input_handler.handle_mouse_move(event)
+        if not handled:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        handled = self._input_handler.handle_mouse_release(event)
+        if not handled:
+            super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        handled = self._input_handler.handle_double_click_with_window(event, self.window())
+        if handled:
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        self._input_handler.handle_wheel(event)
+
+    # QRhiWidget does not have a resizeGL callback.  The viewport is set
+    # dynamically at the start of each render() call using
+    # ``self.renderTarget().pixelSize()``, which automatically accounts for
+    # DPR and window resizing.
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._loading_overlay.update_geometry(self.size())
+        if self._auto_crop_view_locked and not self._crop_controller.is_active():
+            self._reapply_locked_crop_view()
+        elif self._auto_crop_center_locked and not self._crop_controller.is_active():
+            self._reapply_locked_crop_center()
+        straighten, rotate_steps, _ = self._rotation_parameters()
+        self._update_cover_scale(straighten, rotate_steps)
+        self.viewTransformChanged.emit()
+        if sys.platform.startswith("linux"):
+            _LOGGER.warning(
+                "[diag][gl_viewer] resize widget=%sx%s rt=%sx%s using_video=%s dirty=%s",
+                self.width(),
+                self.height(),
+                self._last_render_target_size.width(),
+                self._last_render_target_size.height(),
+                self._using_video_frame_source,
+                self._video_frame_dirty,
+            )
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        # Request a fresh render when the widget becomes visible again
+        # (e.g. after switching back from the video surface).
+        self.update()
+
+    # --------------------------- Cursor management and helpers ---------------------------
+
+    def _handle_cursor_change(self, cursor: Qt.CursorShape | None) -> None:
+        crop_viewport.handle_cursor_change(self, cursor)
+
+    def _texture_dimensions(self) -> tuple[int, int]:
+        return crop_viewport.texture_dimensions(self)
+
+    def _display_texture_dimensions(self) -> tuple[int, int]:
+        return crop_viewport.display_texture_dimensions(self)
+
+    def _frame_crop_if_available(self) -> bool:
+        return crop_viewport.frame_crop_if_available(self)
+
+    def _center_crop_if_available(self) -> bool:
+        return crop_viewport.center_crop_if_available(self)
+
+    def _reapply_locked_crop_view(self) -> None:
+        crop_viewport.reapply_locked_crop_view(self)
+
+    def _reapply_locked_crop_center(self) -> None:
+        crop_viewport.reapply_locked_crop_center(self)
+
+    def _cancel_auto_crop_lock(self) -> None:
+        crop_viewport.cancel_auto_crop_lock(self)
+
+    def _compute_crop_rect_pixels(self) -> QRectF | None:
+        return crop_viewport.compute_crop_rect_pixels(self)
+
+    def _handle_crop_interaction_changed(
+        self, cx: float, cy: float, width: float, height: float
+    ) -> None:
+        crop_viewport.handle_crop_interaction_changed(self, cx, cy, width, height)

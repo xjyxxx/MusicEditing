@@ -1,0 +1,584 @@
+"""Lightweight wrappers around the ``ffmpeg`` toolchain."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Dict, Optional, Sequence, TYPE_CHECKING
+
+from ..errors import ExternalToolError
+from .media_access import media_access
+
+if TYPE_CHECKING:
+    from PIL import Image
+
+_FFMPEG_LOG_LEVEL = "error"
+_LINUX_180_HINT_CACHE: dict[str, bool] = {}
+_OPTIONAL_MODULE_UNSET = object()
+av: Any = _OPTIONAL_MODULE_UNSET
+cv2: Any = _OPTIONAL_MODULE_UNSET
+
+
+def _load_av() -> Any | None:
+    """Import PyAV only when a PyAV-backed operation is actually requested."""
+
+    global av
+    if av is None:
+        return None
+    if av is not _OPTIONAL_MODULE_UNSET:
+        return av
+    try:  # pragma: no cover - optional dependency detection
+        import av as imported_av  # type: ignore
+    except Exception:  # pragma: no cover - PyAV not available or broken
+        av = None
+        return None
+    av = imported_av
+    return imported_av
+
+
+def _load_cv2() -> Any | None:
+    """Import OpenCV only when the ffmpeg subprocess fallback needs it."""
+
+    global cv2
+    if cv2 is None:
+        return None
+    if cv2 is not _OPTIONAL_MODULE_UNSET:
+        return cv2
+    try:  # pragma: no cover - optional dependency detection
+        import cv2 as imported_cv2  # type: ignore
+    except Exception:  # pragma: no cover - OpenCV not available or broken
+        cv2 = None
+        return None
+    cv2 = imported_cv2
+    return imported_cv2
+
+
+def _run_command(command: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
+    """Execute *command* and return the completed process."""
+
+    # Define startupinfo to hide the window on Windows
+    startupinfo = None
+    if os.name == 'nt':
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+
+    try:
+        process = subprocess.run(
+            list(command),
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            startupinfo=startupinfo,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0,
+        )
+    except FileNotFoundError as exc:  # pragma: no cover - depends on environment
+        raise ExternalToolError("ffmpeg executable not found on PATH") from exc
+    return process
+
+
+def extract_frame_with_pyav(
+    source: Path,
+    *,
+    at: Optional[float] = None,
+    scale: Optional[tuple[int, int]] = None,
+) -> Optional["Image.Image"]:
+    """Return a still frame extracted from *source* using PyAV.
+
+    This method decodes directly to memory, avoiding process overhead.
+    Returns a PIL Image on success, or ``None`` if PyAV is unavailable or
+    decoding fails.
+
+    Parameters
+    ----------
+    at : Optional[float], optional
+        Timestamp in seconds at which to extract the frame. If not specified,
+        the first frame is used.
+    scale : Optional[tuple[int, int]], optional
+        Optional tuple of (max_width, max_height) specifying the maximum
+        dimensions for the output image. The aspect ratio is preserved and
+        the image is resized to fit within the given box if necessary.
+    """
+    av_module = _load_av()
+    if av_module is None:
+        return None
+
+    try:
+        with av_module.open(str(source)) as container:
+            if not container.streams.video:
+                return None
+            stream = container.streams.video[0]
+            stream.thread_type = 'AUTO'  # Use multi-threading if available
+
+            target_pts = 0
+            if at is not None and at > 0:
+                # Seek to the keyframe before the timestamp
+                # time_base is usually 1/timescale
+                target_pts = int(at / stream.time_base)
+                container.seek(target_pts, stream=stream)
+
+            for frame in container.decode(stream):
+                # We seeked to the nearest keyframe, so we may need to decode
+                # forward to reach the exact target time.
+                if frame.pts is None or frame.pts < target_pts:
+                    continue
+
+                # Once we reach or pass the target, use this frame
+                image = frame.to_image()
+                image = _orient_pil_frame_from_metadata(source, image)
+
+                # Handle scaling if requested
+                if (
+                    scale is not None
+                    and scale[0] > 0
+                    and scale[1] > 0
+                ):
+                    max_width, max_height = scale
+                    # Calculate new size preserving aspect ratio, ensuring it fits in box
+                    # This logic mirrors the ffmpeg 'force_original_aspect_ratio=decrease'
+                    w, h = image.size
+                    ratio = min(max_width / w, max_height / h)
+
+                    if ratio < 1.0:
+                        # Calculate new size preserving aspect ratio, ensuring it fits in box
+                        # Use max(2, trunc(x/2)*2) to match ffmpeg's behavior and ensure even dimensions
+                        new_width = max(2, int((w * ratio) / 2) * 2)
+                        new_height = max(2, int((h * ratio) / 2) * 2)
+
+                        image = image.resize((new_width, new_height), resample=3) # LANCZOS = 3 (usually)
+
+                return image
+
+            return None
+
+    except Exception:
+        # Fallback to other methods if PyAV fails for any reason
+        return None
+
+
+def _orient_pil_frame_from_metadata(source: Path, image: "Image.Image") -> "Image.Image":
+    """Rotate a decoded PIL frame to match ffmpeg's display orientation."""
+    cw_degrees, _, _, _ = probe_video_rotation_info(source)
+    if cw_degrees not in {90, 180, 270}:
+        return image
+    return image.rotate(-cw_degrees, expand=True)
+
+
+def extract_video_frame(
+    source: Path,
+    *,
+    at: Optional[float] = None,
+    scale: Optional[tuple[int, int]] = None,
+    format: str = "jpeg",
+) -> bytes:
+    """Return a still frame extracted from *source*.
+
+    Parameters
+    ----------
+    source:
+        Path to the input video file.
+    at:
+        Timestamp in seconds to sample. When ``None`` the first frame is used.
+    scale:
+        Optional ``(width, height)`` hint used to scale the output frame while
+        preserving aspect ratio.
+    format:
+        Output image format. ``"jpeg"`` is used by default because Qt decoders
+        handle it more reliably on Windows. ``"png"`` remains available for
+        callers that prefer lossless output.
+    """
+
+    fmt = format.lower()
+    if fmt not in {"png", "jpeg"}:
+        raise ValueError("format must be either 'png' or 'jpeg'")
+
+    with media_access.read(source):
+        try:
+            return _extract_with_ffmpeg(source, at=at, scale=scale, format=fmt)
+        except ExternalToolError as exc:
+            fallback = _extract_with_opencv(source, at=at, scale=scale, format=fmt)
+            if fallback is not None:
+                return fallback
+            raise exc
+
+
+def _extract_with_ffmpeg(
+    source: Path,
+    *,
+    at: Optional[float],
+    scale: Optional[tuple[int, int]],
+    format: str,
+) -> bytes:
+    codec = "png" if format == "png" else "mjpeg"
+
+    command: list[str] = [
+        "ffmpeg",
+        "-hwaccel",
+        "auto",
+        "-hide_banner",
+        "-loglevel",
+        _FFMPEG_LOG_LEVEL,
+        "-nostdin",
+        "-y",
+    ]
+    if at is not None:
+        command += ["-ss", f"{max(at, 0):.3f}"]
+    # Security: Ensure absolute path to prevent argument injection if filename starts with '-'
+    command += [
+        "-i",
+        str(source.absolute()),
+        "-an",
+        "-frames:v",
+        "1",
+        "-vsync",
+        "0",
+    ]
+    filters: list[str] = []
+    if scale is not None:
+        width, height = scale
+        if width > 0 and height > 0:
+            # Note: ffmpeg syntax for force_original_aspect_ratio requires specific handling
+            # In complex filtergraphs, we just construct the scale filter carefully.
+            # Using 'decrease' ensures the output fits within the bounding box.
+            filters.append(
+                "scale='min({w},iw)':'min({h},ih)':force_original_aspect_ratio=decrease".format(
+                    w=width,
+                    h=height,
+                )
+            )
+    if format == "jpeg":
+        if not filters:
+            filters.append("scale=iw:ih")
+        # Ensure dimensions are even for MJPEG
+        filters.append("scale='max(2,trunc(iw/2)*2)':'max(2,trunc(ih/2)*2)'")
+    if format == "png":
+        filters.append("format=rgba")
+    else:
+        filters.append("format=yuv420p")
+    if filters:
+        command += ["-vf", ",".join(filters)]
+    command += ["-f", "image2", "-vcodec", codec]
+    if format == "jpeg":
+        command += ["-q:v", "2"]
+
+    command.append("pipe:1")
+    process = _run_command(command)
+
+    if process.returncode != 0 or not process.stdout:
+        stderr = process.stderr.decode("utf-8", "ignore").strip()
+        raise ExternalToolError(
+            f"ffmpeg failed to extract frame from {source}: {stderr or 'unknown error'}"
+        )
+    return process.stdout
+
+
+def _extract_with_opencv(
+    source: Path,
+    *,
+    at: Optional[float],
+    scale: Optional[tuple[int, int]],
+    format: str,
+) -> Optional[bytes]:
+    cv2_module = _load_cv2()
+    if cv2_module is None:
+        return None
+
+    try:
+        # Security: Ensure absolute path to prevent argument injection if filename starts with '-'
+        capture = cv2_module.VideoCapture(str(source.absolute()))
+    except Exception:
+        return None
+
+    is_opened = True
+    try:
+        is_opened = bool(capture.isOpened())
+    except Exception:
+        is_opened = False
+    if not is_opened:
+        try:
+            capture.release()
+        except Exception:
+            pass
+        return None
+
+    try:
+        if at is not None and at >= 0:
+            seconds = max(at, 0.0)
+            try:
+                positioned = capture.set(
+                    getattr(cv2_module, "CAP_PROP_POS_MSEC", 0),
+                    seconds * 1000.0,
+                )
+            except Exception:
+                positioned = False
+            if not positioned:
+                try:
+                    fps = capture.get(getattr(cv2_module, "CAP_PROP_FPS", 5.0))
+                except Exception:
+                    fps = 0.0
+                if fps and fps > 0:
+                    try:
+                        capture.set(
+                            getattr(cv2_module, "CAP_PROP_POS_FRAMES", 1),
+                            max(int(round(fps * seconds)), 0),
+                        )
+                    except Exception:
+                        pass
+        ok, frame = capture.read()
+    except Exception:
+        return None
+    finally:
+        try:
+            capture.release()
+        except Exception:
+            pass
+
+    if not ok or frame is None:
+        return None
+
+    target_frame = _orient_opencv_frame_from_metadata(source, frame)
+    try:
+        height, width = target_frame.shape[:2]
+    except Exception:
+        return None
+    if (
+        scale is not None
+        and width > 0
+        and height > 0
+        and scale[0] > 0
+        and scale[1] > 0
+    ):
+        max_width, max_height = scale
+        ratio = min(max_width / width, max_height / height)
+        if ratio < 1.0:
+            new_width = max(int(width * ratio), 1)
+            new_height = max(int(height * ratio), 1)
+            if format == "jpeg":
+                if new_width % 2 == 1 and new_width > 1:
+                    new_width -= 1
+                if new_height % 2 == 1 and new_height > 1:
+                    new_height -= 1
+            interpolation = getattr(cv2_module, "INTER_AREA", 3)
+            try:
+                target_frame = cv2_module.resize(
+                    target_frame,
+                    (new_width, new_height),
+                    interpolation=interpolation,
+                )
+            except Exception:
+                return None
+
+    extension = ".png" if format == "png" else ".jpg"
+    params: list[int] = []
+    if format == "jpeg":
+        jpeg_quality = getattr(cv2_module, "IMWRITE_JPEG_QUALITY", None)
+        if jpeg_quality is not None:
+            params = [int(jpeg_quality), 92]
+
+    try:
+        success, buffer = cv2_module.imencode(extension, target_frame, params)
+    except Exception:
+        return None
+
+    if not success:
+        return None
+
+    try:
+        return bytes(buffer)
+    except Exception:
+        return None
+
+
+def _orient_opencv_frame_from_metadata(source: Path, frame: Any) -> Any:
+    """Rotate an OpenCV frame to match ffmpeg's display orientation."""
+    cv2_module = _load_cv2()
+    if cv2_module is None:
+        return frame
+
+    cw_degrees, _, _, _ = probe_video_rotation_info(source)
+    if cw_degrees == 90:
+        rotate_flag = getattr(cv2_module, "ROTATE_90_CLOCKWISE", None)
+    elif cw_degrees == 180:
+        rotate_flag = getattr(cv2_module, "ROTATE_180", None)
+    elif cw_degrees == 270:
+        rotate_flag = getattr(cv2_module, "ROTATE_90_COUNTERCLOCKWISE", None)
+    else:
+        rotate_flag = None
+
+    if rotate_flag is None:
+        return frame
+    try:
+        return cv2_module.rotate(frame, rotate_flag)
+    except Exception:
+        return frame
+
+
+def _probe_video_rotation_cache_key(source: Path) -> tuple[str, int, int] | None:
+    """Return a cache key that invalidates when the file metadata changes."""
+
+    try:
+        resolved = source.resolve()
+    except OSError:
+        resolved = source
+
+    try:
+        stat = resolved.stat()
+    except OSError:
+        return None
+
+    mtime_ns = getattr(stat, "st_mtime_ns", None)
+    if mtime_ns is None:
+        mtime_ns = int(stat.st_mtime * 1_000_000_000)
+    return (str(resolved), int(mtime_ns), int(stat.st_size))
+
+
+@lru_cache(maxsize=512)
+def _probe_video_rotation_info_cached(
+    resolved_path: str,
+    mtime_ns: int,
+    size: int,
+) -> tuple[int, int, int, bool]:
+    del mtime_ns, size
+    return _probe_video_rotation_info_uncached(Path(resolved_path))
+
+
+def probe_video_rotation_info(source: Path) -> tuple[int, int, int, bool]:
+    """Return rotation/raw dimensions and Linux 180° pre-rotation hint."""
+
+    cache_key = _probe_video_rotation_cache_key(source)
+    if cache_key is None:
+        return _probe_video_rotation_info_uncached(source)
+    return _probe_video_rotation_info_cached(*cache_key)
+
+
+def _probe_video_rotation_info_uncached(source: Path) -> tuple[int, int, int, bool]:
+    """Return rotation/raw dimensions and Linux 180° pre-rotation hint.
+
+    Returns a tuple ``(cw_degrees, raw_width, raw_height, linux_180_hint)`` where
+    *cw_degrees* is the clockwise rotation (0, 90, 180, 270) that must be
+    applied to the raw decoded frame for correct on-screen orientation.
+    *raw_width* and *raw_height* are the coded pixel dimensions **before**
+    rotation. *linux_180_hint* flags sources where Linux multimedia backends
+    are known to often deliver already-upright frames while preserving 180°
+    display-matrix metadata (notably some Apple QuickTime/iPhone files).
+
+    The value is derived from the ``Display Matrix`` side-data entry of the
+    first video stream.  On failure the tuple ``(0, 0, 0, False)`` is returned so
+    callers can safely destructure without error handling.
+    """
+
+    try:
+        meta = probe_media(source)
+    except ExternalToolError:
+        return (0, 0, 0, False)
+
+    streams = meta.get("streams", [])
+    if not isinstance(streams, list):
+        return (0, 0, 0, False)
+
+    for stream in streams:
+        if not isinstance(stream, dict):
+            continue
+        if stream.get("codec_type") != "video":
+            continue
+
+        raw_w = 0
+        raw_h = 0
+        try:
+            raw_w = int(stream.get("width", 0))
+            raw_h = int(stream.get("height", 0))
+        except (TypeError, ValueError):
+            pass
+
+        rotation = 0.0
+
+        # Primary source: Display Matrix in side_data_list.
+        side_data = stream.get("side_data_list", [])
+        if isinstance(side_data, list):
+            for sd in side_data:
+                if not isinstance(sd, dict):
+                    continue
+                if sd.get("side_data_type") == "Display Matrix":
+                    try:
+                        rotation = float(sd.get("rotation", 0))
+                    except (TypeError, ValueError):
+                        rotation = 0.0
+                    break
+
+        # Convert the raw angle (which follows ``av_display_rotation_get``
+        # sign convention — *counter-clockwise*) to *clockwise* degrees
+        # matching Qt's ``QVideoFrameFormat.Rotation`` values.
+        # Snap to the nearest 90° first so non-exact values (e.g. -89.9°)
+        # still map correctly, then **negate** to convert CCW→CW and apply
+        # Python modulo (``-(-90) == 90``, ``-(90) % 360 == 270``).
+        snapped = round(rotation / 90.0) * 90
+        cw = int(-snapped) % 360
+
+        linux_180_hint = False
+        if cw == 180:
+            format_dict = meta.get("format", {})
+            fmt_tags = format_dict.get("tags", {}) if isinstance(format_dict, dict) else {}
+            major_brand = ""
+            if isinstance(fmt_tags, dict):
+                major_brand = str(fmt_tags.get("major_brand", "")).strip().lower()
+
+            stream_tags = stream.get("tags", {})
+            handler_name = ""
+            if isinstance(stream_tags, dict):
+                handler_name = str(stream_tags.get("handler_name", "")).strip().lower()
+
+            linux_180_hint = (major_brand == "qt") or ("core media video" in handler_name)
+
+        _LINUX_180_HINT_CACHE[str(source.resolve())] = linux_180_hint
+        return (cw, raw_w, raw_h, linux_180_hint)
+
+    return (0, 0, 0, False)
+
+
+def probe_video_rotation(source: Path) -> tuple[int, int, int]:
+    """Return ``(cw_degrees, raw_width, raw_height)`` rotation info for *source*."""
+
+    cw, raw_w, raw_h, _ = probe_video_rotation_info(source)
+    return (cw, raw_w, raw_h)
+
+
+def get_linux_180_prerotate_hint(source: Path) -> bool:
+    """Return the most recently probed Linux 180° hint for *source*."""
+
+    return _LINUX_180_HINT_CACHE.get(str(source.resolve()), False)
+
+
+def probe_media(source: Path) -> Dict[str, Any]:
+    """Return ffprobe metadata for *source*.
+
+    The JSON structure mirrors ffprobe's ``show_format`` and ``show_streams``
+    output. ``ExternalToolError`` is raised when the toolchain is unavailable or
+    returns an error.
+    """
+
+    command = [
+        "ffprobe",
+        "-hide_banner",
+        "-loglevel",
+        _FFMPEG_LOG_LEVEL,
+        "-print_format",
+        "json",
+        "-show_format",
+        "-show_streams",
+        str(source.absolute()),
+    ]
+
+    with media_access.read(source):
+        process = _run_command(command)
+    if process.returncode != 0 or not process.stdout:
+        stderr = process.stderr.decode("utf-8", "ignore").strip()
+        raise ExternalToolError(
+            f"ffprobe failed to inspect {source}: {stderr or 'unknown error'}"
+        )
+    try:
+        return json.loads(process.stdout.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ExternalToolError("ffprobe returned invalid JSON output") from exc

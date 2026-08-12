@@ -1,0 +1,17 @@
+# iPhotron / 照片图库完整能力（可选，不随 run_ui 默认安装）
+# 安装：pip install -r client/scripts/requirements-iphoto.txt
+jsonschema>=4
+typer>=0.12
+rich>=13
+pillow-heif>=0.16
+Pillow>=10
+pyexiftool>=0.5.5
+xxhash>=3
+imagehash>=4
+python-dateutil>=2
+reverse-geocoder>=1.5.1
+numba>=0.60
+rawpy>=0.23
+PyOpenGL>=3.1.7
+mapbox-vector-tile>=1.2
+# av：高级视频/Live 解码可选

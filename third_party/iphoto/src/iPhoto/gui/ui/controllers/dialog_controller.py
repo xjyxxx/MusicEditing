@@ -1,0 +1,148 @@
+"""Dialog orchestration helpers for the main window."""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from PySide6.QtCore import QCoreApplication
+from PySide6.QtWidgets import QWidget
+
+from ....application.contracts.runtime_entry_contract import RuntimeEntryContract
+from ....config import DEFAULT_EXCLUDE, DEFAULT_INCLUDE
+from ....errors import LibraryError
+from ..widgets import dialogs
+
+if TYPE_CHECKING:
+    from ..widgets.chrome_status_bar import ChromeStatusBar
+
+_logger = logging.getLogger(__name__)
+
+
+class DialogController:
+    """Centralise dialog and message interactions."""
+
+    def __init__(
+        self,
+        parent: QWidget,
+        context: RuntimeEntryContract,
+        status_bar: ChromeStatusBar,
+    ) -> None:
+        self._parent = parent
+        self._context = context
+        self._status = status_bar
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def open_album_dialog(self) -> Path | None:
+        return dialogs.select_directory(
+            self._parent,
+            QCoreApplication.translate("DialogController", "Select album", None),
+        )
+
+    def bind_library_dialog(self) -> Path | None:
+        root = dialogs.select_directory(
+            self._parent,
+            QCoreApplication.translate("DialogController", "Select Basic Library", None),
+            use_qt_directory_dialog_on_macos=True,
+        )
+        if root is None:
+            _logger.info("bind_library_dialog: user cancelled folder selection")
+            return None
+        _logger.info("bind_library_dialog: user selected folder %s", root)
+        try:
+            if self._context.library.root() is not None:
+                _logger.info("bind_library_dialog: cancelling active scans before rebind")
+                self._context.facade.cancel_active_scans()
+            self._context.open_library(root)
+            _logger.info(
+                "bind_library_dialog: bind_path succeeded, root=%s",
+                self._context.library.root(),
+            )
+        except LibraryError as exc:
+            _logger.error("bind_library_dialog: bind_path failed: %s", exc)
+            dialogs.show_error(self._parent, str(exc))
+            return None
+        bound_root = self._context.library.root()
+        if bound_root is not None:
+            self._context.settings.set("basic_library_path", str(bound_root))
+            self._start_initial_scan_if_needed(bound_root)
+            self._status.showMessage(
+                QCoreApplication.translate(
+                    "DialogController",
+                    "Basic Library bound to {path}",
+                    None,
+                ).format(path=bound_root)
+            )
+            try:
+                self._context.facade.open_album(bound_root)
+                _logger.info("bind_library_dialog: facade.open_album succeeded")
+            except Exception:
+                _logger.exception("bind_library_dialog: facade.open_album failed")
+            sidebar = getattr(getattr(self._parent, "ui", None), "sidebar", None)
+            if sidebar is not None:
+                _logger.info("bind_library_dialog: selecting All Photos in sidebar")
+                sidebar.select_all_photos(emit_signal=True)
+            else:
+                _logger.warning("bind_library_dialog: sidebar not found on parent")
+        else:
+            _logger.warning("bind_library_dialog: library.root() is None after bind_path")
+        return bound_root
+
+    def _start_initial_scan_if_needed(self, bound_root: Path) -> None:
+        if self._context.library.is_scanning_path(bound_root):
+            return
+        scan_service = getattr(self._context.library, "scan_service", None)
+        is_complete = False
+        is_scan_scope_complete = getattr(scan_service, "is_scan_scope_complete", None)
+        if callable(is_scan_scope_complete):
+            try:
+                is_complete = bool(is_scan_scope_complete(bound_root))
+            except Exception:
+                is_complete = False
+        if is_complete:
+            return
+        self._context.facade.scan_root_async(
+            bound_root,
+            include=DEFAULT_INCLUDE,
+            exclude=DEFAULT_EXCLUDE,
+        )
+
+    def show_error(self, message: str) -> None:
+        dialogs.show_error(self._parent, message)
+
+    def prompt_for_basic_library(self) -> None:
+        dialogs.show_information(
+            self._parent,
+            QCoreApplication.translate(
+                "DialogController",
+                "Select a folder to use as your Basic Library.",
+                None,
+            ),
+            title=QCoreApplication.translate(
+                "DialogController",
+                "Bind Basic Library",
+                None,
+            ),
+        )
+        self.bind_library_dialog()
+
+    def prompt_restore_to_root(self, filename: str) -> bool:
+        """Ask whether *filename* should be restored to the library root."""
+
+        message = QCoreApplication.translate(
+            "DialogController",
+            "The original album for '{filename}' could not be found or its original "
+            "location could not be determined. Do you want to restore this file "
+            "to the main 'Basic Library' folder instead?",
+            None,
+        ).format(filename=filename)
+        return dialogs.confirm_action(
+            self._parent,
+            message,
+            title=QCoreApplication.translate("DialogController", "Restore Failed", None),
+            yes_label=QCoreApplication.translate("DialogController", "Yes", None),
+            no_label=QCoreApplication.translate("DialogController", "No", None),
+        )

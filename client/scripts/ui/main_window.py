@@ -26,7 +26,6 @@ from ui.enhance_page import EnhancePage
 from ui.export_options_dialog import ExportOptionsDialog
 from ui.highlight_timeline import HighlightTimelineWidget
 from ui.media_library_page import MediaLibraryPage
-from ui.photo_library_page import PhotoLibraryPage
 from ui.pipeline_queue_page import PipelineQueuePage
 from ui.profile_page import ProfilePage
 from ui.setup_wizard import SetupWizardDialog
@@ -1099,7 +1098,10 @@ class MainWindow(QMainWindow):
         if index == TAB_STEGO:
             return StegoPage(self._vm)
         if index == TAB_PHOTOS:
-            return PhotoLibraryPage(
+            # 延迟导入，避免启动主窗口时拉起 iPhotron 相关模块
+            from ui.iphoto_host_page import IPhotoHostPage
+
+            return IPhotoHostPage(
                 self._vm,
                 open_image_editor=self.open_photo_image_editor,
                 open_video_editor=self.open_photo_video_editor,

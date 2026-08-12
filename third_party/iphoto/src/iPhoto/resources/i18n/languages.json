@@ -1,0 +1,24 @@
+{
+  "default": "en",
+  "languages": [
+    {
+      "code": "system",
+      "native_name": "English",
+      "english_name": "English"
+    },
+    {
+      "code": "de",
+      "native_name": "Deutsch",
+      "english_name": "German",
+      "qt_locale": "de_DE",
+      "qm": "iPhoto_de.qm"
+    },
+    {
+      "code": "zh-CN",
+      "native_name": "简体中文",
+      "english_name": "Simplified Chinese",
+      "qt_locale": "zh_CN",
+      "qm": "iPhoto_zh_CN.qm"
+    }
+  ]
+}

@@ -19,7 +19,7 @@
 | [player_decode_flow.md](player_decode_flow.md) | 首页播放器调用链（OPEN/NEXT/SEEK、音画双通道） |
 | [release_checklist.md](release_checklist.md) | 发版前短测 / 冒烟清单 |
 | [distribution.md](distribution.md) | 便携验收、签名、Inno、卡密、自动更新 |
-| [流程图/README.md](../流程图/README.md) | 播放器分层 mermaid 总览 |
+| [流程图/README.md](../流程图/README.md) | 播放器 + 照片图库 mermaid 总览 |
 
 ## 产品对照（只读）
 
@@ -49,5 +49,5 @@
 
 1. [implementation_flow.md](implementation_flow.md) §1–§2（架构与构建）
 2. 功能 → `feature_flows`；UI → `mvvm_and_ui`；引擎 → `media_engine`
-3. 播放器细节 → `player_decode_flow` + 流程图
+3. 播放器细节 → `player_decode_flow` + 流程图 §1；照片图库 → `photo_manager` + 流程图 §2
 4. 查进度用枢纽 §3；跑命令用枢纽 §4

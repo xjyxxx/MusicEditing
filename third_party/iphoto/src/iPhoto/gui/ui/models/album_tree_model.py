@@ -1,0 +1,526 @@
+"""Qt item model exposing the Basic Library tree."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from pathlib import Path
+from typing import Dict, List, Optional
+
+from PySide6.QtCore import QAbstractItemModel, QModelIndex, QObject, Qt
+from PySide6.QtGui import QIcon
+
+from ....library.runtime_controller import LibraryRuntimeController
+from ....library.tree import AlbumNode
+from ...i18n import tr
+from ...services.people_service_resolver import resolve_people_service
+from ...services.pinned_items_service import PinnedItemsService, PinnedSidebarItem
+from ..icon import load_icon
+from ..palette import SIDEBAR_ICON_COLOR_HEX
+
+
+class AlbumTreeRole(int, Enum):
+    """Custom roles exposed by :class:`AlbumTreeModel`."""
+
+    NODE_TYPE = Qt.ItemDataRole.UserRole + 1
+    FILE_PATH = Qt.ItemDataRole.UserRole + 2
+    ALBUM_NODE = Qt.ItemDataRole.UserRole + 3
+    PINNED_ITEM = Qt.ItemDataRole.UserRole + 4
+
+
+class NodeType(Enum):
+    """Types of nodes available in the sidebar tree."""
+
+    ROOT = auto()
+    HEADER = auto()
+    SECTION = auto()
+    STATIC = auto()
+    ACTION = auto()
+    ALBUM = auto()
+    SUBALBUM = auto()
+    PINNED_ALBUM = auto()
+    PINNED_PERSON = auto()
+    PINNED_GROUP = auto()
+    SEPARATOR = auto()
+
+
+@dataclass(slots=True)
+class AlbumTreeItem:
+    """Internal tree item used to back the Qt model.
+
+    The optional ``icon_name`` attribute lets callers opt into bespoke icons
+    when the generic node-type look-up is insufficient. This keeps icon
+    selection centralised while still allowing special cases (such as the
+    folder glyph requested for the promoted "Albums" header) to reuse the same
+    tree representation logic.
+    """
+
+    title: str
+    node_type: NodeType
+    icon_name: Optional[str] = None
+    album: Optional[AlbumNode] = None
+    pinned_item: Optional[PinnedSidebarItem] = None
+    parent: Optional["AlbumTreeItem"] = None
+    children: List["AlbumTreeItem"] = field(default_factory=list)
+
+    def add_child(self, item: "AlbumTreeItem") -> None:
+        item.parent = self
+        self.children.append(item)
+
+    def child(self, index: int) -> Optional["AlbumTreeItem"]:
+        if 0 <= index < len(self.children):
+            return self.children[index]
+        return None
+
+    def row(self) -> int:
+        if self.parent is None:
+            return 0
+        try:
+            return self.parent.children.index(self)
+        except ValueError:
+            return 0
+
+
+class AlbumTreeModel(QAbstractItemModel):
+    """Tree model describing the Basic Library hierarchy."""
+
+    STATIC_NODES: tuple[str, ...] = (
+        "All Photos",
+        "Videos",
+        "Live Photos",
+        "Favorites",
+        "People",
+        "Location",
+    )
+
+    TRAILING_STATIC_NODES: tuple[str, ...] = ("Recently Deleted",)
+
+    # Store the icon *base* names so the delegate can decide whether to append
+    # the ``.fill`` suffix depending on the selection state. This keeps the
+    # model responsible only for supplying the default, unselected icon.
+    _STATIC_ICON_MAP: dict[str, str] = {
+        "all photos": "photo.on.rectangle",
+        "videos": "video",
+        "live photos": "livephoto",
+        "favorites": "suit.heart",
+        "people": "person.crop.square",
+        "location": "mappin.and.ellipse",
+        "recently deleted": "trash",
+    }
+
+    def __init__(self, library: LibraryRuntimeController, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._library = library
+        self._pinned_service: PinnedItemsService | None = None
+        self._root_item = AlbumTreeItem("root", NodeType.ROOT)
+        self._path_map: Dict[Path, AlbumTreeItem] = {}
+        self._pinned_map: Dict[tuple[str, str], AlbumTreeItem] = {}
+        self._library.treeUpdated.connect(self.refresh)
+        self.refresh()
+
+    # ------------------------------------------------------------------
+    # QAbstractItemModel API
+    # ------------------------------------------------------------------
+    def columnCount(self, _parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
+        return 1
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
+        item = self._item_from_index(parent)
+        return len(item.children)
+
+    def index(self, row: int, column: int, parent: QModelIndex = QModelIndex()):  # noqa: N802
+        if column != 0:
+            return QModelIndex()
+        parent_item = self._item_from_index(parent)
+        child = parent_item.child(row)
+        if child is None:
+            return QModelIndex()
+        return self.createIndex(row, column, child)
+
+    def parent(self, index: QModelIndex) -> QModelIndex:  # noqa: N802
+        if not index.isValid():
+            return QModelIndex()
+        item = self._item_from_index(index)
+        if item.parent is None or item.parent is self._root_item:
+            return QModelIndex()
+        return self.createIndex(item.parent.row(), 0, item.parent)
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):  # noqa: N802
+        if not index.isValid():
+            return None
+        item = self._item_from_index(index)
+        if role == Qt.ItemDataRole.DisplayRole:
+            return self._display_title(item)
+        if role == Qt.ItemDataRole.ToolTipRole and item.album is not None:
+            return str(item.album.path)
+        if role == AlbumTreeRole.NODE_TYPE:
+            return item.node_type
+        if role == AlbumTreeRole.ALBUM_NODE:
+            return item.album
+        if role == AlbumTreeRole.FILE_PATH and item.album is not None:
+            return item.album.path
+        if role == AlbumTreeRole.PINNED_ITEM:
+            return item.pinned_item
+        if role == Qt.ItemDataRole.DecorationRole:
+            return self._icon_for_item(item)
+        return None
+
+    def flags(self, index: QModelIndex) -> Qt.ItemFlag:  # noqa: N802
+        if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+        item = self._item_from_index(index)
+        if item.node_type in {NodeType.SECTION, NodeType.SEPARATOR}:
+            return Qt.ItemFlag.ItemIsEnabled
+        if item.node_type == NodeType.HEADER:
+            if item.title == "Pinned":
+                return Qt.ItemFlag.ItemIsEnabled
+            return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        if item.node_type == NodeType.ACTION:
+            return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+
+    # ------------------------------------------------------------------
+    # Public helpers
+    # ------------------------------------------------------------------
+    def set_pinned_service(self, service: PinnedItemsService | None) -> None:
+        """Attach a pinned-items service and keep the tree in sync with it."""
+
+        if self._pinned_service is service:
+            return
+        if self._pinned_service is not None:
+            try:
+                self._pinned_service.changed.disconnect(self.refresh)
+            except (RuntimeError, TypeError):
+                pass
+        self._pinned_service = service
+        if service is not None:
+            service.changed.connect(self.refresh)
+        self.refresh()
+
+    def refresh(self) -> None:
+        """Rebuild the model from the current state of the library."""
+
+        self.beginResetModel()
+        self._root_item = AlbumTreeItem("root", NodeType.ROOT)
+        self._path_map.clear()
+        self._pinned_map.clear()
+        library_root = self._library.root()
+        if library_root is None:
+            placeholder = AlbumTreeItem("Bind Basic Library…", NodeType.ACTION)
+            self._root_item.add_child(placeholder)
+            self.endResetModel()
+            return
+
+        header = AlbumTreeItem(
+            "Basic Library",
+            NodeType.HEADER,
+            icon_name="photo.on.rectangle.svg",
+        )
+        self._root_item.add_child(header)
+        # The smart collections belong directly under the "Basic Library" header,
+        # however they do not require an inline separator anymore because the
+        # divider is now rendered at the root level (see below). Therefore we
+        # suppress the trailing separator that :meth:`_add_static_nodes` used to
+        # inject automatically.
+        self._add_static_nodes(header, add_separator=False)
+
+        # Insert the separator as a root-level item so the break between the
+        # system smart albums and the user-created collections stays exactly where
+        # it lived before the hierarchy change. Rendering it at this level keeps
+        # the visual grouping intact regardless of how many custom albums exist.
+        self._root_item.add_child(AlbumTreeItem("──────────", NodeType.SEPARATOR))
+
+        pinned_header = AlbumTreeItem("Pinned", NodeType.HEADER)
+        self._add_pinned_nodes(pinned_header, library_root)
+        if pinned_header.children:
+            self._root_item.add_child(pinned_header)
+            self._root_item.add_child(AlbumTreeItem("──────────", NodeType.SEPARATOR))
+
+        # Promote the Albums section to a header-level entry so that it shares the
+        # same visual hierarchy, font weight, and font size as the "Basic Library"
+        # group. Assigning the dedicated folder SVG keeps the bespoke iconography
+        # request intact while the emoji prefix maintains parity with the existing
+        # bookshelf glyph for the library header.
+        albums_section = AlbumTreeItem(
+            "Albums",
+            NodeType.HEADER,
+            icon_name="folder.svg",
+        )
+        self._root_item.add_child(albums_section)
+        for album in self._library.list_albums():
+            album_item = self._create_album_item(album, NodeType.ALBUM)
+            albums_section.add_child(album_item)
+            for child in self._library.list_children(album):
+                child_item = self._create_album_item(child, NodeType.SUBALBUM)
+                album_item.add_child(child_item)
+        # Append the housekeeping entries to the root so "Recently Deleted"
+        # continues to anchor the very bottom of the sidebar even after Albums was
+        # promoted to a top-level header. The helper also restores the divider that
+        # separated the smart collections from the trash entry in the original UI.
+        self._add_trailing_static_nodes(self._root_item)
+        self.endResetModel()
+
+    def retranslate_ui(self) -> None:
+        """Notify views that translated display text changed."""
+
+        self._emit_display_changed(self._root_item)
+
+    def index_for_path(self, path: Path) -> QModelIndex:
+        """Return the model index associated with *path*, if any."""
+
+        item = self._path_map.get(path) or self._path_map.get(path.resolve())
+        if item is None:
+            return QModelIndex()
+        return self.createIndex(item.row(), 0, item)
+
+    def index_for_pinned_item(self, pinned_item: PinnedSidebarItem) -> QModelIndex:
+        """Return the index associated with *pinned_item*, if any."""
+
+        item = self._pinned_map.get((pinned_item.kind, pinned_item.item_id))
+        if item is None:
+            return QModelIndex()
+        return self.createIndex(item.row(), 0, item)
+
+    def iter_album_entries(self) -> list[tuple[str, Path]]:
+        """Return a display-friendly list of ``(label, path)`` pairs for albums."""
+
+        entries: list[tuple[str, Path]] = []
+
+        def _walk(node: AlbumTreeItem, parents: list[str]) -> None:
+            for child in node.children:
+                if child.node_type in {NodeType.ALBUM, NodeType.SUBALBUM} and child.album is not None:
+                    labels = parents + [child.title]
+                    entries.append((" > ".join(labels), child.album.path))
+                    _walk(child, labels)
+                else:
+                    _walk(child, parents)
+
+        _walk(self._root_item, [])
+        return entries
+
+    def item_from_index(self, index: QModelIndex) -> AlbumTreeItem | None:
+        """Expose the internal item for testing and helper widgets."""
+
+        if not index.isValid():
+            return None
+        return self._item_from_index(index)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _item_from_index(self, index: QModelIndex) -> AlbumTreeItem:
+        if index.isValid():
+            item = index.internalPointer()
+            if isinstance(item, AlbumTreeItem):
+                return item
+        return self._root_item
+
+    def _display_title(self, item: AlbumTreeItem) -> str:
+        if item.node_type in {
+            NodeType.ACTION,
+            NodeType.HEADER,
+            NodeType.STATIC,
+        }:
+            return self._translated_fixed_title(item.title)
+        return item.title
+
+    def _translated_fixed_title(self, title: str) -> str:
+        translations = {
+            "Bind Basic Library…": tr("AlbumSidebar", "Bind Basic Library…"),
+            "Basic Library": tr("AlbumSidebar", "Basic Library"),
+            "All Photos": tr("AlbumSidebar", "All Photos"),
+            "Videos": tr("AlbumSidebar", "Videos"),
+            "Live Photos": tr("AlbumSidebar", "Live Photos"),
+            "Favorites": tr("AlbumSidebar", "Favorites"),
+            "People": tr("AlbumSidebar", "People"),
+            "Location": tr("AlbumSidebar", "Location"),
+            "Pinned": tr("AlbumSidebar", "Pinned"),
+            "Albums": tr("AlbumSidebar", "Albums"),
+            "Recently Deleted": tr("AlbumSidebar", "Recently Deleted"),
+        }
+        return translations.get(title, title)
+
+    def _emit_display_changed(self, parent_item: AlbumTreeItem) -> None:
+        for child in parent_item.children:
+            index = self.createIndex(child.row(), 0, child)
+            self.dataChanged.emit(index, index, [Qt.ItemDataRole.DisplayRole])
+            self._emit_display_changed(child)
+
+    def _add_static_nodes(self, header: AlbumTreeItem, *, add_separator: bool = True) -> None:
+        """Populate *header* with the built-in smart collections.
+
+        The ``add_separator`` flag controls whether a separator row should be
+        appended after the smart albums. Callers can disable it when the
+        separator is rendered elsewhere (for example, at the root level) to
+        avoid drawing duplicate dividers.
+        """
+
+        for title in self.STATIC_NODES:
+            header.add_child(AlbumTreeItem(title, NodeType.STATIC))
+        if add_separator and self.STATIC_NODES:
+            header.add_child(AlbumTreeItem("──────────", NodeType.SEPARATOR))
+
+    def _add_trailing_static_nodes(self, parent: AlbumTreeItem) -> None:
+        """Append the trailing static entries (e.g. "Recently Deleted")."""
+
+        if self.TRAILING_STATIC_NODES:
+            parent.add_child(AlbumTreeItem("──────────", NodeType.SEPARATOR))
+        for title in self.TRAILING_STATIC_NODES:
+            parent.add_child(AlbumTreeItem(title, NodeType.STATIC))
+
+    def _create_album_item(self, album: AlbumNode, node_type: NodeType) -> AlbumTreeItem:
+        item = AlbumTreeItem(album.title, node_type, album=album)
+        self._path_map[album.path] = item
+        self._path_map[album.path.resolve()] = item
+        return item
+
+    def _add_pinned_nodes(self, header: AlbumTreeItem, library_root: Path) -> None:
+        """Populate the pinned section from persisted settings."""
+
+        if self._pinned_service is None:
+            return
+
+        pinned_items = list(self._pinned_service.items_for_library(library_root))
+        if not pinned_items:
+            return
+
+        album_lookup = self._album_lookup()
+        person_lookup: dict[str, object] = {}
+        group_lookup: dict[str, object] = {}
+
+        needs_people = any(pinned_item.kind == "person" for pinned_item in pinned_items)
+        needs_groups = any(pinned_item.kind == "group" for pinned_item in pinned_items)
+        if needs_people or needs_groups:
+            people_service = resolve_people_service(
+                self._library,
+                library_root=library_root,
+            )
+            if people_service is not None:
+                cluster_summaries = people_service.list_clusters()
+                if needs_people:
+                    person_lookup = {summary.person_id: summary for summary in cluster_summaries}
+                if needs_groups:
+                    group_lookup = {
+                        summary.group_id: summary
+                        for summary in people_service.list_groups(summaries=cluster_summaries)
+                    }
+
+        for pinned_item in pinned_items:
+            item = self._create_pinned_item(
+                pinned_item,
+                album_lookup=album_lookup,
+                person_lookup=person_lookup,
+                group_lookup=group_lookup,
+            )
+            if item is None:
+                continue
+            header.add_child(item)
+            self._pinned_map[(pinned_item.kind, pinned_item.item_id)] = item
+
+    def _create_pinned_item(
+        self,
+        pinned_item: PinnedSidebarItem,
+        *,
+        album_lookup: dict[Path, AlbumNode],
+        person_lookup: dict[str, object],
+        group_lookup: dict[str, object],
+    ) -> AlbumTreeItem | None:
+        if pinned_item.kind == "album":
+            try:
+                album_path = Path(pinned_item.item_id)
+            except (TypeError, ValueError):
+                return None
+            album = album_lookup.get(album_path)
+            title = album.title if album is not None else pinned_item.label
+            return AlbumTreeItem(
+                title,
+                NodeType.PINNED_ALBUM,
+                album=album,
+                pinned_item=pinned_item,
+            )
+        if pinned_item.kind == "person":
+            summary = person_lookup.get(pinned_item.item_id)
+            title = pinned_item.label if pinned_item.custom_label else (
+                str(getattr(summary, "name", "") or "").strip() or pinned_item.label
+            )
+            return AlbumTreeItem(
+                title,
+                NodeType.PINNED_PERSON,
+                pinned_item=pinned_item,
+            )
+        if pinned_item.kind == "group":
+            summary = group_lookup.get(pinned_item.item_id)
+            title = pinned_item.label if pinned_item.custom_label else (
+                str(getattr(summary, "name", "") or "").strip() or pinned_item.label
+            )
+            return AlbumTreeItem(
+                title,
+                NodeType.PINNED_GROUP,
+                pinned_item=pinned_item,
+            )
+        return None
+
+    def _album_lookup(self) -> dict[Path, AlbumNode]:
+        lookup: dict[Path, AlbumNode] = {}
+        for album in self._library.list_albums():
+            lookup[album.path] = album
+            try:
+                lookup[album.path.resolve()] = album
+            except OSError:
+                pass
+            for child in self._library.list_children(album):
+                lookup[child.path] = child
+                try:
+                    lookup[child.path.resolve()] = child
+                except OSError:
+                    pass
+        return lookup
+
+    def _icon_for_item(
+        self,
+        item: AlbumTreeItem,
+        stroke_width: float | None = None,
+        color: str | None = None,
+    ) -> QIcon:
+        """Return the icon representing *item*, optionally adjusting stroke width."""
+
+        if item.icon_name:
+            # When an item declares a dedicated icon we respect it verbatim. This
+            # is used by the promoted headers so they can reference bespoke SVG
+            # assets (for example, the folder icon requested for the Albums
+            # section) without overloading the generic header styling below.
+            return load_icon(item.icon_name, stroke_width=stroke_width, color=color)
+        if item.node_type == NodeType.ACTION:
+            return load_icon("plus.circle", stroke_width=stroke_width, color=color)
+        if item.node_type == NodeType.STATIC:
+            icon_name = self._STATIC_ICON_MAP.get(item.title.casefold())
+            if icon_name:
+                # Static entries mirror the macOS sidebar styling, so we tint the
+                # SF Symbols inspired SVGs with the shared blue accent colour. We
+                # defer fill selection to the delegate, therefore the base icon is
+                # always loaded without the ".fill" suffix at this stage.
+                return load_icon(
+                    f"{icon_name}.svg",
+                    color=SIDEBAR_ICON_COLOR_HEX,
+                    stroke_width=stroke_width,
+                )
+        if item.node_type in {NodeType.ALBUM, NodeType.SUBALBUM}:
+            return load_icon("rectangle.stack", stroke_width=stroke_width, color=color)
+        if item.node_type == NodeType.PINNED_ALBUM:
+            return load_icon("rectangle.stack", stroke_width=stroke_width, color=color)
+        if item.node_type == NodeType.PINNED_PERSON:
+            return load_icon("person.svg", stroke_width=stroke_width, color=color)
+        if item.node_type == NodeType.PINNED_GROUP:
+            return load_icon("person.2.svg", stroke_width=stroke_width, color=color)
+        if item.node_type == NodeType.HEADER:
+            if item.title == "Pinned":
+                return QIcon()
+            return load_icon(
+                "photo.on.rectangle",
+                stroke_width=stroke_width,
+                color=color,
+            )
+        return QIcon()
+
+
+__all__ = ["AlbumTreeModel", "AlbumTreeItem", "NodeType", "AlbumTreeRole"]

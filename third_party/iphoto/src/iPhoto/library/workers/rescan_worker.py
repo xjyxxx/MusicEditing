@@ -1,0 +1,94 @@
+"""Background worker that refreshes album indexes after restore operations."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from PySide6.QtCore import QObject, QRunnable, Signal
+
+from ...bootstrap.library_scan_service import LibraryScanService
+from ...errors import IPhotoError
+
+
+class RescanSignals(QObject):
+    """Signal bundle emitted by :class:`RescanWorker` while executing."""
+
+    progressUpdated = Signal(Path, int, int)
+    finished = Signal(Path, bool)
+    error = Signal(Path, str)
+
+
+class RescanWorker(QRunnable):
+    """Execute a blocking session rescan on a worker thread."""
+
+    def __init__(
+        self,
+        root: Path,
+        signals: RescanSignals,
+        *,
+        library_root: Path | None = None,
+        scan_service: LibraryScanService | None = None,
+    ) -> None:
+        super().__init__()
+        self.setAutoDelete(False)
+        self._root = Path(root)
+        self._signals = signals
+        self._library_root = library_root
+        self._scan_service = scan_service
+
+    @property
+    def root(self) -> Path:
+        """Return the album directory that will be refreshed."""
+
+        return self._root
+
+    @property
+    def library_root(self) -> Path | None:
+        """Return the library root used for the rescan."""
+
+        return self._library_root
+
+    @property
+    def signals(self) -> RescanSignals:
+        """Expose the signal container so callers can wire it up."""
+
+        return self._signals
+
+    @property
+    def scan_service(self) -> LibraryScanService:
+        """Return the session scan service used by the worker."""
+
+        if self._scan_service is None:
+            self._scan_service = LibraryScanService(
+                self._library_root or self._root
+            )
+        return self._scan_service
+
+    def run(self) -> None:  # pragma: no cover - executed on worker thread
+        """Perform the rescan and emit the outcome back to the GUI thread."""
+
+        success = False
+        try:
+            def progress_callback(processed: int, total: int) -> None:
+                self._signals.progressUpdated.emit(self._root, processed, total)
+
+            self.scan_service.refresh_restored_album(
+                self._root,
+                progress_callback=progress_callback,
+                pair_live=True,
+            )
+        except IPhotoError as exc:
+            # Surface domain-specific failures with the album path attached so the
+            # facade can relay meaningful diagnostics to the user.
+            self._signals.error.emit(self._root, str(exc))
+        except Exception as exc:  # pragma: no cover - defensive safety net
+            self._signals.error.emit(self._root, str(exc))
+        else:
+            success = True
+        finally:
+            # Always emit ``finished`` so the task manager can release bookkeeping
+            # regardless of success or failure.
+            self._signals.finished.emit(self._root, success)
+
+
+__all__ = ["RescanSignals", "RescanWorker"]

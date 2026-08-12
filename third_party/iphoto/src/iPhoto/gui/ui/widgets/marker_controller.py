@@ -1,0 +1,794 @@
+"""Controller that manages clustering and interaction for map markers."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import math
+from pathlib import Path
+from typing import Callable, Dict, Iterable, Optional, Sequence
+
+from PySide6.QtCore import QObject, QPointF, QRectF, QSize, QThread, QTimer, Signal
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QApplication
+
+from maps.map_widget._map_widget_base import MapWidgetBase
+from maps.map_widget.map_renderer import CityAnnotation
+
+from ....library.runtime_controller import GeotaggedAsset
+from ..tasks.thumbnail_loader import ThumbnailLoader
+
+
+@dataclass
+class _MarkerCluster:
+    """Aggregate of geotagged assets rendered as a single marker."""
+
+    representative: GeotaggedAsset
+    assets: list[GeotaggedAsset] = field(default_factory=list)
+    latitude_sum: float = 0.0
+    longitude_sum: float = 0.0
+    screen_pos: QPointF = field(default_factory=QPointF)
+    screen_x_sum: float = 0.0
+    screen_y_sum: float = 0.0
+    bounding_rect: QRectF = field(default_factory=QRectF)
+
+    def __post_init__(self) -> None:
+        """Prime the cached aggregates once the dataclass is initialised."""
+
+        if not self.assets:
+            self.assets.append(self.representative)
+        self.latitude_sum = sum(asset.latitude for asset in self.assets)
+        self.longitude_sum = sum(asset.longitude for asset in self.assets)
+        count = len(self.assets)
+        if count:
+            self.screen_x_sum = self.screen_pos.x() * float(count)
+            self.screen_y_sum = self.screen_pos.y() * float(count)
+
+    @property
+    def latitude(self) -> float:
+        """Return the average latitude represented by the cluster."""
+
+        count = len(self.assets) or 1
+        return self.latitude_sum / count
+
+    @property
+    def longitude(self) -> float:
+        """Return the average longitude represented by the cluster."""
+
+        count = len(self.assets) or 1
+        return self.longitude_sum / count
+
+    def add_asset(
+        self,
+        asset: GeotaggedAsset,
+        projector: Callable[[float, float], Optional[QPointF]] | None = None,
+        *,
+        projected_point: Optional[QPointF] = None,
+    ) -> None:
+        """Merge *asset* into the cluster and refresh cached aggregates."""
+
+        self.assets.append(asset)
+        self.latitude_sum += asset.latitude
+        self.longitude_sum += asset.longitude
+        if projected_point is not None:
+            count = float(len(self.assets))
+            self.screen_x_sum += projected_point.x()
+            self.screen_y_sum += projected_point.y()
+            self.screen_pos = QPointF(self.screen_x_sum / count, self.screen_y_sum / count)
+        elif projector is not None:
+            self._reproject(projector)
+
+    def _reproject(self, projector: Callable[[float, float], Optional[QPointF]]) -> None:
+        """Project the average coordinate back into widget space."""
+
+        point = projector(self.longitude, self.latitude)
+        if point is None:
+            return
+        self.screen_pos = point
+        count = float(len(self.assets))
+        self.screen_x_sum = point.x() * count
+        self.screen_y_sum = point.y() * count
+
+
+class _ClusterWorker(QObject):
+    """Worker object that performs clustering on a dedicated thread."""
+
+    finished = Signal(int, list)
+
+    TILE_SIZE = 256
+    MERCATOR_LAT_BOUND = 85.05112878
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._interrupted = False
+
+    def interrupt(self) -> None:
+        """Request cancellation of the currently running clustering job."""
+
+        self._interrupted = True
+
+    def build_clusters(
+        self,
+        request_id: int,
+        assets: Sequence[GeotaggedAsset],
+        width: int,
+        height: int,
+        center_x: float,
+        center_y: float,
+        zoom: float,
+        threshold: float,
+        cell_size: int,
+        margin: int,
+    ) -> None:
+        """Project *assets* and aggregate them into clusters in screen space."""
+
+        self._interrupted = False
+
+        if width <= 0 or height <= 0:
+            self.finished.emit(request_id, [])
+            return
+
+        world_size = self._world_size(zoom)
+        center_px = center_x * world_size
+        center_py = center_y * world_size
+        top_left_x = center_px - width / 2.0
+        top_left_y = center_py - height / 2.0
+        half_world = world_size / 2.0
+
+        grid: Dict[tuple[int, int], list[_MarkerCluster]] = {}
+        clusters: list[_MarkerCluster] = []
+
+        for asset in assets:
+            if self._interrupted:
+                return
+
+            point = self._project_to_screen(
+                asset.longitude,
+                asset.latitude,
+                top_left_x,
+                top_left_y,
+                center_px,
+                center_py,
+                world_size,
+                half_world,
+            )
+
+            if point is None:
+                continue
+
+            if point.x() < -margin or point.y() < -margin:
+                continue
+            if point.x() > width + margin or point.y() > height + margin:
+                continue
+
+            cell_x = int(point.x() // cell_size)
+            cell_y = int(point.y() // cell_size)
+            candidates: list[_MarkerCluster] = []
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    candidates.extend(grid.get((cell_x + dx, cell_y + dy), []))
+
+            assigned = False
+            for cluster in candidates:
+                if MarkerController.distance(cluster.screen_pos, point) <= threshold:
+                    cluster.add_asset(asset, projected_point=point)
+                    new_cell = (
+                        int(cluster.screen_pos.x() // cell_size),
+                        int(cluster.screen_pos.y() // cell_size),
+                    )
+                    if getattr(cluster, "cell", None) != new_cell:
+                        old_cell = getattr(cluster, "cell", None)
+                        if old_cell in grid:
+                            try:
+                                grid[old_cell].remove(cluster)
+                            except ValueError:
+                                pass
+                        grid.setdefault(new_cell, []).append(cluster)
+                        cluster.cell = new_cell  # type: ignore[attr-defined]
+                    assigned = True
+                    break
+
+            if not assigned:
+                cluster = _MarkerCluster(
+                    representative=asset,
+                    assets=[asset],
+                    screen_pos=point,
+                )
+                cluster.cell = (cell_x, cell_y)  # type: ignore[attr-defined]
+                cluster.screen_x_sum = point.x()
+                cluster.screen_y_sum = point.y()
+                clusters.append(cluster)
+                grid.setdefault((cell_x, cell_y), []).append(cluster)
+
+        if not self._interrupted:
+            self.finished.emit(request_id, clusters)
+
+    def _project_to_screen(
+        self,
+        lon: float,
+        lat: float,
+        top_left_x: float,
+        top_left_y: float,
+        center_px: float,
+        center_py: float,
+        world_size: float,
+        half_world: float,
+    ) -> Optional[QPointF]:
+        """Convert a geographic coordinate into widget-relative screen space."""
+
+        world_position = self._lonlat_to_world(lon, lat, world_size)
+        if world_position is None:
+            return None
+
+        world_x, world_y = world_position
+        delta_x = world_x - center_px
+        if delta_x > half_world:
+            world_x -= world_size
+        elif delta_x < -half_world:
+            world_x += world_size
+
+        screen_x = world_x - top_left_x
+        screen_y = world_y - top_left_y
+        return QPointF(screen_x, screen_y)
+
+    def _world_size(self, zoom: float) -> float:
+        return float(self.TILE_SIZE * (2.0 ** float(zoom)))
+
+    def _lonlat_to_world(
+        self, lon: float, lat: float, world_size: float
+    ) -> Optional[tuple[float, float]]:
+        try:
+            lon = float(lon)
+            lat = float(lat)
+        except (TypeError, ValueError):
+            return None
+
+        lat = max(min(lat, self.MERCATOR_LAT_BOUND), -self.MERCATOR_LAT_BOUND)
+        x = (lon + 180.0) / 360.0 * world_size
+        sin_lat = math.sin(math.radians(lat))
+        y = (
+            0.5 - math.log((1 + sin_lat) / (1 - sin_lat)) / (4 * math.pi)
+        ) * world_size
+        return x, y
+
+
+class MarkerController(QObject):
+    """Encapsulates marker state, clustering and event handling."""
+
+    clustersUpdated = Signal(list)
+    citiesUpdated = Signal(list)
+    markerActivated = Signal(list)
+    thumbnailUpdated = Signal(str, QPixmap)
+    thumbnailsInvalidated = Signal()
+    _clustering_requested = Signal(int, object, int, int, float, float, float, float, int, int)
+
+    # ``CITY_LABEL_FETCH_LEVEL`` mirrors the map renderer's tile pyramid.  When
+    # the integer fetch level meets or exceeds this constant (i.e. zooming to
+    # levels 5 and 6 on the bundled 0–6 stack) the controller publishes city
+    # annotations so the renderer can draw lightweight labels alongside the
+    # always-on photo clusters.
+    CITY_LABEL_FETCH_LEVEL = 5
+
+    def __init__(
+        self,
+        map_widget: MapWidgetBase,
+        thumbnail_loader: ThumbnailLoader,
+        *,
+        marker_size: int,
+        thumbnail_size: int,
+        provides_place_labels: bool = False,
+        parent: Optional[QObject] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._map_widget = map_widget
+        self._thumbnail_loader = thumbnail_loader
+        self._marker_size = int(marker_size)
+        self._thumbnail_size = int(thumbnail_size)
+        self._provides_place_labels = bool(provides_place_labels)
+        self._assets: list[GeotaggedAsset] = []
+        self._library_root: Optional[Path] = None
+        self._clusters: list[_MarkerCluster] = []
+        self._city_annotations: list[CityAnnotation] = []
+        self._view_center_x = 0.5
+        self._view_center_y = 0.5
+        self._view_zoom = float(self._map_widget.zoom)
+        self._is_panning = False
+        self._pending_click_assets: list[GeotaggedAsset] = []
+        self._pending_click_position = QPointF()
+        self._pending_click_rect = QRectF()
+        self._prefer_exact_screen_projection = bool(
+            getattr(self._map_widget, "prefers_exact_screen_projection", lambda: False)()
+        )
+
+        self._cluster_timer = QTimer(self)
+        self._cluster_timer.setSingleShot(True)
+        self._cluster_timer.setInterval(80)
+        self._cluster_timer.timeout.connect(self._rebuild_clusters)
+
+        self._cluster_thread = QThread(self)
+        self._cluster_thread.setObjectName("photo-map-cluster-worker")
+        self._cluster_worker = _ClusterWorker()
+        self._cluster_worker.moveToThread(self._cluster_thread)
+        self._clustering_requested.connect(self._cluster_worker.build_clusters)
+        self._cluster_worker.finished.connect(self._handle_clustering_finished)
+        self._cluster_thread.finished.connect(self._cluster_worker.deleteLater)
+        self._cluster_thread.start()
+        self._cluster_request_id = 0
+
+    def set_assets(self, assets: Iterable[GeotaggedAsset], library_root: Path) -> None:
+        """Replace the asset catalogue shown on the map."""
+
+        normalized_assets = [asset for asset in assets if isinstance(asset, GeotaggedAsset)]
+        same_root = self._library_root == library_root
+        same_assets = (
+            same_root
+            and len(normalized_assets) == len(self._assets)
+            and all(
+                incoming_asset is existing_asset
+                for incoming_asset, existing_asset in zip(normalized_assets, self._assets)
+            )
+        )
+        if same_assets:
+            self._schedule_cluster_update()
+            return
+
+        if not self._pending_click_survives_asset_update(normalized_assets, same_root):
+            self._clear_pending_click()
+        self._assets = normalized_assets
+        self._library_root = library_root
+        self._city_annotations = []
+        if not same_root:
+            self._thumbnail_loader.reset_for_album(library_root)
+        self.thumbnailsInvalidated.emit()
+        self.citiesUpdated.emit([])
+        self._schedule_cluster_update()
+
+    def clear(self) -> None:
+        """Remove all markers and cancel outstanding work."""
+
+        self._cluster_worker.interrupt()
+        self._cluster_request_id += 1
+        self._assets = []
+        self._clusters = []
+        self._city_annotations = []
+        self._library_root = None
+        self._is_panning = False
+        self._clear_pending_click()
+        self._view_center_x = 0.5
+        self._view_center_y = 0.5
+        self._view_zoom = float(self._map_widget.zoom)
+        self._cluster_timer.stop()
+        self.clustersUpdated.emit([])
+        self.citiesUpdated.emit([])
+        self.thumbnailsInvalidated.emit()
+
+    def shutdown(self) -> None:
+        """Stop worker threads so the application can exit cleanly."""
+
+        self._cluster_worker.interrupt()
+        if self._cluster_thread.isRunning():
+            self._cluster_thread.quit()
+            self._cluster_thread.wait()
+
+    def handle_view_changed(self, center_x: float, center_y: float, zoom: float) -> None:
+        """Record the latest viewport parameters and rebuild clusters lazily."""
+
+        self._view_center_x = float(center_x)
+        self._view_center_y = float(center_y)
+        self._view_zoom = float(zoom)
+        self._schedule_cluster_update()
+
+    def handle_pan(self, delta: QPointF) -> None:
+        """Shift visible markers while the user drags the map."""
+
+        self._is_panning = True
+        if self._cluster_timer.isActive():
+            self._cluster_timer.stop()
+
+        if not self._clusters:
+            self.clustersUpdated.emit([])
+            return
+
+        for marker in self._clusters:
+            marker.screen_pos = QPointF(
+                marker.screen_pos.x() + delta.x(),
+                marker.screen_pos.y() + delta.y(),
+            )
+            if marker.bounding_rect:
+                marker.bounding_rect.translate(delta.x(), delta.y())
+
+        self.clustersUpdated.emit(self._clusters)
+
+    def handle_pan_finished(self) -> None:
+        """Resume background clustering once the drag gesture ends."""
+
+        self._is_panning = False
+        self._schedule_cluster_update()
+
+    def handle_resize(self) -> None:
+        """React to widget size changes by recomputing clusters."""
+
+        self._schedule_cluster_update()
+
+    def handle_marker_click(self, cluster: _MarkerCluster) -> None:
+        """Emit the raw assets represented by a clicked marker cluster."""
+
+        self.markerActivated.emit(list(cluster.assets))
+
+    def handle_pointer_press(self, position: QPointF) -> bool:
+        """Record a candidate marker activation without consuming the press."""
+
+        cluster = self.cluster_at(position)
+        if cluster is None:
+            self._clear_pending_click()
+            return False
+        self._pending_click_assets = list(cluster.assets)
+        self._pending_click_position = QPointF(position)
+        self._pending_click_rect = QRectF(cluster.bounding_rect)
+        return True
+
+    def handle_pointer_move(self, position: QPointF) -> None:
+        """Cancel pending marker activation once the gesture becomes a drag."""
+
+        if not self._pending_click_assets:
+            return
+        if self.distance(self._pending_click_position, position) > self._click_drag_threshold():
+            self._clear_pending_click()
+
+    def handle_pointer_release(self, position: QPointF) -> bool:
+        """Activate the pending marker only for a completed click gesture."""
+
+        assets = list(self._pending_click_assets)
+        release_rect = QRectF(self._pending_click_rect)
+        if not assets:
+            return False
+
+        self._clear_pending_click()
+        if not release_rect.contains(position):
+            return False
+
+        QTimer.singleShot(0, lambda: self.markerActivated.emit(list(assets)))
+        return True
+
+    def handle_thumbnail_ready(self, root: Path, rel: str, pixmap: QPixmap) -> None:
+        """Forward freshly rendered thumbnails to the UI layer."""
+
+        if self._library_root is None or root != self._library_root:
+            return
+        if pixmap.isNull():
+            return
+        self.thumbnailUpdated.emit(rel, pixmap)
+
+    def cluster_at(self, position: QPointF) -> Optional[_MarkerCluster]:
+        """Return the foremost cluster that intersects *position*."""
+
+        for cluster in reversed(self._clusters):
+            if cluster.bounding_rect.contains(position):
+                return cluster
+        return None
+
+    def _clear_pending_click(self) -> None:
+        self._pending_click_assets = []
+        self._pending_click_position = QPointF()
+        self._pending_click_rect = QRectF()
+
+    def _pending_click_survives_asset_update(
+        self,
+        incoming_assets: Sequence[GeotaggedAsset],
+        same_root: bool,
+    ) -> bool:
+        if not self._pending_click_assets:
+            return True
+        if not same_root:
+            return False
+        incoming_keys = {self._asset_key(asset) for asset in incoming_assets}
+        return all(
+            self._asset_key(asset) in incoming_keys
+            for asset in self._pending_click_assets
+        )
+
+    @staticmethod
+    def _asset_key(asset: GeotaggedAsset) -> tuple[str, str, str]:
+        return (
+            str(asset.asset_id),
+            str(asset.library_relative),
+            str(asset.album_relative),
+        )
+
+    @staticmethod
+    def _click_drag_threshold() -> int:
+        try:
+            return max(1, int(QApplication.startDragDistance()))
+        except RuntimeError:
+            return 3
+
+    def _schedule_cluster_update(self) -> None:
+        if self._is_panning:
+            return
+        self._cluster_timer.start()
+
+    def _rebuild_clusters(self) -> None:
+        if not self._assets:
+            self._cluster_worker.interrupt()
+            self._cluster_request_id += 1
+            self._clusters = []
+            if self._city_annotations:
+                self._city_annotations = []
+                self.citiesUpdated.emit([])
+            self.clustersUpdated.emit([])
+            return
+
+        fetch_level = max(0, int(math.floor(self._view_zoom)))
+        if fetch_level < self.CITY_LABEL_FETCH_LEVEL:
+            # Ensure city labels disappear immediately when the user zooms out
+            # so the map does not momentarily display annotations that no
+            # longer correspond to any visible thumbnail clusters.
+            self._update_city_annotations_for_clusters([])
+        self._rebuild_photo_clusters()
+
+    def _update_city_annotations_for_clusters(
+        self, clusters: Sequence[_MarkerCluster]
+    ) -> None:
+        """Publish city labels that correspond to the currently visible clusters."""
+
+        if self._provides_place_labels:
+            if self._city_annotations:
+                self._city_annotations = []
+                self.citiesUpdated.emit([])
+            return
+
+        fetch_level = max(0, int(math.floor(self._view_zoom)))
+        if fetch_level < self.CITY_LABEL_FETCH_LEVEL or not clusters:
+            if self._city_annotations:
+                # Clearing the cache prevents the renderer from drawing labels
+                # that are no longer associated with a thumbnail cluster.
+                self._city_annotations = []
+                self.citiesUpdated.emit([])
+            return
+
+        annotations: list[CityAnnotation] = []
+        for cluster in clusters:
+            label = self._cluster_label(cluster)
+            if label is None:
+                continue
+            name, display_name, tooltip = label
+            matched_assets: list[GeotaggedAsset] = []
+            for asset in cluster.assets:
+                if not asset.location_name:
+                    continue
+                if self._normalise_location(asset.location_name) != name:
+                    continue
+                matched_assets.append(asset)
+            if matched_assets:
+                avg_lat = sum(item.latitude for item in matched_assets) / len(matched_assets)
+                avg_lon = sum(item.longitude for item in matched_assets) / len(matched_assets)
+            else:
+                # Fall back to the geometric centre so the label remains near
+                # the callout even when metadata differs between assets.
+                avg_lat = cluster.latitude
+                avg_lon = cluster.longitude
+            annotations.append(
+                CityAnnotation(
+                    longitude=avg_lon,
+                    latitude=avg_lat,
+                    display_name=display_name,
+                    full_name=tooltip,
+                )
+            )
+
+        annotations.sort(key=lambda item: (item.display_name, item.full_name))
+        if annotations != self._city_annotations:
+            # Emit a copy so the renderer can keep a stable snapshot for hit
+            # testing without being affected by subsequent mutations.
+            self._city_annotations = annotations
+            self.citiesUpdated.emit(list(self._city_annotations))
+
+    def _format_city_name(self, raw_name: str) -> tuple[str, str]:
+        """Return the display and tooltip strings for a raw location label."""
+
+        normalized = " ".join(raw_name.split())
+        if not normalized:
+            return "", ""
+
+        parts = normalized.split()
+        primary = parts[0]
+        remainder = normalized[len(primary) :].strip()
+        remainder = remainder.lstrip(",;-/—–").strip()
+        if remainder:
+            tooltip = f"{primary} — {remainder}"
+        else:
+            tooltip = primary
+        return primary, tooltip
+
+    def _rebuild_photo_clusters(self) -> None:
+        """Generate thumbnail clusters for the current viewport dimensions."""
+
+        width = self._map_widget.width()
+        height = self._map_widget.height()
+        if width <= 0 or height <= 0:
+            if self._clusters:
+                self._clusters = []
+                self.clustersUpdated.emit([])
+            return
+
+        threshold = max(self._marker_size * 0.6, 48.0)
+        cell_size = max(int(threshold), 1)
+        margin = self._marker_size
+
+        self._cluster_worker.interrupt()
+        self._cluster_request_id += 1
+        if self._prefer_exact_screen_projection:
+            clusters = self._build_exact_projection_clusters(
+                width=width,
+                height=height,
+                threshold=float(threshold),
+                cell_size=cell_size,
+                margin=margin,
+            )
+            self._publish_clusters(clusters)
+            return
+
+        request_id = self._cluster_request_id
+        self._clustering_requested.emit(
+            request_id,
+            self._assets,
+            width,
+            height,
+            self._view_center_x,
+            self._view_center_y,
+            self._view_zoom,
+            float(threshold),
+            cell_size,
+            margin,
+        )
+
+    def _handle_clustering_finished(
+        self, request_id: int, clusters: list[_MarkerCluster]
+    ) -> None:
+        """Receive freshly computed clusters from the worker thread."""
+
+        if request_id != self._cluster_request_id:
+            return
+
+        self._publish_clusters(clusters)
+
+    def _publish_clusters(self, clusters: list[_MarkerCluster]) -> None:
+        """Publish a stable cluster snapshot to the overlay and label layers."""
+
+        for cluster in clusters:
+            cluster.bounding_rect = self._marker_rect(cluster.screen_pos)
+            self._ensure_thumbnail(cluster.representative)
+
+        self._clusters = clusters
+        self._update_city_annotations_for_clusters(self._clusters)
+        self.clustersUpdated.emit(self._clusters)
+
+    def _build_exact_projection_clusters(
+        self,
+        *,
+        width: int,
+        height: int,
+        threshold: float,
+        cell_size: int,
+        margin: int,
+    ) -> list[_MarkerCluster]:
+        """Cluster assets using the map widget's exact screen projection."""
+
+        grid: Dict[tuple[int, int], list[_MarkerCluster]] = {}
+        clusters: list[_MarkerCluster] = []
+
+        for asset in self._assets:
+            point = self._map_widget.project_lonlat(asset.longitude, asset.latitude)
+            if point is None:
+                continue
+
+            if point.x() < -margin or point.y() < -margin:
+                continue
+            if point.x() > width + margin or point.y() > height + margin:
+                continue
+
+            cell_x = int(point.x() // cell_size)
+            cell_y = int(point.y() // cell_size)
+            candidates: list[_MarkerCluster] = []
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    candidates.extend(grid.get((cell_x + dx, cell_y + dy), []))
+
+            assigned = False
+            for cluster in candidates:
+                if MarkerController.distance(cluster.screen_pos, point) <= threshold:
+                    cluster.add_asset(asset, projected_point=point)
+                    new_cell = (
+                        int(cluster.screen_pos.x() // cell_size),
+                        int(cluster.screen_pos.y() // cell_size),
+                    )
+                    if getattr(cluster, "cell", None) != new_cell:
+                        old_cell = getattr(cluster, "cell", None)
+                        if old_cell in grid:
+                            try:
+                                grid[old_cell].remove(cluster)
+                            except ValueError:
+                                pass
+                        grid.setdefault(new_cell, []).append(cluster)
+                        cluster.cell = new_cell  # type: ignore[attr-defined]
+                    assigned = True
+                    break
+
+            if not assigned:
+                cluster = _MarkerCluster(
+                    representative=asset,
+                    assets=[asset],
+                    screen_pos=point,
+                )
+                cluster.cell = (cell_x, cell_y)  # type: ignore[attr-defined]
+                cluster.screen_x_sum = point.x()
+                cluster.screen_y_sum = point.y()
+                clusters.append(cluster)
+                grid.setdefault((cell_x, cell_y), []).append(cluster)
+
+        return clusters
+
+    def _cluster_label(
+        self, cluster: _MarkerCluster
+    ) -> Optional[tuple[str, str, str]]:
+        """Return the normalised, display and tooltip text for *cluster*.
+
+        The helper inspects the assets contained within *cluster* and selects
+        the first non-empty location string. The name is normalised so that
+        downstream comparisons ignore extra whitespace or punctuation.
+        """
+
+        for asset in cluster.assets:
+            if not asset.location_name:
+                continue
+            normalised = self._normalise_location(asset.location_name)
+            if not normalised:
+                continue
+            display_name, tooltip = self._format_city_name(normalised)
+            if not display_name:
+                continue
+            return normalised, display_name, tooltip
+        return None
+
+    @staticmethod
+    def _normalise_location(raw_name: str) -> str:
+        """Coalesce whitespace and trim punctuation from *raw_name*.
+
+        Normalisation allows the controller to match clusters even when the raw
+        metadata varies between assets due to trailing whitespace or other
+        accidental formatting differences.
+        """
+
+        return " ".join(raw_name.split()).strip()
+
+    def _marker_rect(self, center: QPointF) -> QRectF:
+        """Return the bounding box that mirrors the overlay's callout geometry."""
+
+        height = float(self._marker_size)
+        width = height
+        x = center.x() - width / 2.0
+        y = center.y() - height
+        return QRectF(x, y, width, height)
+
+    def _ensure_thumbnail(self, asset: GeotaggedAsset) -> None:
+        if self._library_root is None:
+            return
+        size = QSize(self._thumbnail_size, self._thumbnail_size)
+        pixmap = self._thumbnail_loader.request(
+            asset.library_relative,
+            asset.absolute_path,
+            size,
+            is_image=asset.is_image,
+            is_video=asset.is_video,
+            still_image_time=asset.still_image_time,
+            duration=asset.duration,
+        )
+        if pixmap is not None and not pixmap.isNull():
+            self.thumbnailUpdated.emit(asset.library_relative, pixmap)
+
+    @staticmethod
+    def distance(a: QPointF, b: QPointF) -> float:
+        """Return the Euclidean distance between two screen positions."""
+
+        return math.hypot(a.x() - b.x(), a.y() - b.y())
+
+__all__ = ["MarkerController", "_MarkerCluster"]

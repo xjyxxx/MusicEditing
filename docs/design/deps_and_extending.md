@@ -44,6 +44,20 @@ main.py
     ├── ui/export_options_dialog.py (高光/竖屏/抖音预设 + 封面话题)
     ├── ui/setup_wizard.py         (首次开箱依赖向导)
     ├── ui/media_library_page.py   (本地素材库)
+    ├── ui/iphoto_host_page.py     (照片图库宿主：嵌入 iPhotron)
+    │   ├── core/iphoto_bootstrap.py
+    │   └── third_party/iphoto/src/{iPhoto,maps}
+    ├── ui/photo_library_page.py   (经典照片图库 · 降级)
+    │   ├── ui/photo_edit_dialog.py
+    │   ├── ui/zoomable_image_view.py
+    │   ├── ui/background_task_manager.py
+    │   ├── services/photo_library_service.py
+    │   ├── core/photo_album.py
+    │   ├── core/photo_library_index.py
+    │   ├── core/photo_metadata.py
+    │   ├── core/photo_sidecar.py
+    │   ├── core/photo_edit_math.py
+    │   └── core/photo_numpy_renderer.py
     ├── ui/profile_page.py         (个人中心：卡密 / GPU / 诊断打包 / 清理临时帧)
     ├── ui/cover_page.py           (封面工厂)
     │   └── core/cover_factory.py  (最清晰帧 + 标题 PNG)
@@ -94,6 +108,7 @@ main.py
 | x64 与 Win32 双预设；ctypes 优先 probe/thumbnail | 枢纽 §2；[media_engine.md](media_engine.md) |
 | 播放器 / VideoDecoder D3D11VA 硬解 | [mvvm_and_ui.md](mvvm_and_ui.md) GPU 节 |
 | 热评短视频成片（ass/danmaku/cards） | [feature_flows.md](feature_flows.md) §5.2.1 |
+| 照片图库 / 非破坏编辑 | [photo_manager.md](photo_manager.md) · [feature_flows.md](feature_flows.md) §5.24 |
 | 实时字幕 | 已移除（见 feature_flows §5.8） |
 
 ### 2.2 接入 llama.cpp 本地推理

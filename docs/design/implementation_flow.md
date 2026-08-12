@@ -15,13 +15,14 @@
 | [LEARNING.md](../LEARNING.md) | **学习路径**（分阶段：跑通 → 功能地图 → 架构 → 开发/发版） |
 | **本文** | 总体架构、构建启动、状态表、命令速查 |
 | [mvvm_and_ui.md](mvvm_and_ui.md) | Model / VM / View、滤镜、GPU、去水印/超分 UI 侧 |
+| [photo_manager.md](photo_manager.md) | 照片图库：Folder-native、索引、非破坏编辑 |
 | [media_engine.md](media_engine.md) | VideoDecoder、C API、CLI、llama.cpp |
 | [feature_flows.md](feature_flows.md) | 各业务端到端链路 |
 | [deps_and_extending.md](deps_and_extending.md) | 模块依赖树、扩展与路线图 |
 | [player_decode_flow.md](player_decode_flow.md) | 首页播放器解码 / IPC |
 | [release_checklist.md](release_checklist.md) | 发版前短测 / 冒烟 |
 | [distribution.md](distribution.md) | 便携验收、签名、Inno、卡密服务 |
-| [流程图/README.md](../流程图/README.md) | 播放器分层 mermaid 总览 |
+| [流程图/README.md](../流程图/README.md) | 播放器 + **照片图库** mermaid 总览 |
 
 **推荐阅读：** 外人按阶段学请先读 [docs/LEARNING.md](../LEARNING.md)；专文速查：§1–§2 → 按任务读专文 → 查进度用 §3 → 跑命令用 §4。
 
@@ -204,6 +205,7 @@ MainWindow.shutdown()
 | BGM 混音 | ✅ | FFmpeg 叠/替换/压低原声；`BgmPage`（§5.16） |
 | Demucs 人声分离 | ✅ 可选 | `third_party/demucs` + `setup_demucs.bat`；未装不影响混音 |
 | 本地素材库 | ✅ | 目录索引；送首页/切片/队列（§5.19） |
+| **照片图库** | ✅ | 主路径：嵌入 `third_party/iphoto`（iPhotron）；降级：`PhotoLibraryPage`；播放回调本仓播放器（§5.24 · [photo_manager.md](photo_manager.md)） |
 | 差异化能力入口 | ✅ | 菜单导航：热评 / 切片演讲成片 / 全流程队列（§5.20；首页无流水线卡片） |
 
 ### 系统与授权
@@ -235,7 +237,9 @@ MainWindow.shutdown()
 ```powershell
 .\build.bat                    # 编译（含 llama.lib，可用 -DMUSIC_ENABLE_LLAMA=OFF 跳过）
 .\build_x64.bat                # x64 编译（自动导入 FFmpeg/OpenCV/ONNX）
-.\run_ui_x64.bat               # 一步启动 x64 UI（缺 ONNX 自动导入，缺产物自动编译）
+.\run_ui_x64.bat               # 一步启动 x64 UI（缺 ONNX 自动导入，缺产物自动编译；requirements 未变则跳过 pip）
+# MUSIC_SKIP_PIP=1 可完全跳过 pip；MUSIC_FORCE_PIP=1 强制重装
+# 照片完整依赖：pip install -r client/scripts/requirements-iphoto.txt
 .\run_test.bat                 # 测试 FFmpeg（默认 Titanic.mkv）
 .\run_test.bat "D:\a.mp4"      # 指定视频测试
 .\run_ui.bat                   # 启动 UI

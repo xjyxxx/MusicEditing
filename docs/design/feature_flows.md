@@ -18,6 +18,7 @@
 | §5.10+ | 补帧、天气、波形、LUT、封面、音频、BGM、个人中心… |
 | §5.22 | 溯源水印 |
 | §5.23 | 工程质量：回归短测 / 诊断包 / 资源清理 |
+| §5.24 | 照片图库（Folder-native / 非破坏编辑） |
 
 ### 5.1 智能切片完整链路（演讲金句等 — 已落地）
 
@@ -717,7 +718,8 @@ BgmPage「人声分离」
 
 1. **热评短视频** → 工作流「下载与热评」/ 趣味「热评弹幕」  
 2. **演讲成片** → 核心「智能切片」（金句 → 静音剪掉 → 跟脸竖屏 → 抖音预设）  
-3. **批量成片** → 工作流「全流程队列」（ETA + 角标去水印）
+3. **批量成片** → 工作流「全流程队列」（ETA + 角标去水印）  
+4. **照片图库** → 工作流「照片图库」（Folder-native 索引 / 非破坏编辑，§5.24）
 
 本地离线主链路默认可用；下载/热评网络步骤单独标注。
 
@@ -798,6 +800,41 @@ scripts/run_regression_short.bat
 | 诊断 | `client/scripts/core/diag_pack.py` |
 | 清理 | `client/scripts/core/resource_cleanup.py` |
 | 短测 | `tests/regression/` · `scripts/run_regression_short.bat` |
+
+
+### 5.24 照片图库（iPhotron 嵌入 + 经典降级）
+
+对应工作流菜单「照片图库」（`TAB_PHOTOS=12`）。与「本地素材库」(§5.19) 不同：素材库面向成片/导出接力；图库面向**相册目录索引 + Live Photo + 非破坏编辑**。
+
+架构专文：[photo_manager.md](photo_manager.md)；vendor：[third_party/iphoto/README.md](../../third_party/iphoto/README.md)；流程图：[流程图/README.md](../流程图/README.md)「照片图库」节。
+
+```
+工作流 → 照片图库（IPhotoHostPage）
+  │
+  ├─ [主路径] third_party/iphoto → iPhoto MainWindow（嵌入或 Tool 子窗口）
+  │     → RuntimeContext + MainCoordinator
+  │     → 上游图库 / 胶片条 / 详情 / 编辑侧栏 / Live / HEIC / 回收站…
+  │     → 宿主栏：「用本应用播放」→ VideoPlayerWidget（不改 media_player）
+  │               「图片增强 / 去水印」→ 既有工作流页
+  │
+  ├─ [降级] 导入或启动失败 / 用户点「经典图库」
+  │     → PhotoLibraryPage
+  │     → PhotoLibraryService + SQLite + sidecar v2 + PhotoEditDialog
+  │
+  └─ 边界：禁止用 iPhoto VideoArea 替换本仓播放器内核
+```
+
+| 资源 | 路径 |
+|------|------|
+| 宿主 / 引导 | `ui/iphoto_host_page.py` · `core/iphoto_bootstrap.py` |
+| Vendor | `third_party/iphoto/src/iPhoto` · `third_party/iphoto/src/maps`（无 font/OBF） |
+| 经典 UI | `ui/photo_library_page.py` · `ui/photo_edit_dialog.py` · `ui/zoomable_image_view.py` |
+| 经典 Service/Domain | `services/photo_library_service.py` · `core/photo_*.py` |
+| 经典 DB | `%LOCALAPPDATA%/MusicEditing/photo_library.sqlite3` |
+
+**隐私：** GPS 默认本地；完整离线地图需自行补齐 `maps` 资源（见 `ASSETS.md`）。不后台上传照片。
+
+**限制 / 后续：** 可选依赖写入便携清单；补齐 maps 资源；vendor 与上游 tag 同步脚本。见 photo_manager §10。
 
 
 ---

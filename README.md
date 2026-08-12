@@ -7,6 +7,7 @@
 - **智能高光切片**：演讲金句（Vosk/规则）/ 手动切片；**缩略图时间轴**
 - **画质增强**：Real-ESRGAN / OpenCV 超分；**FFmpeg 视频补帧**（快速 blend / 精细 MCI）
 - **一键去水印**：视频快速(OpenCV) / 图片精修(LaMa)；帧批复用
+- **照片图库**：Folder-native 相册索引、智能相册、Live Photo、非破坏编辑（见 [docs/design/photo_manager.md](docs/design/photo_manager.md)）
 - **链接下载 / 热评滚动** 等（详见技术文档）
 - **个人中心**：授权管理（本地卡密）
 

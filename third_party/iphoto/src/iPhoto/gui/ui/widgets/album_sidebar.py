@@ -1,0 +1,656 @@
+"""Sidebar widget presenting the Basic Library tree."""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+from PySide6.QtCore import (
+    QEvent,
+    QModelIndex,
+    QPoint,
+    QRect,
+    QSize,
+    Qt,
+    Signal,
+)
+from PySide6.QtGui import (
+    QCursor,
+    QDragEnterEvent,
+    QDragMoveEvent,
+    QDropEvent,
+    QFont,
+    QPalette,
+)
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QFrame,
+    QLabel,
+    QSizePolicy,
+    QTreeView,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ....config import ALL_PHOTOS_TITLE as _ALL_PHOTOS_TITLE
+from ....library.runtime_controller import LibraryRuntimeController
+from ...i18n import tr
+from ...i18n.font_policy import sync_widget_language_font
+from ...services.pinned_items_service import PinnedItemsService, PinnedSidebarItem
+from ..delegates.album_sidebar_delegate import (
+    AlbumSidebarDelegate,
+    BranchIndicatorController,
+)
+from ..menus.album_sidebar_menu import show_context_menu
+from ..models.album_tree_model import AlbumTreeModel, NodeType
+from ..palette import (
+    SIDEBAR_ICON_COLOR,
+    SIDEBAR_ICON_SIZE,
+    SIDEBAR_INDENT_PER_LEVEL,
+    SIDEBAR_INDICATOR_HOTZONE_MARGIN,
+    SIDEBAR_INDICATOR_SIZE,
+    SIDEBAR_LAYOUT_MARGIN,
+    SIDEBAR_LAYOUT_SPACING,
+    SIDEBAR_LEFT_PADDING,
+    SIDEBAR_SELECTED_BACKGROUND,
+    SIDEBAR_TEXT_COLOR,
+    SIDEBAR_TREE_MIN_WIDTH,
+    SIDEBAR_TREE_STYLESHEET,
+)
+from ..styles import modern_scrollbar_style
+
+_logger = logging.getLogger(__name__)
+
+
+class _DropAwareTree(QTreeView):
+    """Tree view that accepts drops of external media files onto albums."""
+
+    filesDropped = Signal(Path, object)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._model: AlbumTreeModel | None = None
+        self.setAcceptDrops(True)
+        self.setDragEnabled(False)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
+        self.setDefaultDropAction(Qt.DropAction.CopyAction)
+        self.setDropIndicatorShown(True)
+
+    # ------------------------------------------------------------------
+    # Qt overrides
+    # ------------------------------------------------------------------
+    def setModel(self, model) -> None:  # type: ignore[override]
+        super().setModel(model)
+        if isinstance(model, AlbumTreeModel):
+            self._model = model
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # type: ignore[override]
+        if self._should_accept_event(event):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:  # type: ignore[override]
+        if self._should_accept_event(event):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:  # type: ignore[override]
+        target = self._resolve_target_path(event)
+        paths = self._extract_local_files(event)
+        if target is None or not paths:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.filesDropped.emit(target, paths)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def _should_accept_event(self, event: QDragEnterEvent | QDragMoveEvent) -> bool:
+        if self._extract_local_files(event) == []:
+            return False
+        target = self._resolve_target_path(event)
+        return target is not None
+
+    def _resolve_target_path(
+        self, event: QDragEnterEvent | QDragMoveEvent | QDropEvent
+    ) -> Path | None:
+        model = self._model or self.model()
+        if not isinstance(model, AlbumTreeModel):
+            return None
+        index = self.indexAt(self._event_pos(event))
+        if not index.isValid():
+            return None
+        item = model.item_from_index(index)
+        if item is None or item.album is None:
+            return None
+        if item.node_type not in {NodeType.ALBUM, NodeType.SUBALBUM}:
+            return None
+        return item.album.path
+
+    def _extract_local_files(
+        self, event: QDragEnterEvent | QDragMoveEvent | QDropEvent
+    ) -> list[Path]:
+        mime = event.mimeData()
+        if mime is None:
+            return []
+        urls = getattr(mime, "urls", None)
+        if not callable(urls):
+            return []
+        seen: set[Path] = set()
+        paths: list[Path] = []
+        for url in urls():
+            if not url.isLocalFile():
+                continue
+            local = Path(url.toLocalFile()).expanduser()
+            if local in seen:
+                continue
+            seen.add(local)
+            paths.append(local)
+        return paths
+
+    def _event_pos(self, event) -> QPoint:
+        if hasattr(event, "position"):
+            return event.position().toPoint()
+        if hasattr(event, "pos"):
+            return event.pos()
+        return QPoint()
+
+
+class AlbumSidebar(QWidget):
+    """Composite widget exposing library navigation and actions."""
+
+    albumSelected = Signal(Path)
+    pinnedItemSelected = Signal(object)
+    allPhotosSelected = Signal()
+    staticNodeSelected = Signal(str)
+    bindLibraryRequested = Signal()
+    filesDropped = Signal(Path, object)
+
+    ALL_PHOTOS_TITLE = _ALL_PHOTOS_TITLE
+
+    def __init__(self, library: LibraryRuntimeController, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._updating_style = False
+        self._library = library
+        self._model = AlbumTreeModel(library, self)
+        self._pending_selection: Path | None = None
+        self._current_selection: Path | None = None
+        self._current_static_selection: str | None = None
+        self._current_pinned_selection: tuple[str, str] | None = None
+
+        # Give the widget a stable object name so the stylesheet targets only the
+        # sidebar shell and does not bleed into child controls such as the tree view.
+        self.setObjectName("albumSidebar")
+        # ``WA_StyledBackground`` tells Qt to honour our palette/stylesheet even when the
+        # parent widgets are translucent (required for the rounded window shell).
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        self._title = QLabel()
+        self._title.setObjectName("albumSidebarTitle")
+        self._title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        # `Ignored` allows the label to be compressed below its size hint so the navigation
+        # pane can animate all the way to zero width without the title text imposing a hard
+        # minimum size.  The text will be elided once the layout becomes narrower than the
+        # rendered string, which keeps the animation visually smooth.
+        self._title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        title_font = QFont(self._title.font())
+        title_font.setPointSizeF(title_font.pointSizeF() + 0.5)
+        title_font.setBold(True)
+        self._title.setFont(title_font)
+
+        self._tree = _DropAwareTree(self)
+        self._tree.setObjectName("albumSidebarTree")
+        self._tree.setModel(self._model)
+        self._tree.setHeaderHidden(True)
+        self._tree.setRootIsDecorated(True)
+        self._tree.setUniformRowHeights(True)
+        self._tree.setEditTriggers(QTreeView.EditTrigger.NoEditTriggers)
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._show_context_menu)
+        self._tree.selectionModel().selectionChanged.connect(self._on_selection_changed)
+        self._tree.doubleClicked.connect(self._on_double_clicked)
+        self._tree.clicked.connect(self._on_clicked)
+        self._tree.setIndentation(0)
+        self._tree.setIconSize(QSize(SIDEBAR_ICON_SIZE, SIDEBAR_ICON_SIZE))
+        self._tree.setMouseTracking(True)
+        self._tree.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self._tree.setItemDelegate(AlbumSidebarDelegate(self._tree))
+        self._indicator_controller = BranchIndicatorController(self._tree)
+        self._tree.branch_indicator_controller = self._indicator_controller
+        self._tree.setFrameShape(QFrame.Shape.NoFrame)
+        self._tree.setAlternatingRowColors(False)
+        self._tree.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        tree_palette = self._tree.palette()
+        tree_palette.setColor(QPalette.ColorRole.Highlight, SIDEBAR_SELECTED_BACKGROUND)
+        tree_palette.setColor(QPalette.ColorRole.Link, SIDEBAR_ICON_COLOR)
+        self._tree.setPalette(tree_palette)
+        self._tree.setAutoFillBackground(True)
+
+        self._apply_scrollbar_style()
+
+        # Track the minimum width that should apply when the user resizes the splitter manually.
+        # The sidebar should never collapse completely in that situation, so we keep a computed
+        # "manual" minimum width and only relax it when an animated transition is in progress.
+        self._manual_minimum_width = max(
+            SIDEBAR_TREE_MIN_WIDTH,
+            self._title.sizeHint().width(),
+        )
+        self._default_sidebar_maximum_width = super().maximumWidth()
+        self._minimum_width_relaxed = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(*SIDEBAR_LAYOUT_MARGIN)
+        layout.setSpacing(SIDEBAR_LAYOUT_SPACING)
+        layout.addWidget(self._title)
+        layout.addWidget(self._tree, stretch=1)
+
+        # Apply the initial manual minimum width so the splitter respects the configured
+        # constraint during user-driven resizing.  This call also covers the case where Qt
+        # calculates a slightly different minimum width once the layout has been populated.
+        self._apply_current_minimum_width()
+
+        self._model.modelReset.connect(self._on_model_reset)
+        self._tree.filesDropped.connect(self._on_files_dropped)
+        self._expand_defaults()
+        self._update_title()
+
+    def changeEvent(self, event: QEvent) -> None:
+        if event.type() == QEvent.Type.PaletteChange:
+            if not self._updating_style:
+                self._apply_scrollbar_style()
+        super().changeEvent(event)
+
+    def _apply_scrollbar_style(self) -> None:
+        if not hasattr(self, "_tree"):
+            return
+
+        # Explicitly use the sidebar's dark text color to ensure contrast against the
+        # fixed light background, regardless of the active application theme.
+        scrollbar_style = modern_scrollbar_style(SIDEBAR_TEXT_COLOR, track_alpha=30)
+
+        full_style = SIDEBAR_TREE_STYLESHEET + "\n" + scrollbar_style
+
+        if self._tree.styleSheet() == full_style:
+            return
+
+        self._updating_style = True
+        try:
+            self._tree.setStyleSheet(full_style)
+        finally:
+            self._updating_style = False
+
+    # ------------------------------------------------------------------
+    # Animation helpers
+    # ------------------------------------------------------------------
+    def relax_minimum_width_for_animation(self) -> None:
+        """Temporarily relax the sidebar so splitter animations can collapse it to zero."""
+
+        if self._minimum_width_relaxed:
+            return
+        self._minimum_width_relaxed = True
+        # When the relaxed flag is set we force the minimum width to zero so that the surrounding
+        # splitter can animate the pane without being clamped by our manual constraint.
+        self._apply_current_minimum_width()
+
+    def restore_minimum_width_after_animation(self) -> None:
+        """Reapply the manual minimum width once an animation has completed."""
+
+        if not self._minimum_width_relaxed:
+            return
+        self._minimum_width_relaxed = False
+        # Refresh the manual constraint in case the title text (and therefore the size hint)
+        # changed while the sidebar was collapsed, then apply the non-relaxed minimum width.
+        self._refresh_manual_minimum_width()
+        self.setMaximumWidth(self._default_sidebar_maximum_width)
+        self.updateGeometry()
+
+    def _apply_current_minimum_width(self) -> None:
+        """Synchronise the widget's minimum width with the current relaxation state."""
+
+        if self._minimum_width_relaxed:
+            self.setMinimumWidth(0)
+            return
+        self.setMinimumWidth(self._manual_minimum_width)
+
+    def _refresh_manual_minimum_width(self) -> None:
+        """Recalculate the manual minimum width based on the current title text."""
+
+        self._manual_minimum_width = max(
+            SIDEBAR_TREE_MIN_WIDTH,
+            self._title.sizeHint().width(),
+        )
+        self._apply_current_minimum_width()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def tree_model(self) -> AlbumTreeModel:
+        """Expose the underlying model so controllers can query album metadata."""
+
+        return self._model
+
+    def set_pinned_service(self, service: PinnedItemsService | None) -> None:
+        """Attach a pinned-items service to the underlying tree model."""
+
+        self._model.set_pinned_service(service)
+
+    def refresh_tree_model(self) -> None:
+        """Force the sidebar model to rebuild its current contents."""
+
+        self._model.refresh()
+
+    def retranslate_ui(self) -> None:
+        """Refresh translated sidebar chrome and model display labels."""
+
+        self._update_title()
+        self._model.retranslate_ui()
+
+    def _expand_defaults(self) -> None:
+        """Expand high-level nodes to match the reference layout."""
+
+        if self._model.rowCount() == 0:
+            return
+        for row in range(self._model.rowCount()):
+            root_index = self._model.index(row, 0)
+            if not root_index.isValid():
+                continue
+            self._tree.expand(root_index)
+            for child_row in range(self._model.rowCount(root_index)):
+                child = self._model.index(child_row, 0, root_index)
+                if child.isValid():
+                    self._tree.expand(child)
+
+    def _on_model_reset(self) -> None:
+        _logger.info(
+            "_on_model_reset: pending=%s current=%s static=%s library_root=%s",
+            self._pending_selection,
+            self._current_selection,
+            self._current_static_selection,
+            self._library.root(),
+        )
+        self._update_title()
+        self._expand_defaults()
+        if self._pending_selection is not None:
+            self.select_path(self._pending_selection)
+            self._pending_selection = None
+        elif self._current_pinned_selection is not None:
+            kind, item_id = self._current_pinned_selection
+            self.select_pinned_item(
+                PinnedSidebarItem(kind=kind, item_id=item_id, label=""),
+                emit_signal=False,
+            )
+        elif self._current_selection is not None:
+            self.select_path(self._current_selection)
+        elif self._current_static_selection:
+            self.select_static_node(self._current_static_selection)
+
+    def _update_title(self) -> None:
+        root = self._library.root()
+        if root is None:
+            # Keep the unbound state explicit so users know they still need to
+            # attach a library before navigating, but avoid appending verbose
+            # filesystem paths that clutter the chrome.
+            self._title.setText(tr("AlbumSidebar", "Basic Library — not bound"))
+        else:
+            # Always display a concise title without the backing path to keep
+            # the window chrome tidy while the sidebar continues to show the
+            # simple library name.
+            self._title.setText(tr("AlbumSidebar", "Basic Library"))
+        # Recalculate the manual minimum so manual splitter drags continue to honour the
+        # configured width even if the displayed path becomes longer or shorter.
+        self._sync_language_fonts()
+        self._refresh_manual_minimum_width()
+
+    def _sync_language_fonts(self) -> None:
+        """Keep sidebar text widgets aligned with the active language font."""
+
+        sync_widget_language_font(self)
+        sync_widget_language_font(self._title)
+        sync_widget_language_font(self._tree)
+        self._tree.viewport().update()
+
+    def _on_selection_changed(self, _selected, _deselected) -> None:
+        index = self._tree.currentIndex()
+        item = self._model.item_from_index(index)
+        if item is None:
+            _logger.debug("_on_selection_changed: item is None")
+            return
+        node_type = item.node_type
+        _logger.debug("_on_selection_changed: title=%r node_type=%s", item.title, node_type)
+        if node_type == NodeType.ACTION:
+            self.bindLibraryRequested.emit()
+            return
+        if node_type == NodeType.HEADER:
+            if item.title == "Albums":
+                self._current_pinned_selection = None
+                self.staticNodeSelected.emit("Albums")
+            return
+        if node_type == NodeType.STATIC:
+            if self._library.root() is None:
+                _logger.warning(
+                    "_on_selection_changed: library root is None, emitting bindLibraryRequested"
+                )
+                self.bindLibraryRequested.emit()
+                return
+            self._current_selection = None
+            self._current_static_selection = item.title
+            if item.title == self.ALL_PHOTOS_TITLE:
+                _logger.info("_on_selection_changed: emitting allPhotosSelected")
+                self.allPhotosSelected.emit()
+            else:
+                _logger.info("_on_selection_changed: emitting staticNodeSelected(%r)", item.title)
+                self.staticNodeSelected.emit(item.title)
+            return
+        if node_type in {NodeType.PINNED_ALBUM, NodeType.PINNED_PERSON, NodeType.PINNED_GROUP}:
+            pinned_item = item.pinned_item
+            if pinned_item is None:
+                return
+            self._current_selection = None
+            self._current_static_selection = None
+            self._current_pinned_selection = (pinned_item.kind, pinned_item.item_id)
+            self.pinnedItemSelected.emit(pinned_item)
+            return
+        self._current_static_selection = None
+        self._current_pinned_selection = None
+        album = item.album
+        if album is not None:
+            self._current_selection = album.path
+            self.albumSelected.emit(album.path)
+
+    def _on_double_clicked(self, index: QModelIndex) -> None:
+        item = self._model.item_from_index(index)
+        if item is None:
+            return
+        if item.node_type == NodeType.ACTION:
+            self.bindLibraryRequested.emit()
+
+    def _on_clicked(self, index: QModelIndex) -> None:
+        """Toggle expansion when the branch indicator hot zone is clicked."""
+
+        if not index.isValid() or not self._model.hasChildren(index):
+            return
+
+        delegate = self._tree.itemDelegate()
+        if not isinstance(delegate, AlbumSidebarDelegate):
+            return
+
+        item_rect = self._tree.visualRect(index)
+        if not item_rect.isValid():
+            return
+
+        depth = delegate._depth_for_index(index)
+        indentation = depth * SIDEBAR_INDENT_PER_LEVEL
+        indicator_left = item_rect.left() + SIDEBAR_LEFT_PADDING + indentation
+        indicator_rect = QRect(
+            indicator_left,
+            item_rect.top() + (item_rect.height() - SIDEBAR_INDICATOR_SIZE) // 2,
+            SIDEBAR_INDICATOR_SIZE,
+            SIDEBAR_INDICATOR_SIZE,
+        )
+
+        hot_zone = indicator_rect.adjusted(
+            -SIDEBAR_INDICATOR_HOTZONE_MARGIN,
+            -SIDEBAR_INDICATOR_HOTZONE_MARGIN,
+            SIDEBAR_INDICATOR_HOTZONE_MARGIN,
+            SIDEBAR_INDICATOR_HOTZONE_MARGIN,
+        )
+        cursor_pos = QCursor.pos()
+        viewport_pos = self._tree.viewport().mapFromGlobal(cursor_pos)
+        if not hot_zone.contains(viewport_pos):
+            return
+
+        if self._tree.isExpanded(index):
+            self._tree.collapse(index)
+        else:
+            self._tree.expand(index)
+
+    def select_path(self, path: Path) -> None:
+        """Select the tree item corresponding to *path* if it exists."""
+
+        index = self._model.index_for_path(path)
+        if not index.isValid():
+            return
+
+        self._current_static_selection = None
+        self._current_pinned_selection = None
+        self._current_selection = path
+
+        # When programmatically selecting an album in response to an external event (like
+        # 'albumOpened'), we must suppress the sidebar's selection signals.
+        # Failing to block signals creates a feedback loop:
+        # 1. NavigationController opens Album A -> calls sidebar.select_path(A)
+        # 2. sidebar.select_path(A) -> emits albumSelected(A)
+        # 3. albumSelected(A) -> triggers NavigationController.open_album(A)
+        #
+        # While NavigationController has checks for redundant opens, race conditions in
+        # rapid switching can bypass them, leading to infinite loops or crashes.
+        # Blocking signals ensures this method only updates the visual state without
+        # triggering further navigation logic.
+        selection_model = self._tree.selectionModel()
+        if selection_model is not None:
+            selection_model.blockSignals(True)
+        try:
+            self._tree.setCurrentIndex(index)
+        finally:
+            if selection_model is not None:
+                selection_model.blockSignals(False)
+
+        self._tree.scrollTo(index)
+
+    def select_pinned_item(self, pinned_item: PinnedSidebarItem, emit_signal: bool = False) -> None:
+        """Select the sidebar row associated with *pinned_item* when present."""
+
+        index = self._model.index_for_pinned_item(pinned_item)
+        if not index.isValid():
+            return
+
+        self._current_selection = None
+        self._current_static_selection = None
+        self._current_pinned_selection = (pinned_item.kind, pinned_item.item_id)
+
+        selection_model = self._tree.selectionModel()
+        already_selected = selection_model is not None and self._tree.currentIndex() == index
+        if selection_model is not None and not emit_signal:
+            selection_model.blockSignals(True)
+        try:
+            self._tree.setCurrentIndex(index)
+        finally:
+            if selection_model is not None and not emit_signal:
+                selection_model.blockSignals(False)
+        self._tree.scrollTo(index)
+        if emit_signal and already_selected:
+            self.pinnedItemSelected.emit(pinned_item)
+
+    def select_all_photos(self, emit_signal: bool = False) -> None:
+        """Select the "All Photos" static node if it is available."""
+
+        _logger.info("select_all_photos: emit_signal=%s", emit_signal)
+        self.select_static_node(self.ALL_PHOTOS_TITLE, emit_signal=emit_signal)
+
+    def select_static_node(self, title: str, emit_signal: bool = False) -> None:
+        """Select the static node matching *title* when present."""
+
+        index = self._find_static_index(title)
+        if not index.isValid():
+            _logger.warning("select_static_node: '%s' not found in model", title)
+            return
+
+        self._current_selection = None
+        self._current_static_selection = title
+        self._current_pinned_selection = None
+
+        # Check whether the target index is already selected.  When the caller
+        # requests signal emission but the selection model considers the index
+        # unchanged, ``selectionChanged`` will not fire and downstream handlers
+        # (e.g. loading "All Photos" after binding a library) will be skipped.
+        selection_model = self._tree.selectionModel()
+        has_selection_model = selection_model is not None
+        already_selected = (
+            has_selection_model
+            and self._tree.currentIndex() == index
+        )
+
+        # Block signals for static nodes as well to prevent similar feedback loops
+        # when programmatically restoring state (e.g. at startup or after resets).
+        should_block = has_selection_model and not emit_signal
+        if should_block:
+            selection_model.blockSignals(True)
+        try:
+            self._tree.setCurrentIndex(index)
+        finally:
+            if should_block:
+                selection_model.blockSignals(False)
+
+        # When ``emit_signal`` is requested but the index was already current,
+        # ``setCurrentIndex`` is a no-op and ``selectionChanged`` never fires.
+        # Manually invoke the handler so the view transition still occurs.
+        if emit_signal and already_selected:
+            _logger.info(
+                "select_static_node: '%s' was already selected, manually triggering handler",
+                title,
+            )
+            self._on_selection_changed(None, None)
+
+        self._tree.scrollTo(index)
+
+    def _show_context_menu(self, point: QPoint) -> None:
+        show_context_menu(
+            parent=self,
+            point=point,
+            tree=self._tree,
+            model=self._model,
+            library=self._library,
+            set_pending_selection=self._set_pending_selection,
+            on_bind_library=self.bindLibraryRequested.emit,
+        )
+
+    def _set_pending_selection(self, target: Path | None) -> None:
+        self._pending_selection = target
+
+    def _find_static_index(self, title: str) -> QModelIndex:
+        root_index = self._model.index(0, 0)
+        if not root_index.isValid():
+            return QModelIndex()
+        item = self._model.item_from_index(root_index)
+        if item is None:
+            return QModelIndex()
+        for row in range(self._model.rowCount(root_index)):
+            index = self._model.index(row, 0, root_index)
+            child = self._model.item_from_index(index)
+            if child and child.title == title:
+                return index
+        return QModelIndex()
+
+    def _on_files_dropped(self, target: Path, paths: list[Path]) -> None:
+        """Relay drop notifications to consumers of :class:`AlbumSidebar`."""
+
+        if not paths:
+            return
+        self.filesDropped.emit(target, paths)
+
+
+__all__ = ["AlbumSidebar"]

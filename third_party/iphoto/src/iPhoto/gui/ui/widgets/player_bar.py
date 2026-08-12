@@ -1,0 +1,348 @@
+"""Reusable playback control bar for the main player."""
+
+from __future__ import annotations
+
+from typing import Optional
+
+from PySide6.QtCore import QSize, Qt, Signal, Slot
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QSizePolicy,
+    QSlider,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ....gui.i18n import tr
+from ..icon import load_icon
+
+
+class PlayerBar(QWidget):
+    """Present transport controls, a progress slider and volume settings."""
+
+    playPauseRequested = Signal()
+    seekRequested = Signal(int)
+    scrubStarted = Signal()
+    scrubFinished = Signal()
+    volumeChanged = Signal(int)
+    muteToggled = Signal(bool)
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._duration: int = 0
+        self._updating_position = False
+        self._scrubbing = False
+
+        self._play_button = self._create_tool_button("▶", tr("PlayerBar", "Play/Pause"))
+        self._play_button.setCheckable(False)
+
+        self._position_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self._position_slider.setRange(0, 0)
+        self._position_slider.setSingleStep(1000)
+        self._position_slider.setPageStep(5000)
+        self._position_slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self._elapsed_label = QLabel("0:00", self)
+        self._elapsed_label.setMinimumWidth(48)
+        self._duration_label = QLabel("0:00", self)
+        self._duration_label.setMinimumWidth(48)
+
+        self._volume_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self._volume_slider.setRange(0, 100)
+        self._volume_slider.setValue(80)
+        self._volume_slider.setFixedWidth(110)
+        self._volume_slider.setToolTip(tr("PlayerBar", "Volume"))
+
+        self._mute_button = self._create_tool_button("🔇", tr("PlayerBar", "Mute"), checkable=True)
+
+        self._play_icon: QIcon = load_icon("play.fill.svg")
+        self._pause_icon: QIcon = load_icon("pause.fill.svg")
+        self._speaker_unmuted_icon: QIcon = load_icon("speaker.3.fill.svg")
+        self._speaker_muted_icon: QIcon = load_icon("speaker.slash.fill.svg")
+        self._apply_icon(self._play_button, self._play_icon)
+        self._update_mute_icon(self._mute_button.isChecked())
+
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+
+        self._progress_frame = QWidget(self)
+        self._progress_frame.setObjectName("progressFrame")
+        # The background frame is the only widget painting an opaque surface.
+        # This keeps the semi-transparent chrome from stacking across child controls.
+        self._progress_frame.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        slider_row = QHBoxLayout()
+        slider_row.setContentsMargins(0, 0, 0, 0)
+        slider_row.setSpacing(10)
+        slider_row.addWidget(self._elapsed_label)
+        slider_row.addWidget(self._position_slider, stretch=1)
+        slider_row.addWidget(self._duration_label)
+
+        controls_row = QHBoxLayout()
+        controls_row.setContentsMargins(0, 0, 0, 0)
+        controls_row.setSpacing(12)
+        controls_row.addStretch(1)
+        controls_row.addWidget(self._play_button)
+        controls_row.addSpacing(16)
+        controls_row.addWidget(self._mute_button)
+        controls_row.addWidget(self._volume_slider)
+        controls_row.addStretch(1)
+
+        frame_layout = QVBoxLayout(self._progress_frame)
+        frame_layout.setContentsMargins(16, 12, 16, 12)
+        frame_layout.setSpacing(12)
+        frame_layout.addLayout(slider_row)
+        frame_layout.addLayout(controls_row)
+
+        layout.addWidget(self._progress_frame)
+
+        self._apply_palette()
+        self._make_controls_transparent()
+
+        self._play_button.clicked.connect(self._on_play_button_clicked)
+        self._mute_button.toggled.connect(self._on_mute_button_toggled)
+        self._volume_slider.valueChanged.connect(self._on_volume_changed)
+        self._position_slider.sliderPressed.connect(self._on_slider_pressed)
+        self._position_slider.sliderReleased.connect(self._on_slider_released)
+        self._position_slider.valueChanged.connect(self._on_slider_value_changed)
+
+    # ------------------------------------------------------------------
+    # UI update helpers
+    # ------------------------------------------------------------------
+    def retranslate_ui(self) -> None:
+        self._play_button.setToolTip(tr("PlayerBar", "Play/Pause"))
+        self._volume_slider.setToolTip(tr("PlayerBar", "Volume"))
+        self._mute_button.setToolTip(tr("PlayerBar", "Mute"))
+
+    def set_duration(self, duration_ms: int) -> None:
+        """Update the displayed total duration."""
+
+        self._duration = max(0, duration_ms)
+        self._duration_label.setText(self._format_ms(self._duration))
+        with self._block_position_updates():
+            self._position_slider.setRange(0, self._duration if self._duration else 0)
+        if self._duration == 0:
+            self.set_position(0)
+
+    def duration(self) -> int:
+        """Return the currently displayed duration in milliseconds."""
+
+        return self._duration
+
+    def set_position(self, position_ms: int) -> None:
+        """Update the slider and elapsed label to *position_ms*."""
+
+        if self._scrubbing:
+            return
+        position = max(0, min(position_ms, self._duration if self._duration else position_ms))
+        with self._block_position_updates():
+            self._position_slider.setValue(position)
+        self._elapsed_label.setText(self._format_ms(position))
+
+    def position(self) -> int:
+        """Return the current slider position in milliseconds."""
+
+        return self._position_slider.value()
+
+    def set_playback_state(self, is_playing: bool | object) -> None:
+        """Switch the play button icon based on state."""
+        # Handle both boolean and QMediaPlayer.PlaybackState object
+        playing = False
+        if isinstance(is_playing, bool):
+            playing = is_playing
+        else:
+            name = getattr(is_playing, "name", None)
+            playing = (name == "PlayingState")
+
+        if playing:
+            self._apply_icon(self._play_button, self._pause_icon)
+            self._play_button.setText("⏸")
+        else:
+            self._apply_icon(self._play_button, self._play_icon)
+            self._play_button.setText("▶")
+
+    def set_volume(self, volume: int) -> None:
+        """Synchronise the volume slider without emitting signals."""
+
+        clamped = max(0, min(100, volume))
+        was_blocked = self._volume_slider.blockSignals(True)
+        self._volume_slider.setValue(clamped)
+        self._volume_slider.blockSignals(was_blocked)
+
+    @Slot()
+    def _on_play_button_clicked(self) -> None:
+        """Emit :attr:`playPauseRequested` in response to play button presses."""
+
+        self.playPauseRequested.emit()
+
+    def set_muted(self, muted: bool) -> None:
+        """Synchronise the mute toggle without re-emitting signals."""
+
+        was_blocked = self._mute_button.blockSignals(True)
+        self._mute_button.setChecked(muted)
+        self._mute_button.blockSignals(was_blocked)
+        self._update_mute_icon(muted)
+
+    def reset(self) -> None:
+        """Restore the bar to an inactive state."""
+
+        self.set_duration(0)
+        self.set_position(0)
+        self._apply_icon(self._play_button, self._play_icon)
+        self._play_button.setText("▶")
+
+    # ------------------------------------------------------------------
+    # Slots
+    # ------------------------------------------------------------------
+    def _on_mute_button_toggled(self, muted: bool) -> None:
+        self._update_mute_icon(muted)
+        self.muteToggled.emit(muted)
+
+    def _on_volume_changed(self, value: int) -> None:
+        self.volumeChanged.emit(value)
+
+    def _on_slider_pressed(self) -> None:
+        self._scrubbing = True
+        self.seekRequested.emit(self._position_slider.value())
+        self.scrubStarted.emit()
+
+    def _on_slider_released(self) -> None:
+        self._scrubbing = False
+        self.seekRequested.emit(self._position_slider.value())
+        self.scrubFinished.emit()
+
+    def _on_slider_value_changed(self, value: int) -> None:
+        if self._updating_position:
+            return
+        self._elapsed_label.setText(self._format_ms(value))
+        self.seekRequested.emit(value)
+
+    def sizeHint(self) -> QSize:  # pragma: no cover - Qt sizing
+        base = super().sizeHint()
+        return QSize(max(base.width(), 420), base.height())
+
+    def is_scrubbing(self) -> bool:
+        """Return whether the user is currently dragging the progress slider."""
+
+        return self._scrubbing
+
+    # ------------------------------------------------------------------
+    # Context managers
+    # ------------------------------------------------------------------
+    def _block_position_updates(self):
+        class _Guard:
+            def __init__(self, bar: "PlayerBar") -> None:
+                self._bar = bar
+
+            def __enter__(self) -> None:
+                self._bar._updating_position = True
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                self._bar._updating_position = False
+
+        return _Guard(self)
+
+    # ------------------------------------------------------------------
+    # Formatting
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _format_ms(ms: int) -> str:
+        total_seconds = max(0, ms // 1000)
+        minutes, seconds = divmod(total_seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes:d}:{seconds:02d}"
+
+    # ------------------------------------------------------------------
+    # Styling helpers
+    # ------------------------------------------------------------------
+    def _update_mute_icon(self, muted: bool) -> None:
+        if muted:
+            self._apply_icon(self._mute_button, self._speaker_muted_icon)
+        else:
+            self._apply_icon(self._mute_button, self._speaker_unmuted_icon)
+
+    def _create_tool_button(
+        self, text: str, tooltip: str, *, checkable: bool = False
+    ) -> QToolButton:
+        button = QToolButton(self)
+        button.setText(text)
+        button.setToolTip(tooltip)
+        button.setAutoRaise(False)
+        button.setCheckable(checkable)
+        button.setIconSize(QSize(28, 28))
+        button.setMinimumSize(QSize(36, 36))
+        return button
+
+    @staticmethod
+    def _apply_icon(button: QToolButton, icon: QIcon) -> None:
+        if not icon.isNull():
+            button.setIcon(icon)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        else:
+            button.setIcon(QIcon())
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+
+    def _apply_palette(self) -> None:
+        button_style = (
+            "QToolButton { background-color: transparent; border: none; color: #d7d8da;"
+            " font-size: 18px; padding: 6px; border-radius: 18px; }\n"
+            "QToolButton:hover { background-color: rgba(255, 255, 255, 26); }\n"
+            "QToolButton:pressed { background-color: rgba(255, 255, 255, 44); }\n"
+            "QToolButton:checked { background-color: rgba(255, 255, 255, 58); }"
+        )
+        slider_style = (
+            "QSlider { background: transparent; }\n"
+            "QSlider::groove:horizontal { height: 4px; background: rgba(240, 240, 240, 80); border-radius: 2px; }\n"
+            "QSlider::sub-page:horizontal { background: #d7d8da; border-radius: 2px; }\n"
+            "QSlider::add-page:horizontal { background: rgba(255, 255, 255, 24); border-radius: 2px; }\n"
+            "QSlider::handle:horizontal { background: #f5f6f8; width: 14px; margin: -6px 0; border-radius: 7px; }"
+        )
+        volume_style = (
+            "QSlider { background: transparent; }\n"
+            "QSlider::groove:horizontal { height: 3px; background: rgba(240, 240, 240, 70); border-radius: 2px; }\n"
+            "QSlider::sub-page:horizontal { background: #d7d8da; border-radius: 2px; }\n"
+            "QSlider::add-page:horizontal { background: rgba(255, 255, 255, 18); border-radius: 2px; }\n"
+            "QSlider::handle:horizontal { background: #f5f6f8; width: 12px; margin: -6px 0; border-radius: 6px; }"
+        )
+        label_style = "color: #d7d8da; font-size: 12px; background: transparent;"
+
+        self.setStyleSheet(
+            "PlayerBar {"
+            " background-color: transparent;"
+            " border: none;"
+            " color: #d7d8da;"
+            "}\n"
+            "PlayerBar #progressFrame {"
+            " background-color: rgba(18, 18, 22, 190);"
+            " border-radius: 14px;"
+            " border: 1px solid rgba(255, 255, 255, 36);"
+            " }\n"
+            + button_style
+        )
+        self._position_slider.setStyleSheet(slider_style)
+        self._volume_slider.setStyleSheet(volume_style)
+        self._elapsed_label.setStyleSheet(label_style)
+        self._duration_label.setStyleSheet(label_style)
+
+    def _make_controls_transparent(self) -> None:
+        """Disable opaque painting for child widgets so only the shared backdrop draws."""
+
+        translucent_widgets = (
+            self._play_button,
+            self._mute_button,
+            self._position_slider,
+            self._volume_slider,
+            self._elapsed_label,
+            self._duration_label,
+        )
+        for widget in translucent_widgets:
+            widget.setAutoFillBackground(False)
+            widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+            widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)

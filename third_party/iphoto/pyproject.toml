@@ -1,0 +1,87 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iPhoto"
+  version = "6.6.8"
+description = "Folder-native photo manager with Live Photo support"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{name = "iPhoto Team"}]
+dependencies = [
+  "typer>=0.12",
+  "rich>=13",
+  "jsonschema>=4",
+  "PySide6>=6.10.1",
+  "Pillow>=10",
+  "pillow-heif>=0.16",
+  "imagehash>=4",
+  "xxhash>=3",
+  "python-dateutil>=2",
+  "opencv-python-headless>=4.10",
+  "reverse-geocoder>=1.5.1",
+  "pyexiftool>=0.5.5",
+  "numpy>=2.3.4",
+  "numba>=0.60",
+  "mapbox-vector-tile>=1.2",
+  "av>=11.0.0",
+  "PyOpenGL>=3.1.7",
+  "PyOpenGL_accelerate>=3.1.7",
+  "rawpy>=0.23",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-mock",
+    "pytest-qt",
+    "pytest-timeout",
+]
+dev = [
+    "pytest",
+    "pytest-mock",
+    "pytest-qt",
+    "pytest-timeout",
+    "ruff",
+    "black",
+    "mypy",
+    "types-Pillow",
+    "types-python-dateutil",
+]
+ai-demo = [
+    "insightface>=0.7.3,<1.0",
+    "onnxruntime>=1.18,<2",
+]
+
+[project.scripts]
+iphoto = "iPhoto.cli:app"
+iphoto-gui = "iPhoto.gui.main:main"
+
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+"iPhoto" = ["**/*.qsb", "**/*.frag", "**/*.vert", "**/*.svg", "**/*.json", "**/*.yaml", "**/*.ts", "**/*.qm"]
+
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "B", "UP", "N", "ASYNC", "S", "BLE", "A", "C4", "PIE", "Q", "RUF"]
+ignore = ["E203"]
+
+[tool.black]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -p no:pytestqt --ignore=tests/ui --ignore=tests/gui"
+pythonpath = ["src"]
+
+[tool.typer]
+pretty_exceptions_enable = true

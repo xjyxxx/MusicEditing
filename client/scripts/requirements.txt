@@ -4,3 +4,6 @@ numpy>=1.24.0
 opencv-python-headless>=4.8.0
 # PySceneDetect: install via run_ui_*.bat / scripts/install_scenedetect.bat
 # from absolute path third_party/PySceneDetect (relative -e paths break under pip+cwd)
+#
+# iPhotron 重依赖已拆到 requirements-iphoto.txt，避免每次启动 pip 解析/安装卡住。
+# 首次打开「照片图库」前可运行: pip install -r client/scripts/requirements-iphoto.txt

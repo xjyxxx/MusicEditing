@@ -31,8 +31,9 @@
 
 ## 流程图
 
-- [流程图/README.md](流程图/README.md) — 播放器分层 mermaid 总览  
-- 详解以 `player_decode_flow.md` 为准
+- [流程图/README.md](流程图/README.md) — **播放器**分层 + **照片图库**扫描/编辑 mermaid  
+- 播放器详解：[design/player_decode_flow.md](design/player_decode_flow.md)  
+- 照片图库详解：[design/photo_manager.md](design/photo_manager.md) · [feature_flows.md §5.24](design/feature_flows.md)
 
 ## 第三方与模型
 
