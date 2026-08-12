@@ -193,8 +193,9 @@ def render_cover_png(
     lines = _wrap_title(title, max_chars=12 if w < 900 else 16)
     sub_lines = _wrap_title(subtitle, max_chars=18) if subtitle else []
 
-    # 大标题
-    font = QFont("Microsoft YaHei UI")
+    # 大标题：优先雅黑，缺字体时回退无衬线（避免封面标题空白）
+    font = QFont()
+    font.setFamilies(["Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", "sans-serif"])
     font.setBold(True)
     # 按画布高度估字号
     px = max(36, min(96, int(h * 0.055)))
@@ -219,7 +220,8 @@ def render_cover_png(
         ty += fm.height() + 10
 
     if sub_lines:
-        sfont = QFont("Microsoft YaHei UI")
+        sfont = QFont()
+        sfont.setFamilies(["Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", "sans-serif"])
         sfont.setPixelSize(max(22, int(px * 0.45)))
         p.setFont(sfont)
         sfm = QFontMetrics(sfont)

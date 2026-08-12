@@ -1,9 +1,9 @@
-"""全局视觉主题（Studio 炭黑 + 琥珀强调，借鉴 Splice / Cinema Studio 一类媒体工具）"""
+"""全局视觉主题（macOS 浅色：暖白画布 + 系统蓝；正文深色，避免浅底白字）。"""
 
 from __future__ import annotations
 
 # ── 设计令牌 ──────────────────────────────────────────────
-# macOS 风格：暖白画布、半透明浅灰面板和系统蓝强调色。
+# 正文一律深色（TEXT*）；白字只允许出现在 ACCENT/强调色填充上（ACCENT_ON）。
 BG = "#F5F5F7"          # 画布底
 SURFACE = "#FFFFFF"     # 面板
 SURFACE_2 = "#F2F2F7"   # 抬升面
@@ -16,11 +16,16 @@ TEXT_DIM = "#8E8E93"
 ACCENT = "#0A84FF"      # macOS 系统蓝
 ACCENT_HOVER = "#0077ED"
 ACCENT_PRESSED = "#006EDC"
-ACCENT_ON = "#FFFFFF"   # 强调色上的字
+ACCENT_ON = "#FFFFFF"   # 仅用于蓝底/强调填充上的字
 SIGNAL = "#007AFF"      # 次要信号（链接/信息）
 SIGNAL_SOFT = "#E5F1FF"
+SIGNAL_BORDER = "#A8C8F0"
 DANGER = "#D70015"
+DANGER_SOFT = "#FFE5E8"
 OK = "#248A3D"
+OK_SOFT = "#E3F5E8"
+WARN_SOFT = "#FFF4E5"
+WARN_TEXT = "#9A5B00"
 PLAYER_BG = "#000000"
 
 FONT_UI = '"SF Pro Display", "Segoe UI Variable", "Microsoft YaHei UI", "Segoe UI", sans-serif'
@@ -76,8 +81,8 @@ QLabel#ChromePill {{
 }}
 QLabel#ChromeWeather {{
     background: {SIGNAL_SOFT};
-    color: #B8EDE4;
-    border: 1px solid #3A6A64;
+    color: {SIGNAL};
+    border: 1px solid {SIGNAL_BORDER};
     border-radius: 999px;
     padding: 4px 12px;
     font-size: 12px;
@@ -203,11 +208,11 @@ QPushButton {{
     font-size: 13px;
 }}
 QPushButton:hover {{
-    background: #2C3444;
-    border-color: #4A5870;
+    background: {SURFACE};
+    border-color: {BORDER_STRONG};
 }}
 QPushButton:pressed {{
-    background: #222833;
+    background: {ELEVATED};
 }}
 QPushButton:disabled {{
     color: {TEXT_DIM};
@@ -229,9 +234,9 @@ QPushButton#primaryButton:pressed, QPushButton[cssClass="primary"]:pressed {{
     background: {ACCENT_PRESSED};
 }}
 QPushButton#primaryButton:disabled, QPushButton[cssClass="primary"]:disabled {{
-    background: #4A3F32;
-    color: #9A8A78;
-    border-color: #4A3F32;
+    background: {ELEVATED};
+    color: {TEXT_DIM};
+    border-color: {BORDER};
 }}
 
 /* ── Inputs ── */
@@ -283,7 +288,7 @@ QComboBox::drop-down {{
     border-bottom-right-radius: 7px;
 }}
 QComboBox::drop-down:hover {{
-    background: #2C3444;
+    background: {SURFACE};
 }}
 QComboBox::down-arrow {{
     width: 0;
@@ -538,7 +543,7 @@ QLabel#WarnText {{
 
 
 def apply_dark_palette(app) -> None:
-    """Fusion + 深色 QPalette，压掉下拉/弹层系统白边。"""
+    """Fusion + 应用 QPalette（现为 macOS 浅色令牌；函数名保留兼容入口）。"""
     from PySide6.QtGui import QColor, QPalette
 
     p = QPalette()
@@ -631,9 +636,9 @@ QLabel#HintLabel {{
     background: {SURFACE_2}; border: 1px solid {BORDER}; border-radius: 8px;
 }}
 QLabel#MetaBadge {{
-    color: #B8EDE4; font-size: 13px; font-weight: 600;
+    color: {SIGNAL}; font-size: 13px; font-weight: 600;
     padding: 6px 12px; min-height: 28px;
-    background: {SIGNAL_SOFT}; border: 1px solid #3A6A64; border-radius: 8px;
+    background: {SIGNAL_SOFT}; border: 1px solid {SIGNAL_BORDER}; border-radius: 8px;
 }}
 QLabel#SideTitle {{
     color: {TEXT}; font-size: 13px; font-weight: 700; padding: 4px 0;
@@ -646,12 +651,12 @@ QPushButton#PrimaryBtn {{
     border-radius: 8px; font-weight: 600; border: 1px solid {ACCENT};
 }}
 QPushButton#PrimaryBtn:hover {{ background: {ACCENT_HOVER}; }}
-QPushButton#PrimaryBtn:disabled {{ background: #4A3F32; color: #9A8A78; border-color: #4A3F32; }}
+QPushButton#PrimaryBtn:disabled {{ background: {ELEVATED}; color: {TEXT_DIM}; border-color: {BORDER}; }}
 QPushButton#GhostBtn {{
     background: {ELEVATED}; color: {TEXT}; padding: 8px 14px;
     border-radius: 8px; border: 1px solid {BORDER_STRONG};
 }}
-QPushButton#GhostBtn:hover {{ background: #2C3444; }}
+QPushButton#GhostBtn:hover {{ background: {SURFACE}; border-color: {BORDER_STRONG}; }}
 QPushButton#GhostBtn:disabled {{ color: {TEXT_DIM}; border-color: {BORDER}; }}
 QLineEdit#ProfileKeyEdit {{
     min-height: 34px;
@@ -735,7 +740,7 @@ QSlider::sub-page:horizontal {{
 
 
 def hot_comments_stylesheet() -> str:
-    """热评 / 下载三合一页局部样式（夜色歌单 + 琥珀 CTA）。"""
+    """热评 / 下载三合一页局部样式（macOS 浅色 + 系统蓝 CTA）。"""
     return f"""
 HotCommentsPage, QWidget#HotPage {{
     background: {BG};
@@ -753,8 +758,7 @@ QLabel#HotHint {{
     color: {TEXT_MUTED};
     font-size: 12px;
     padding: 8px 12px;
-    background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-        stop:0 {SURFACE_2}, stop:1 #1A1820);
+    background: {SURFACE_2};
     border: 1px solid {BORDER};
     border-radius: 10px;
 }}
@@ -766,7 +770,7 @@ QFrame#HotFetchPanel, QFrame#HotResultPanel {{
 
 QFrame#HotSongBar {{
     background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
-        stop:0 #1A2230, stop:0.55 {SURFACE}, stop:1 #1C1812);
+        stop:0 {SURFACE}, stop:1 {SURFACE_2});
     border: 1px solid {BORDER};
     border-radius: 14px;
 }}
@@ -788,16 +792,17 @@ QLabel#HotPathMuted {{
 
 QPushButton#HotChip {{
     background: {SIGNAL_SOFT};
-    color: #B8EDE4;
-    border: 1px solid #3A6A64;
+    color: {SIGNAL};
+    border: 1px solid {SIGNAL_BORDER};
     border-radius: 999px;
     padding: 6px 16px;
     font-size: 12px;
     font-weight: 600;
 }}
 QPushButton#HotChip:hover {{
-    background: #355E5A;
+    background: {ELEVATED};
     color: {TEXT};
+    border-color: {BORDER_STRONG};
 }}
 
 QFrame#HotFetchRow {{
@@ -866,10 +871,10 @@ QLabel#HotStatus {{
     padding: 2px 2px;
 }}
 QLabel#HotStatus[tone="warn"] {{
-    color: {ACCENT};
+    color: {WARN_TEXT};
 }}
 QLabel#HotStatus[tone="ok"] {{
-    color: #8FD4D0;
+    color: {OK};
 }}
 QLabel#HotStatus[tone="danger"] {{
     color: {DANGER};
@@ -903,13 +908,13 @@ QLabel#HotKindBadge {{
 }}
 QLabel#HotKindBadge[kind="audio"] {{
     background: {SIGNAL_SOFT};
-    color: #B8EDE4;
-    border-color: #3A6A64;
+    color: {SIGNAL};
+    border-color: {SIGNAL_BORDER};
 }}
 QLabel#HotKindBadge[kind="video"] {{
-    background: #3A2E1A;
-    color: {ACCENT};
-    border-color: #6A4E28;
+    background: {WARN_SOFT};
+    color: {WARN_TEXT};
+    border-color: #F0C080;
 }}
 QLabel#HotMediaName {{
     color: {TEXT};
@@ -930,8 +935,8 @@ QLabel#HotSectionTitle {{
 }}
 QLabel#HotCountBadge {{
     background: {SIGNAL_SOFT};
-    color: #B8EDE4;
-    border: 1px solid #3A6A64;
+    color: {SIGNAL};
+    border: 1px solid {SIGNAL_BORDER};
     border-radius: 999px;
     padding: 2px 10px;
     font-size: 11px;

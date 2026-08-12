@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 from core.image_loader import load_preview, probe_size
 from ui.elided_label import ElidedPathLabel
 from ui.exif_panel import ExifPanel, attach_exif_overlay
-from ui.theme import BG, PLAYER_BG, TEXT_MUTED, enhance_page_stylesheet
+from ui.theme import BG, PLAYER_BG, TEXT, TEXT_MUTED, enhance_page_stylesheet
 from ui.studio_kit import make_fixed_ai_hint, make_studio_hero, set_ai_hint_text, studio_page_stylesheet
 from ui.workflow_link import TAB_WATERMARK, ask_video_handoff
 from viewmodels.main_vm import MainViewModel
@@ -71,7 +71,7 @@ def _paint_scroll_dark(scroll: QScrollArea, body: QWidget) -> None:
         pal.setColor(QPalette.Button, bg)
         w.setPalette(pal)
     scroll.viewport().setStyleSheet(f"background: {BG};")
-    body.setStyleSheet(f"background: {BG}; color: #E8EDF5;")
+    body.setStyleSheet(f"background: {BG}; color: {TEXT};")
 
 
 class ZoomImageView(QGraphicsView):

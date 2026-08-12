@@ -34,10 +34,13 @@ from ui.theme import (
     BORDER,
     BORDER_STRONG,
     DANGER,
+    DANGER_SOFT,
     ELEVATED,
     FONT_UI,
     OK,
     SIGNAL,
+    SIGNAL_SOFT,
+    SIGNAL_BORDER,
     SURFACE,
     SURFACE_2,
     TEXT,
@@ -66,7 +69,7 @@ QWidget#PipelineQueuePage {{
 }}
 QFrame#PipelineHero {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 {SURFACE}, stop:0.55 {SURFACE_2}, stop:1 #1A222E);
+        stop:0 {SURFACE}, stop:1 {SURFACE_2});
     border: 1px solid {BORDER};
     border-radius: 14px;
 }}
@@ -127,9 +130,9 @@ QPushButton#StepChip {{
     text-align: left;
 }}
 QPushButton#StepChip:checked {{
-    background: #2A3A36;
-    color: #B8EDE4;
-    border: 1px solid {SIGNAL};
+    background: {SIGNAL_SOFT};
+    color: {SIGNAL};
+    border: 1px solid {SIGNAL_BORDER};
 }}
 QPushButton#StepChip:hover {{
     border-color: {BORDER_STRONG};
@@ -150,12 +153,12 @@ QPushButton#GhostBtn:hover {{
 QPushButton#DangerBtn {{
     background: transparent;
     color: {DANGER};
-    border: 1px solid #5A3030;
+    border: 1px solid {DANGER};
     border-radius: 8px;
     padding: 7px 14px;
 }}
 QPushButton#DangerBtn:hover {{
-    background: #3A2222;
+    background: {DANGER_SOFT};
     border-color: {DANGER};
 }}
 QPushButton#DangerBtn:disabled {{
@@ -181,9 +184,9 @@ QListWidget#PipelineList::item {{
     color: {TEXT};
 }}
 QListWidget#PipelineList::item:selected {{
-    background: #2C3444;
+    background: {SIGNAL_SOFT};
     color: {TEXT};
-    border: 1px solid {BORDER_STRONG};
+    border: 1px solid {SIGNAL_BORDER};
 }}
 QListWidget#PipelineList::item:hover {{
     background: {ELEVATED};

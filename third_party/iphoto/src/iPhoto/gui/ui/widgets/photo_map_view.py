@@ -19,7 +19,7 @@ from PySide6.QtGui import (
     QPixmap,
     QPalette,
 )
-from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 from ....application.ports import MapInteractionServicePort, MapRuntimePort
 from ....application.services.map_interaction_service import LibraryMapInteractionService
@@ -303,6 +303,23 @@ class PhotoMapView(QWidget):
         self._marker_paint_callback = None
         self._assets: list[GeotaggedAsset] = []
         self._assets_library_root: Path | None = None
+        self._empty_banner = QLabel(self)
+        self._empty_banner.setObjectName("PhotoMapEmptyBanner")
+        self._empty_banner.setWordWrap(True)
+        self._empty_banner.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._empty_banner.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._empty_banner.setStyleSheet(
+            "QLabel#PhotoMapEmptyBanner {"
+            "  background-color: rgba(20, 24, 32, 170);"
+            "  color: #F5F5F7;"
+            "  border-radius: 10px;"
+            "  padding: 14px 18px;"
+            "  font-size: 13px;"
+            "}"
+        )
+        self._empty_banner.hide()
 
         # ``FloatingToolTip`` replicates ``QToolTip`` using a styled ``QFrame``
         # instead of a custom paint routine.  The standard tooltip inherits the
@@ -325,6 +342,7 @@ class PhotoMapView(QWidget):
         self._last_tooltip_text = ""
         self._thumbnail_loader = ThumbnailLoader(self)
         self._build_map_widget()
+        self._update_empty_banner(True)
 
     def set_map_interaction_service(
         self,
@@ -383,6 +401,7 @@ class PhotoMapView(QWidget):
         self._assets = list(assets)
         self._assets_library_root = library_root
         self._marker_controller.set_assets(self._assets, library_root)
+        self._update_empty_banner(len(self._assets) == 0)
 
     def clear(self) -> None:
         """Remove all markers from the map."""
@@ -393,6 +412,7 @@ class PhotoMapView(QWidget):
         self._assets = []
         self._assets_library_root = None
         self._marker_controller.clear()
+        self._update_empty_banner(True)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -404,6 +424,43 @@ class PhotoMapView(QWidget):
                 geometry=self._map_widget.geometry(),
             )
         self._marker_controller.handle_resize()
+        self._layout_empty_banner()
+
+    def _maps_font_missing(self) -> bool:
+        font_dir = Path(self._map_package_root or _MAPS_PACKAGE_ROOT) / "font"
+        if not font_dir.is_dir():
+            return True
+        try:
+            return not any(font_dir.iterdir())
+        except OSError:
+            return True
+
+    def _update_empty_banner(self, empty: bool) -> None:
+        if not empty:
+            self._empty_banner.hide()
+            return
+        lines = [
+            "当前图库没有带地理位置的照片。",
+            "手机拍摄并开启定位的照片会出现在地图上；无 GPS 时地图仍可浏览，这不是加载失败。",
+        ]
+        if self._maps_font_missing():
+            lines.append(
+                "提示：未补齐 maps/font，地名可能显示异常（见 third_party/iphoto/src/maps/ASSETS.md）。"
+            )
+        self._empty_banner.setText("\n".join(lines))
+        self._layout_empty_banner()
+        self._empty_banner.show()
+        self._empty_banner.raise_()
+
+    def _layout_empty_banner(self) -> None:
+        if not hasattr(self, "_empty_banner"):
+            return
+        margin = 24
+        w = max(160, self.width() - 2 * margin)
+        h = max(72, min(140, self.height() // 3))
+        x = max(0, (self.width() - w) // 2)
+        y = max(0, (self.height() - h) // 2)
+        self._empty_banner.setGeometry(x, y, w, h)
 
     def hideEvent(self, event) -> None:  # type: ignore[override]
         """Ensure the custom tooltip is dismissed when the view is hidden."""

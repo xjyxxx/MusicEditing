@@ -35,6 +35,7 @@ class SetupWizardDialog(QDialog):
         tip = QLabel(
             "本地离线主链路不强制联网。下列依赖按需准备："
             "引擎编译、超分/去水印模型、链接下载、Cookie、GPU。"
+            "照片完整能力另见 requirements-iphoto.txt；地点离线字体见 maps/ASSETS.md。"
             "「点了没反应」常见原因：media_cli 未编译、yt-dlp 缺失、Cookie 未配。"
             "可稍后在「个人中心」再次打开本向导。"
         )

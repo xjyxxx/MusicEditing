@@ -21,6 +21,7 @@ from core.netease_comments import (
     FetchResult, HotComment, fetch_hot_comments, parse_song_id,
 )
 from core.url_info_cache import MediaCacheItem, UrlInfoCache, display_title, media_pk
+from ui.studio_kit import make_studio_hero, studio_page_stylesheet
 from ui.theme import hot_comments_stylesheet
 from viewmodels.main_vm import MainViewModel
 
@@ -264,7 +265,7 @@ class DownloadPage(QWidget):
     def __init__(self, vm: MainViewModel, parent=None):
         super().__init__(parent)
         self.setObjectName("HotCommentsPage")
-        self.setStyleSheet(hot_comments_stylesheet())
+        self.setStyleSheet(hot_comments_stylesheet() + "\n" + studio_page_stylesheet("HotCommentsPage"))
         self._vm = vm
         self._busy = False
         self._last_fail_url = ""
@@ -308,8 +309,13 @@ class DownloadPage(QWidget):
         root.setContentsMargins(4, 4, 4, 12)
         root.setSpacing(14)
 
+        root.addWidget(make_studio_hero(
+            "下载与热评",
+            "获取探测后勾选加入列表 · B站自动拉弹幕 · 播过的会留在历史 · 可送首页叠弹幕",
+            "工作流",
+        ))
         tip = QLabel(
-            "获取探测后勾选加入列表 · B站自动拉弹幕 · 播过的会留在历史中 · 首页可叠弹幕"
+            "「获取」只拉元数据/热评或弹幕，不自动下载。请仅处理自有或已获授权内容。"
         )
         tip.setObjectName("HotHint")
         tip.setWordWrap(True)

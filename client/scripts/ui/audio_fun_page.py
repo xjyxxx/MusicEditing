@@ -15,7 +15,11 @@ from PySide6.QtWidgets import (
 from core.audio_fx import PRESETS, AudioFxParams, describe_params
 from core.sfx_overlay import SfxOverlayParams, list_sfx_library, sfx_dirs
 from ui.elided_label import ElidedPathLabel
-from ui.studio_kit import wrap_tab_scroll
+from ui.studio_kit import (
+    make_studio_hero,
+    studio_page_stylesheet,
+    wrap_tab_scroll,
+)
 from ui.theme import style_spinbox
 from viewmodels.main_vm import MainViewModel
 
@@ -29,9 +33,17 @@ class AudioFunPage(QWidget):
         self._busy = False
         self._sfx_path = ""
         self._sfx_busy = False
+        self.setObjectName("AudioFunPage")
+        self.setStyleSheet(studio_page_stylesheet("AudioFunPage"))
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(8)
+        root.addWidget(make_studio_hero(
+            "音频趣味",
+            "整轨变调/变速/倒放/伪8D/混响，或叠加梗音。作用于视频时会尽量保持音画同步。",
+            "趣味",
+        ))
         tabs = QTabWidget()
         tabs.addTab(wrap_tab_scroll(self._build_track_tab()), "整轨趣味")
         tabs.addTab(wrap_tab_scroll(self._build_sfx_tab()), "梗音叠加")

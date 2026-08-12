@@ -17,7 +17,7 @@ from core.blind_watermark_dct import embed_text_dct
 from core.cover_factory import COVER_SIZES
 from core.exif_stamp import ExifStamp, stamp_exif
 from ui.elided_label import ElidedPathLabel
-from ui.studio_kit import wrap_studio_scroll
+from ui.studio_kit import make_studio_hero, studio_page_stylesheet, wrap_studio_scroll
 from ui.theme import style_spinbox
 from viewmodels.main_vm import MainViewModel
 
@@ -29,14 +29,20 @@ class CoverPage(QWidget):
         self._src_path = ""
         self._result_path = ""
         self._busy = False
+        self.setObjectName("CoverPage")
+        self.setStyleSheet(studio_page_stylesheet("CoverPage"))
 
         # 外层：可滚动正文 + 底栏按钮（避免预览框被窗口裁成半截）
         outer, _body, root = wrap_studio_scroll(self)
         root.setSpacing(12)
+        root.addWidget(make_studio_hero(
+            "封面工厂",
+            "均匀抽样多帧，用 Laplacian 锐度选最清晰画面，再叠加大字标题导出 PNG。",
+            "趣味",
+        ))
 
         tip = QLabel(
-            "在已有缩略图抽取之上，均匀抽样多帧，用 Laplacian 锐度选最清晰画面，"
-            "再叠加大字标题导出 PNG（默认竖屏 9:16 短视频封面）。"
+            "默认竖屏 9:16 短视频封面。缺「微软雅黑」时会回退到系统无衬线字体。"
         )
         tip.setWordWrap(True)
         tip.setObjectName("MutedText")

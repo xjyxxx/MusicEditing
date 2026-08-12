@@ -241,6 +241,45 @@ def collect_setup_status(app=None) -> SetupStatus:
         critical=False,
     ))
 
+    # 照片图库可选依赖 / 地图资源（不阻塞开箱完成）
+    heic_ok = False
+    try:
+        import pillow_heif  # noqa: F401
+
+        heic_ok = True
+    except ImportError:
+        heic_ok = False
+    st.items.append(DepItem(
+        key="iphoto_heic",
+        title="照片 HEIC（pillow-heif）",
+        ok=heic_ok,
+        detail=(
+            "已就绪 · 可预览/导入 HEIC"
+            if heic_ok
+            else "可选 · 未装时 HEIC 可能无法预览：pip install -r client/scripts/requirements-iphoto.txt"
+        ),
+        action="",
+        critical=False,
+    ))
+    maps_font = root / "third_party" / "iphoto" / "src" / "maps" / "font"
+    font_ok = False
+    if maps_font.is_dir():
+        try:
+            font_ok = any(maps_font.iterdir())
+        except OSError:
+            font_ok = False
+    st.items.append(DepItem(
+        key="iphoto_maps_font",
+        title="地点地图字体 maps/font",
+        ok=font_ok,
+        detail=(
+            str(maps_font) if font_ok
+            else "可选 · 未补齐时地点地图仍可用，地名可能异常；见 third_party/iphoto/src/maps/ASSETS.md"
+        ),
+        action="",
+        critical=False,
+    ))
+
     return st
 
 

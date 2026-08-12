@@ -17,6 +17,10 @@
 | `test_pipeline_parallel.py` | 队列 `max_parallel=2` 切片重叠 |
 | `test_vertical_export.py` | 竖屏 9:16 导出 |
 | `test_cookie_probe_hint.py` | Cookie/限流/无音轨白话提示 |
+| `test_trial_policy.py` | 试用配额门禁 |
+| `test_license_activate.py` | 卡密激活 |
+| `test_pack_verify.py` / `test_update_check.py` | 打包与更新探测 |
+| `scripts/smoke_place_map_thumbs.py` | 地点 CPU 叠层缩略图 + 无 GPS 空状态 |
 
 期望末行：`ALL PASS`
 

@@ -27,6 +27,7 @@ from ui.theme import (
     SURFACE,
     SURFACE_2,
     TEXT,
+    TEXT_DIM,
     TEXT_MUTED,
 )
 
@@ -46,7 +47,7 @@ QWidget#StudioBody {{
 }}
 QFrame#StudioHero {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 {SURFACE}, stop:0.55 {SURFACE_2}, stop:1 #1A2420);
+        stop:0 {SURFACE}, stop:1 {SURFACE_2});
     border: 1px solid {BORDER};
     border-radius: 14px;
 }}
@@ -70,7 +71,7 @@ QLabel#StudioPill {{
     font-size: 12px;
 }}
 QFrame#StudioCard {{
-    background: {SURFACE_2};
+    background: {SURFACE};
     border: 1px solid {BORDER};
     border-radius: 12px;
 }}
@@ -97,9 +98,9 @@ QPushButton#StudioPrimary:hover {{
     background: {ACCENT_HOVER};
 }}
 QPushButton#StudioPrimary:disabled {{
-    background: #4A3F32;
-    color: #9A8A78;
-    border-color: #4A3F32;
+    background: {ELEVATED};
+    color: {TEXT_DIM};
+    border-color: {BORDER};
 }}
 QPushButton#StudioGhost {{
     background: {ELEVATED};
@@ -110,8 +111,8 @@ QPushButton#StudioGhost {{
     font-size: 13px;
 }}
 QPushButton#StudioGhost:hover {{
-    background: #2C3444;
-    border-color: #4A5870;
+    background: {SURFACE};
+    border-color: {BORDER_STRONG};
 }}
 """
 

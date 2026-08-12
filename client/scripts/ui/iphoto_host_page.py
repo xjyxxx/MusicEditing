@@ -55,7 +55,16 @@ class IPhotoHostPage(QWidget):
         os.environ.setdefault("MUSIC_IPHOTO_SOFT_VIEWER", "1")
         # 标记由 MusicEditing 宿主；关闭图库时禁止 iPhoto shutdown 调用 app.quit()
         os.environ["MUSIC_IPHOTO_HOSTED"] = "1"
+        try:
+            from core.iphoto_bootstrap import install_hosted_qt_message_filter
+
+            install_hosted_qt_message_filter()
+        except Exception:  # noqa: BLE001
+            pass
         self._build_chrome()
+        self._selection_timer = QTimer(self)
+        self._selection_timer.setInterval(700)
+        self._selection_timer.timeout.connect(self._refresh_selection_chrome)
         QTimer.singleShot(0, self._boot_import)
 
     def _build_chrome(self) -> None:
@@ -71,17 +80,25 @@ class IPhotoHostPage(QWidget):
         row = QHBoxLayout(bar)
         row.setContentsMargins(12, 8, 12, 8)
         self._status = QLabel("正在加载 iPhotron 图库…")
+        self._status.setWordWrap(True)
         row.addWidget(self._status, 1)
-        self._btn_play = QPushButton("用本应用播放选中视频")
-        self._btn_play.setToolTip("不改动播放器内核：回调首页 VideoPlayerWidget")
+        self._sel_label = QLabel("未选中")
+        self._sel_label.setObjectName("IPhotoSelLabel")
+        self._sel_label.setStyleSheet("#IPhotoSelLabel { color:#6E6E73; max-width: 280px; }")
+        self._sel_label.setToolTip("当前选中项路径；点右侧按钮送入本应用工作流")
+        row.addWidget(self._sel_label)
+        self._btn_play = QPushButton("用本应用播放")
+        self._btn_play.setToolTip("把选中视频送到首页播放器（不改 media_player 内核）")
         self._btn_play.clicked.connect(self._play_selection_in_app)
         row.addWidget(self._btn_play)
         self._btn_enhance = QToolButton()
         self._btn_enhance.setText("图片增强")
+        self._btn_enhance.setToolTip("把选中图片/视频送到画质增强页")
         self._btn_enhance.clicked.connect(lambda: self._handoff_image("enhance"))
         row.addWidget(self._btn_enhance)
         self._btn_wm = QToolButton()
         self._btn_wm.setText("去水印")
+        self._btn_wm.setToolTip("把选中图片/视频送到去水印页")
         self._btn_wm.clicked.connect(lambda: self._handoff_image("watermark"))
         row.addWidget(self._btn_wm)
         self._btn_legacy = QToolButton()
@@ -150,6 +167,8 @@ class IPhotoHostPage(QWidget):
             window = MainWindow(self._context)
             self._iphoto_window = window
             self._prepare_hosted_window(window)
+            self._bind_hosted_theme(window)
+            self._sync_hosted_theme_chrome()
 
             try:
                 window.ui.ensure_feature("detail")
@@ -182,6 +201,149 @@ class IPhotoHostPage(QWidget):
             window.setAutoFillBackground(True)
         except Exception:  # noqa: BLE001
             pass
+
+    def _bind_hosted_theme(self, window) -> None:
+        """跟随 iPhotron 深/浅色切换，并用隔离 QSS 盖住宿主浅色级联。"""
+        context = self._context
+        if context is None:
+            return
+        theme = getattr(context, "theme", None)
+        if theme is None or not hasattr(theme, "themeChanged"):
+            return
+        try:
+            theme.themeChanged.disconnect(self._on_iphoto_theme_changed)
+        except Exception:  # noqa: BLE001
+            pass
+        theme.themeChanged.connect(self._on_iphoto_theme_changed)
+
+    def _on_iphoto_theme_changed(self, is_dark: bool) -> None:
+        self._sync_hosted_theme_chrome(bool(is_dark))
+
+    def _iphoto_is_dark(self) -> bool:
+        theme = getattr(self._context, "theme", None) if self._context else None
+        if theme is not None and hasattr(theme, "get_effective_theme_mode"):
+            try:
+                if getattr(theme, "_force_dark_mode", False):
+                    return True
+                return theme.get_effective_theme_mode() == "dark"
+            except Exception:  # noqa: BLE001
+                pass
+        return False
+
+    @staticmethod
+    def _hosted_isolation_qss(is_dark: bool) -> str:
+        """覆盖 MusicEditing 主窗浅色 QSS 级联，保证图库内深/浅色都可读。"""
+        if is_dark:
+            return """
+            QWidget { color: #F5F5F7; }
+            QLabel { color: #F5F5F7; background: transparent; }
+            QAbstractItemView {
+              background: #2C2C2E; color: #F5F5F7;
+              selection-background-color: #0A84FF; selection-color: #FFFFFF;
+            }
+            QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+              background: #2C2C2E; color: #F5F5F7; border: 1px solid #48484A;
+              selection-background-color: #0A84FF; selection-color: #FFFFFF;
+            }
+            QMenuBar, QMenu { background: #2C2C2E; color: #F5F5F7; }
+            QMenu::item:selected { background: #3A3A3C; color: #FFFFFF; }
+            QPushButton {
+              background: #3A3A3C; color: #F5F5F7; border: 1px solid #48484A;
+              border-radius: 6px; padding: 4px 10px;
+            }
+            QPushButton:hover { background: #48484A; }
+            QGroupBox, QCheckBox, QRadioButton, QTabBar::tab { color: #F5F5F7; }
+            QTabBar::tab:selected { color: #FFFFFF; }
+            QHeaderView::section { background: #2C2C2E; color: #F5F5F7; }
+            QStatusBar, QToolTip { background: #1C1C1E; color: #F5F5F7; }
+            """
+        return """
+            QWidget { color: #1D1D1F; }
+            QLabel { color: #1D1D1F; background: transparent; }
+            QAbstractItemView {
+              background: #FFFFFF; color: #1D1D1F;
+              selection-background-color: #0A84FF; selection-color: #FFFFFF;
+            }
+            QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+              background: #FFFFFF; color: #1D1D1F; border: 1px solid #D2D2D7;
+              selection-background-color: #0A84FF; selection-color: #FFFFFF;
+            }
+            QMenuBar, QMenu { background: #F5F5F7; color: #1D1D1F; }
+            QMenu::item:selected { background: #E8E8ED; color: #1D1D1F; }
+            QPushButton {
+              background: #E8E8ED; color: #1D1D1F; border: 1px solid #C7C7CC;
+              border-radius: 6px; padding: 4px 10px;
+            }
+            QPushButton:hover { background: #FFFFFF; }
+            QGroupBox, QCheckBox, QRadioButton, QTabBar::tab { color: #1D1D1F; }
+            QHeaderView::section { background: #F2F2F7; color: #1D1D1F; }
+            QStatusBar, QToolTip { background: #F5F5F7; color: #1D1D1F; }
+            """
+
+    def _sync_hosted_theme_chrome(self, is_dark: bool | None = None) -> None:
+        """按当前主题给图库窗刷隔离样式，并保持外层 MusicEditing 仍是浅色壳。"""
+        window = self._iphoto_window
+        if window is None:
+            return
+        if is_dark is None:
+            is_dark = self._iphoto_is_dark()
+        try:
+            from PySide6.QtGui import QColor, QPalette
+
+            if is_dark:
+                bg, fg, muted = QColor("#1C1C1E"), QColor("#F5F5F7"), QColor("#8E8E93")
+            else:
+                bg, fg, muted = QColor("#F5F5F7"), QColor("#1D1D1F"), QColor("#6E6E73")
+            pal = QPalette(window.palette())
+            for role in (
+                QPalette.ColorRole.Window,
+                QPalette.ColorRole.Base,
+                QPalette.ColorRole.AlternateBase,
+                QPalette.ColorRole.Button,
+                QPalette.ColorRole.ToolTipBase,
+            ):
+                pal.setColor(role, bg)
+            for role in (
+                QPalette.ColorRole.WindowText,
+                QPalette.ColorRole.Text,
+                QPalette.ColorRole.ButtonText,
+                QPalette.ColorRole.ToolTipText,
+            ):
+                pal.setColor(role, fg)
+            pal.setColor(QPalette.ColorRole.PlaceholderText, muted)
+            window.setPalette(pal)
+            window.setAutoFillBackground(True)
+            window.setStyleSheet(self._hosted_isolation_qss(bool(is_dark)))
+            self._restore_host_light_chrome()
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("sync hosted theme chrome skipped: %s", exc)
+
+    def _restore_host_light_chrome(self) -> None:
+        """iPhoto 改全局 palette 后，把外层主窗刷回浅色（不影响图库子树）。"""
+        host = self.window()
+        if host is None or host is self._iphoto_window:
+            return
+        try:
+            from PySide6.QtGui import QColor, QPalette
+            from ui.theme import BG, TEXT, TEXT_MUTED, SURFACE_2, ELEVATED, ACCENT, ACCENT_ON
+
+            pal = QPalette(host.palette())
+            bg = QColor(BG)
+            fg = QColor(TEXT)
+            muted = QColor(TEXT_MUTED)
+            pal.setColor(QPalette.ColorRole.Window, bg)
+            pal.setColor(QPalette.ColorRole.WindowText, fg)
+            pal.setColor(QPalette.ColorRole.Base, QColor(SURFACE_2))
+            pal.setColor(QPalette.ColorRole.AlternateBase, QColor(ELEVATED))
+            pal.setColor(QPalette.ColorRole.Text, fg)
+            pal.setColor(QPalette.ColorRole.Button, QColor(ELEVATED))
+            pal.setColor(QPalette.ColorRole.ButtonText, fg)
+            pal.setColor(QPalette.ColorRole.PlaceholderText, muted)
+            pal.setColor(QPalette.ColorRole.Highlight, QColor(ACCENT))
+            pal.setColor(QPalette.ColorRole.HighlightedText, QColor(ACCENT_ON))
+            host.setPalette(pal)
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("restore host light chrome skipped: %s", exc)
 
     def _hide_embed_window_controls(self, window) -> None:
         """嵌入主窗口后隐藏红绿灯（最小化/全屏/关闭），由外层应用管窗口。"""
@@ -262,8 +424,23 @@ class IPhotoHostPage(QWidget):
                 pass
             QTimer.singleShot(0, self._focus_gallery_grid)
             QTimer.singleShot(800, self._ensure_detail_surface)
+            QTimer.singleShot(0, self._sync_hosted_theme_chrome)
             mode = "嵌入·软件预览" if self._embed_mode else "独立窗口"
-            self._status.setText(f"iPhotron 图库（{mode}）· 已就绪 · ←→↑↓ 切图")
+            hints = []
+            try:
+                from core.iphoto_bootstrap import iphoto_capability_hints
+
+                hints = iphoto_capability_hints()
+            except Exception:  # noqa: BLE001
+                hints = []
+            status = f"iPhotron 图库（{mode}）· 已就绪 · ←→↑↓ 切图"
+            if hints:
+                status = f"{status} · {hints[0]}"
+            self._status.setText(status)
+            if hints:
+                self._status.setToolTip("\n".join(hints))
+            self._selection_timer.start()
+            self._refresh_selection_chrome()
         except Exception as exc:  # noqa: BLE001
             _log.exception("MainCoordinator start failed")
             QMessageBox.warning(
@@ -341,6 +518,8 @@ class IPhotoHostPage(QWidget):
             self._btn_legacy.setEnabled(True)
 
     def _teardown_iphoto(self) -> None:
+        if getattr(self, "_selection_timer", None) is not None:
+            self._selection_timer.stop()
         window = self._iphoto_window
         coordinator = self._coordinator
         self._iphoto_window = None
@@ -439,6 +618,32 @@ class IPhotoHostPage(QWidget):
                 except Exception:  # noqa: BLE001
                     pass
         return None
+
+    def _refresh_selection_chrome(self) -> None:
+        """把选中路径暴露在宿主栏，并按类型启用播放/增强/去水印。"""
+        if self._fallback is not None:
+            self._sel_label.setText("经典图库")
+            self._btn_play.setEnabled(False)
+            self._btn_enhance.setEnabled(False)
+            self._btn_wm.setEnabled(False)
+            return
+        path = self._selected_path()
+        if not path:
+            self._sel_label.setText("未选中")
+            self._sel_label.setToolTip("在图库中点选一张照片或视频")
+            self._btn_play.setEnabled(False)
+            self._btn_enhance.setEnabled(False)
+            self._btn_wm.setEnabled(False)
+            return
+        name = Path(path).name
+        self._sel_label.setText(name)
+        self._sel_label.setToolTip(path)
+        lower = path.lower()
+        video_ext = (".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm")
+        is_video = lower.endswith(video_ext)
+        self._btn_play.setEnabled(is_video)
+        self._btn_enhance.setEnabled(True)
+        self._btn_wm.setEnabled(True)
 
     def _play_selection_in_app(self) -> None:
         path = self._selected_path()

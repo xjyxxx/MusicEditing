@@ -370,14 +370,14 @@ def format_status_error(err: str | BaseException | None = None) -> str:
 
 
 def mood_pill_stylesheet(accent: str) -> str:
-    """顶栏天气胶囊：有氛围推荐时用更醒目的色系（内联 QSS）。"""
+    """顶栏天气胶囊：有氛围推荐时用浅底深字（对齐 macOS 浅色）。"""
     # (bg, fg, border)
     palettes = {
-        "amber": ("#3A2E1A", "#F0C080", "#C8883A"),   # 暖阳
-        "rain": ("#1A2838", "#9EC4E8", "#4A7AA8"),    # 雨幕
-        "cool": ("#1A2E32", "#8FD4D0", "#3A8A84"),    # 冷调/雪
-        "fog": ("#2A2830", "#C8B8A8", "#7A6A5A"),     # 雾色复古
-        "storm": ("#2A1A38", "#E0A8FF", "#8A4AC8"),   # 雷霓
+        "amber": ("#FFF4E5", "#9A5B00", "#F0C080"),   # 暖阳
+        "rain": ("#E8F2FC", "#0055A5", "#8CB8E8"),    # 雨幕
+        "cool": ("#E5F8F6", "#0A6B63", "#7BC4BE"),    # 冷调/雪
+        "fog": ("#F2F0EC", "#6B5E52", "#C4B8A8"),     # 雾色复古
+        "storm": ("#F3E8FF", "#6B2FA0", "#C9A0E8"),   # 雷霓
     }
     bg, fg, bd = palettes.get(accent, palettes["amber"])
     return (

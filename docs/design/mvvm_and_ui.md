@@ -77,6 +77,8 @@
 
 **方向：** macOS 风格浅色桌面媒体工具——暖白画布、白色内容面、发丝边、系统蓝 CTA；照片图库使用三栏 Photos 式布局。
 
+**对比度硬规则：** 正文/标签一律深色（`TEXT` / `TEXT_MUTED`）；`ACCENT_ON`（白字）只用于蓝底主按钮、选中 Tab、选中列表项等强调填充。禁止浅底白字、深底深字。预览画布（播放器/对比图）可保持黑底，其上的提示用 muted 灰字。
+
 | 令牌 | 色值 | 用途 |
 |------|------|------|
 | `BG` | `#F5F5F7` | 窗口底 |
@@ -87,7 +89,7 @@
 
 顶栏为圆角 `TopChrome`：品牌名 + 当前页胶囊 + GPU/授权/天气 + 版本号。主功能入口为菜单栏。主按钮用 `objectName="primaryButton"` 或 Studio `StudioPrimary`。长路径标签用 `ui/elided_label.ElidedPathLabel`（中间省略 + Tooltip），避免撑开布局。
 
-**Studio 页壳（`ui/studio_kit.py`）：** 个人中心 / 切片 / 增强 / 队列统一 **Hero + Card + 12px 全宽边距**（切片全页滚动；增强 Hero+Tabs；队列 Hero+双栏面板）。避免各页 QGroupBox「半成品感」。
+**Studio 页壳（`ui/studio_kit.py`）：** 个人中心 / 切片 / 增强 / 队列 / **下载 / 素材库 / 封面 / 音频趣味** 统一 **Hero + Card + 边距**（避免各页 QGroupBox「半成品感」）。首页副标题下有轻量功能地图（菜单分组说明）。照片图库宿主栏暴露选中路径并一等操作「播放 / 增强 / 去水印」。
 
 ### 3.4 首页播放器交互（统一 FFmpeg 播放器）
 

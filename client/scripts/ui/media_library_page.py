@@ -5,13 +5,25 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PySide6.QtCore import Slot
+from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QWidget,
 )
 
 from core.media_library import default_library_roots, iter_media_files
+from ui.studio_kit import (
+    make_studio_card,
+    make_studio_hero,
+    studio_btn,
+    studio_page_stylesheet,
+    wrap_studio_scroll,
+)
 from ui.workflow_link import TAB_HOME, TAB_PIPELINE, TAB_SLICE
 
 
@@ -21,45 +33,43 @@ class MediaLibraryPage(QWidget):
         self._vm = vm
         self._handoff = handoff
         self._root = ""
+        self.setObjectName("MediaLibraryPage")
+        self.setStyleSheet(studio_page_stylesheet("MediaLibraryPage"))
+        _, _, root = wrap_studio_scroll(self)
 
-        lay = QVBoxLayout(self)
-        title = QLabel("本地素材库")
-        title.setObjectName("HomeTitle")
-        lay.addWidget(title)
-        tip = QLabel(
-            "索引默认输出目录与自选根目录（不上传云端）。"
-            "可一键送首页预览、智能切片或全流程队列。"
-        )
-        tip.setObjectName("HomeSubtitle")
-        tip.setWordWrap(True)
-        lay.addWidget(tip)
+        root.addWidget(make_studio_hero(
+            "本地素材库",
+            "索引默认输出目录与自选根目录（不上传云端）。可送首页预览、智能切片或全流程队列。",
+            "工作流",
+        ))
 
+        root_card, root_lay = make_studio_card("根目录", "选择要浏览的本地文件夹")
         row = QHBoxLayout()
         self._root_label = QLabel("未选择目录")
-        self._root_label.setObjectName("MutedText")
-        btn_pick = QPushButton("选择目录…")
-        btn_pick.setObjectName("GhostBtn")
+        self._root_label.setObjectName("StudioCardHint")
+        btn_pick = studio_btn("选择目录…")
         btn_pick.clicked.connect(self._on_pick)
-        btn_refresh = QPushButton("刷新")
-        btn_refresh.setObjectName("GhostBtn")
+        btn_refresh = studio_btn("刷新")
         btn_refresh.clicked.connect(self.refresh)
         row.addWidget(self._root_label, 1)
         row.addWidget(btn_pick)
         row.addWidget(btn_refresh)
-        lay.addLayout(row)
+        root_lay.addLayout(row)
+        root.addWidget(root_card)
 
+        list_card, list_lay = make_studio_card("文件", "点选后用下方按钮送到其它功能页")
         self._list = QListWidget()
-        lay.addWidget(self._list, 1)
-
+        list_lay.addWidget(self._list)
         actions = QHBoxLayout()
-        self._btn_home = QPushButton("送首页")
-        self._btn_slice = QPushButton("送切片")
-        self._btn_pipe = QPushButton("送队列")
+        self._btn_home = studio_btn("送首页", primary=True)
+        self._btn_slice = studio_btn("送切片")
+        self._btn_pipe = studio_btn("送队列")
         for b in (self._btn_home, self._btn_slice, self._btn_pipe):
-            b.setObjectName("GhostBtn")
             actions.addWidget(b)
         actions.addStretch()
-        lay.addLayout(actions)
+        list_lay.addLayout(actions)
+        root.addWidget(list_card, 1)
+
         self._btn_home.clicked.connect(lambda: self._send(TAB_HOME))
         self._btn_slice.clicked.connect(lambda: self._send(TAB_SLICE))
         self._btn_pipe.clicked.connect(lambda: self._send(TAB_PIPELINE))
@@ -95,7 +105,7 @@ class MediaLibraryPage(QWidget):
             mb = m.size_bytes / (1024 * 1024)
             text = f"[{m.kind}] {m.name}  ·  {mb:.1f} MB"
             it = QListWidgetItem(text)
-            it.setData(256, m.path)  # Qt.UserRole
+            it.setData(Qt.ItemDataRole.UserRole, m.path)
             self._list.addItem(it)
         if not items:
             self._list.addItem(QListWidgetItem("（目录内暂无视频/图片）"))
@@ -104,7 +114,7 @@ class MediaLibraryPage(QWidget):
         it = self._list.currentItem()
         if not it:
             return ""
-        path = it.data(256) or ""
+        path = it.data(Qt.ItemDataRole.UserRole) or ""
         return str(path) if path else ""
 
     def _send(self, tab: int):
@@ -114,7 +124,8 @@ class MediaLibraryPage(QWidget):
             return
         win = self.window()
         if tab == TAB_PIPELINE and hasattr(win, "_pipeline_page"):
-            win.navigate_to("pipeline") if hasattr(win, "navigate_to") else None
+            if hasattr(win, "navigate_to"):
+                win.navigate_to("pipeline")
             win._pipeline_page.enqueue_paths([path])  # noqa: SLF001
             return
         if tab == TAB_HOME and hasattr(win, "_on_preview_play"):

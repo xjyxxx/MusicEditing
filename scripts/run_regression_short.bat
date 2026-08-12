@@ -31,6 +31,9 @@ if errorlevel 1 set FAIL=1
 python tests\regression\test_update_check.py
 if errorlevel 1 set FAIL=1
 
+python scripts\smoke_place_map_thumbs.py
+if errorlevel 1 set FAIL=1
+
 echo.
 if "%FAIL%"=="0" (
   echo ALL PASS

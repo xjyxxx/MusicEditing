@@ -814,8 +814,9 @@ scripts/run_regression_short.bat
   ├─ [主路径] third_party/iphoto → iPhoto MainWindow（嵌入或 Tool 子窗口）
   │     → RuntimeContext + MainCoordinator
   │     → 上游图库 / 胶片条 / 详情 / 编辑侧栏 / Live / HEIC / 回收站…
-  │     → 宿主栏：「用本应用播放」→ VideoPlayerWidget（不改 media_player）
-  │               「图片增强 / 去水印」→ 既有工作流页
+  │     → 宿主栏：显示选中文件名 →「用本应用播放 / 图片增强 / 去水印」
+  │     → 地点：无 GPS 空状态文案；宿主强制 CPU 地图 + 缩略图叠层
+  │     → 外观：支持浅/深色切换；嵌入时用隔离 QSS 避免宿主浅色级联导致看不清
   │
   ├─ [降级] 导入或启动失败 / 用户点「经典图库」
   │     → PhotoLibraryPage
@@ -828,13 +829,15 @@ scripts/run_regression_short.bat
 |------|------|
 | 宿主 / 引导 | `ui/iphoto_host_page.py` · `core/iphoto_bootstrap.py` |
 | Vendor | `third_party/iphoto/src/iPhoto` · `third_party/iphoto/src/maps`（无 font/OBF） |
+| 同步脚本 | `scripts/sync_iphoto_vendor.py` · `VENDOR_PIN.md` · `maps/ASSETS.md` |
+| 地点冒烟 | `scripts/smoke_place_map_thumbs.py`（已入 `run_regression_short.bat`） |
 | 经典 UI | `ui/photo_library_page.py` · `ui/photo_edit_dialog.py` · `ui/zoomable_image_view.py` |
 | 经典 Service/Domain | `services/photo_library_service.py` · `core/photo_*.py` |
 | 经典 DB | `%LOCALAPPDATA%/MusicEditing/photo_library.sqlite3` |
 
 **隐私：** GPS 默认本地；完整离线地图需自行补齐 `maps` 资源（见 `ASSETS.md`）。不后台上传照片。
 
-**限制 / 后续：** 可选依赖写入便携清单；补齐 maps 资源；vendor 与上游 tag 同步脚本。见 photo_manager §10。
+**限制 / 后续：** 可选依赖写入便携清单；补齐 maps 资源（font/OBF）。精致度阶段见 photo_manager §10。
 
 
 ---

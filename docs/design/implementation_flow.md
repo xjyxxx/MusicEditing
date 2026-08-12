@@ -137,7 +137,7 @@ MainWindow.shutdown()
 | 功能 | 状态 | 说明 |
 |------|------|------|
 | PySide6 菜单导航 UI | ✅ | MenuBar + QStackedWidget；核心/工作流/趣味/帮助分组（§3.3） |
-| Studio 视觉主题 | ✅ | `ui/theme.py` 炭黑+琥珀；顶栏胶囊；§3.3.1 |
+| Studio 视觉主题 | ✅ | `ui/theme.py` macOS 浅色（暖白+系统蓝）；正文深色；白字仅用于强调按钮；§3.3.1 |
 | 首页本地播放器 | ✅ | FFmpeg 视频 + Qt 音乐；OpenGL；**SHM 传帧** + 预取；音画软校正 |
 | 媒体信息面板 | ✅ | 「信息」→ ffprobe 封装/编码/分辨率/码率（`MediaInfoDialog`，VideoEye 精简） |
 | 波形/响度可视化 | ✅ | showwavespic + ebur128；播放器下方可点击 seek（§5.12） |
@@ -205,14 +205,14 @@ MainWindow.shutdown()
 | BGM 混音 | ✅ | FFmpeg 叠/替换/压低原声；`BgmPage`（§5.16） |
 | Demucs 人声分离 | ✅ 可选 | `third_party/demucs` + `setup_demucs.bat`；未装不影响混音 |
 | 本地素材库 | ✅ | 目录索引；送首页/切片/队列（§5.19） |
-| **照片图库** | ✅ | 主路径：嵌入 `third_party/iphoto`（iPhotron）；降级：`PhotoLibraryPage`；播放回调本仓播放器（§5.24 · [photo_manager.md](photo_manager.md)） |
+| **照片图库** | ✅ | 主路径：嵌入 `third_party/iphoto`（iPhotron）；地点无 GPS 空状态；宿主栏选中→播放/增强/去水印；降级：`PhotoLibraryPage`；播放回调本仓播放器（§5.24 · [photo_manager.md](photo_manager.md)） |
 | 差异化能力入口 | ✅ | 菜单导航：热评 / 切片演讲成片 / 全流程队列（§5.20；首页无流水线卡片） |
 
 ### 系统与授权
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
-| 回归短测 | ✅ | SHM/Seek、超分、队列、竖屏、Cookie、试用、**激活服务**、**打包验收** |
+| 回归短测 | ✅ | SHM/Seek、超分、队列、竖屏、Cookie、试用、激活、打包、**地点叠层 smoke** |
 | 发版 checklist | ✅ | [release_checklist.md](release_checklist.md) · [distribution.md](distribution.md) |
 | 便携打包 | ✅ | `--profile` + 验收 + 可选 `--sign`；`accept_portable.py` |
 | Inno 安装包 | ✅ | `scripts/build_installer.bat` + `scripts/inno/MusicEditing.iss` |
@@ -226,7 +226,7 @@ MainWindow.shutdown()
 | 临时帧/产物配额 | ✅ | 启动后台清理残留；队列 `max_output_gb`（§5.23） |
 | UI 启动流畅 | ✅ | 页懒创建 + **空闲预热**（个人中心/切片/增强/下载）；`media_player` 延迟到开文件 |
 | 导出完成体验 | ✅ | 完成后可「打开文件夹」选中成片（`os_util.reveal_in_explorer`） |
-| Studio 页一致性 | ✅ | `studio_kit`：Hero/Card/滚动壳；封面整页滚动；音频/BGM/溯源 Tab 滚动；队列参数区滚动 |
+| Studio 页一致性 | ✅ | `studio_kit`：Hero/Card/滚动壳；切片/增强/队列 + **下载/素材库/封面/音频趣味**；首页轻量功能地图；音频/BGM/溯源 Tab 滚动 |
 | 授权/卡密 | ✅ | 本地卡密 + **试用配额/720p** + 可选联网激活/购买页；收银台在外部站点 |
 | 个人中心 | ✅ | 卡密、配额、购买页、GPU、输出目录、开箱向导、诊断打包、清理临时帧（§5.17/§5.23） |
 
@@ -257,5 +257,7 @@ python .\scripts\accept_portable.py  # 验收便携包关键文件 + 干净机�
 python .\scripts\license_server\gen_keys.py --count 5
 python .\scripts\license_server\server.py --port 8765
 python .\scripts\setup_llama_gpu.py       # llama GPU：推荐 Vulkan；可选 CUDA
-.\scripts\run_regression_short.bat        # 工程质量短测
+.\scripts\run_regression_short.bat        # 工程质量短测（含地点叠层 smoke）
+python .\scripts\smoke_place_map_thumbs.py # 单独跑地点地图缩略图冒烟
+python .\scripts\sync_iphoto_vendor.py     # 核对 / 刷新 iPhoto vendor pin
 ```

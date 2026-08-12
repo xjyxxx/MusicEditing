@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 from ui.elided_label import ElidedPathLabel
 from ui.theme import (
     ACCENT, ACCENT_HOVER, ACCENT_ON, BG, BORDER, BORDER_STRONG, ELEVATED,
-    FONT_UI, OK, SIGNAL, SIGNAL_SOFT, SURFACE, SURFACE_2, TEXT, TEXT_DIM,
+    FONT_UI, OK, SIGNAL, SIGNAL_SOFT, SIGNAL_BORDER, SURFACE, SURFACE_2, TEXT, TEXT_DIM,
     TEXT_MUTED,
 )
 from viewmodels.main_vm import MainViewModel
@@ -36,7 +36,7 @@ QWidget#ProfileBody {{
 }}
 QFrame#ProfileHero {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 {SURFACE}, stop:0.5 {SURFACE_2}, stop:1 #1A2420);
+        stop:0 {SURFACE}, stop:1 {SURFACE_2});
     border: 1px solid {BORDER};
     border-radius: 14px;
 }}
@@ -60,7 +60,7 @@ QLabel#ProfilePill {{
     font-size: 12px;
 }}
 QFrame#ProfileCard {{
-    background: {SURFACE_2};
+    background: {SURFACE};
     border: 1px solid {BORDER};
     border-radius: 12px;
 }}
@@ -76,7 +76,7 @@ QLabel#ProfileCardHint {{
 }}
 QFrame#ProfileStatusBar {{
     background: {SIGNAL_SOFT};
-    border: 1px solid #3A6A64;
+    border: 1px solid {SIGNAL_BORDER};
     border-radius: 10px;
 }}
 QLabel#ProfileStatusCap {{
@@ -86,7 +86,7 @@ QLabel#ProfileStatusCap {{
     border: none;
 }}
 QLabel#ProfileStatusValue {{
-    color: #B8EDE4;
+    color: {SIGNAL};
     font-size: 15px;
     font-weight: 600;
     background: transparent;
@@ -128,8 +128,8 @@ QPushButton#ProfileGhost {{
     font-size: 13px;
 }}
 QPushButton#ProfileGhost:hover {{
-    background: #2C3444;
-    border-color: #4A5870;
+    background: {SURFACE};
+    border-color: {BORDER_STRONG};
 }}
 QPushButton#ProfileLink {{
     background: transparent;

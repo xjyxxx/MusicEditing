@@ -6,6 +6,8 @@ import sys
 import time
 from pathlib import Path
 
+# 回归/无显示器环境默认 offscreen，避免弹窗卡住
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ["MUSIC_IPHOTO_HOSTED"] = "1"
 os.environ.setdefault("MUSIC_IPHOTO_SOFT_VIEWER", "1")
 
@@ -13,9 +15,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "client" / "scripts"))
 sys.path.insert(0, str(ROOT / "third_party" / "iphoto" / "src"))
 
-from core.iphoto_bootstrap import ensure_iphoto_on_path  # noqa: E402
+from core.iphoto_bootstrap import (  # noqa: E402
+    ensure_iphoto_on_path,
+    install_hosted_qt_message_filter,
+)
 
 ensure_iphoto_on_path()
+install_hosted_qt_message_filter()
 
 from PySide6.QtCore import QPointF  # noqa: E402
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap  # noqa: E402
@@ -58,6 +64,7 @@ def main() -> int:
     )
     print("is_MapWidget_CPU=", isinstance(view.map_widget(), MapWidget))
     print("is_MapGL=", isinstance(view.map_widget(), MapGLWidget))
+    print("empty_banner_visible=", view._empty_banner.isVisible())
 
     asset = GeotaggedAsset(
         library_relative=rel,
@@ -76,6 +83,8 @@ def main() -> int:
         live_partner_rel=None,
     )
     view.set_assets([asset], lib_root)
+    app.processEvents()
+    print("empty_banner_after_assets=", view._empty_banner.isVisible())
 
     pix = QPixmap(str(img_path))
     assert not pix.isNull(), "failed to load smoke pixmap"
@@ -89,6 +98,7 @@ def main() -> int:
     print("overlay_pixmaps=", list(view._overlay._pixmaps.keys()))
     print("overlay_pixmap_null=", view._overlay._pixmaps[rel].isNull())
     print("clusters=", len(view._overlay._clusters))
+    pixmap_ok = not view._overlay._pixmaps[rel].isNull()
 
     w, h = view.width(), view.height()
     canvas = QImage(w, h, QImage.Format.Format_ARGB32)
@@ -108,7 +118,13 @@ def main() -> int:
     canvas.save(str(out))
     print("saved", out)
 
-    deadline = time.time() + 1.5
+    # 空资产空状态（会清缩略图缓存，故 pixmap 检查须在此前完成）
+    view.set_assets([], lib_root)
+    app.processEvents()
+    empty_ok = view._empty_banner.isVisible()
+    print("empty_banner_when_no_gps=", empty_ok)
+
+    deadline = time.time() + 0.4
     while time.time() < deadline:
         app.processEvents()
         time.sleep(0.05)
@@ -117,8 +133,9 @@ def main() -> int:
         isinstance(view.map_widget(), MapWidget)
         and isinstance(view._overlay, _MarkerLayer)
         and not isinstance(view._overlay, _GLMarkerLayer)
-        and (not view._overlay._pixmaps[rel].isNull())
+        and pixmap_ok
         and diff > 10
+        and empty_ok
     )
     print("RESULT=", "PASS" if ok else "FAIL")
     view.close()

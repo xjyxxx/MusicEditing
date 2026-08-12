@@ -77,6 +77,16 @@ class HomePage(QWidget):
         subtitle = QLabel("本地音视频打开 · 预览 · 点击画面暂停/继续 · 可叠弹幕")
         subtitle.setObjectName("HomeSubtitle")
         layout.addWidget(subtitle)
+        feature_map = QLabel(
+            "功能入口在顶部菜单：核心（切片/增强/去水印）· 工作流（下载/队列/素材/照片）· 趣味（封面/音频/溯源）· 帮助（个人中心）"
+        )
+        feature_map.setObjectName("MutedText")
+        feature_map.setWordWrap(True)
+        feature_map.setToolTip(
+            "首页专注预览；处理请从菜单进入对应页。"
+            "照片图库可把选中项「用本应用播放 / 图片增强 / 去水印」送回本应用。"
+        )
+        layout.addWidget(feature_map)
 
         player_box = QGroupBox("本地预览")
         player_layout = QVBoxLayout(player_box)
@@ -915,7 +925,7 @@ class MainWindow(QMainWindow):
         self._setup_wizard_shown = False
         self._weather_default_qss = (
             "QLabel#ChromeWeather {"
-            " background: #2A4A48; color: #B8EDE4; border: 1px solid #3A6A64;"
+            " background: #E5F1FF; color: #007AFF; border: 1px solid #A8C8F0;"
             " border-radius: 999px; padding: 4px 12px; font-size: 12px;"
             " }"
         )

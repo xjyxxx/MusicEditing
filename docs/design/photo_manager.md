@@ -34,7 +34,7 @@ flowchart LR
 | 地图 | `third_party/iphoto/src/maps` 仅 Python；font / OBF 扩展见 `maps/ASSETS.md` |
 | **播放器边界** | **不修改** `VideoPlayerWidget` / `media_player.exe`。详情页 Live 可用 iPhoto 自带 `VideoArea`；需要进本应用工作流时用宿主栏「用本应用播放 / 图片增强 / 去水印」回调 |
 | 依赖 | 核心：`requirements.txt`；完整图库：`requirements-iphoto.txt`（勿塞进每次 `run_ui` 的默认 pip） |
-| 启动 | 默认**嵌入**；大图 SoftImageViewer；地点地图在宿主下强制 CPU + QWidget 照片标记叠层（避免 GL 后绘空白）；经典/iPhotron 可互切 |
+| 启动 | 默认**嵌入**；大图 SoftImageViewer；宿主下支持 iPhotron **浅/深色切换**（隔离 QSS 保证对比度，外层 MusicEditing 保持浅色壳）；地点地图 CPU + QWidget 叠层；无 GPS 空状态；经典/iPhotron 可互切 |
 
 经典路径（`PhotoLibraryPage` + `services/photo_library_service.py` + `core/photo_*`）仍保留：Folder-native、SQLite、简化 sidecar v2、GL/NumPy 编辑对话框。
 
@@ -214,16 +214,18 @@ GPS 默认只在本地索引。只有用户点击“在地图中查看”时才�
 已实现：
 
 - **主路径**：vendor 嵌入 iPhotron（完整图库网格 / 胶片条 / 详情 / 编辑侧栏 / Live 配对 / HEIC 依赖路径 / 回收站等上游能力，随上游包演进）
-- **宿主桥**：`IPhotoHostPage` + 本仓播放/增强/去水印回调；「经典图库」一键降级
+- **宿主桥**：`IPhotoHostPage` + 本仓播放/增强/去水印回调；选中路径暴露在宿主栏并按类型启用按钮；「经典图库」一键降级
+- **地点空状态**：无 GPS 资产时地图中央提示「不是加载失败」；缺 `maps/font` 时附带降级说明
+- **回归**：`scripts/smoke_place_map_thumbs.py` 已纳入 `run_regression_short.bat`
+- **Vendor 同步**：`python scripts/sync_iphoto_vendor.py`（`--write-pin` / `--from`）
 - **经典路径**：Folder-native、SQLite、ExifTool/GPS、智能相册、Live 匹配、v2 sidecar、Gaussian 大师滑块、OpenGL/NumPy、透视安全 AABB
 
-后续扩展：
+精致度阶段（当前优先，不扩功能面）：
 
-1. 宿主栏稳定暴露当前选中路径（已接 `MainWindow.current_selection` / detail VM）；可选把「发送到首页播放」挂到 iPhoto 菜单。
-2. 同步安装可选依赖（`pillow-heif`、`mapbox-vector-tile`、`rawpy` 等）写入便携包清单。
-3. 按需补齐 `maps/font` 与 OBF 扩展，启用离线地图（见 `ASSETS.md`）。
-4. 经典路径：自定义智能相册、导出器消费 sidecar、透视 GPU uniform（仅在不走 iPhoto 编辑时仍有价值）。
-5. 记录 vendor 对应上游 tag/commit，建立更新脚本。
+1. Studio 壳对齐下载/素材库/趣味页；首页轻量功能地图；开箱向导列出 HEIC / maps/font 可选依赖
+2. 宿主嵌入压制缺字体 / QPainter 控制台噪音（`install_hosted_qt_message_filter`）
+3. 按需补齐 `maps/font` 与 OBF（见 `ASSETS.md`）；可选依赖写入便携包清单
+4. 经典路径：自定义智能相册、导出器消费 sidecar、透视 GPU uniform（仅在不走 iPhoto 编辑时仍有价值）
 
 ## 11. 验证清单
 
@@ -235,3 +237,4 @@ GPS 默认只在本地索引。只有用户点击“在地图中查看”时才�
 - 保存后原图哈希不变，sidecar 存在；重新打开恢复参数。
 - 透视极值下预览无黑边；安全 AABB 四角均通过凸多边形测试。
 - 页面刷新/关闭后旧缩略图结果不写入当前网格。
+- 地点：`MUSIC_IPHOTO_HOSTED=1` 下 CPU 叠层可画缩略图；无 GPS 库显示空状态文案（`smoke_place_map_thumbs.py`）。
