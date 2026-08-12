@@ -7,12 +7,14 @@
   python scripts/pack_portable.py --zip
   python scripts/pack_portable.py --profile slim --zip    # 试用/演示包（无大模型）
   python scripts/pack_portable.py --profile full --zip    # 含 LLM/vosk
-  python scripts/pack_portable.py --ship-source   # 调试：保留 .py（不推荐外发）
+  python scripts/pack_portable.py --ship-source   # 调试：保留 .py（禁止外发）
+  python scripts/pack_for_share.py                # 外发推荐：强制 zip + 严格无源码
 
 说明:
-  - 默认将 client/scripts 编成 .pyc 后删除 .py，降低源码泄露风险
+  - 默认将 client/scripts 与 third_party/iphoto 编成 .pyc 后删除 .py
+  - 不打包 .git / docs/design / C++ 源码树 / 密钥类文件
   - C++ 引擎本身就是 exe/dll，不含工程源码
-  - .pyc 仍可被反编译，不是军工级保护；需要更强可再上 Nuitka
+  - .pyc 仍可被反编译，不是军工级保护；更强保护需 Nuitka（见 distribution.md）
   - 可选代码签名：环境变量 MUSIC_CODE_SIGN_THUMBPRINT=证书 SHA1，或 --sign
 """
 
@@ -190,40 +192,129 @@ def _enable_embed_site(runtime: Path) -> None:
     print(f"[嵌入] 已启用 site: {pth.name}", flush=True)
 
 
+def _ignore_iphoto(dirpath: str, names: list[str]) -> list[str]:
+    """Vendor 图库：不带 maps/font（~100MB）与 OBF extension。"""
+    skip = _ignore_pycache(dirpath, names)
+    base = Path(dirpath).name.lower()
+    for n in names:
+        low = n.lower()
+        if low in (".git", ".github", "tests", "docs", "font"):
+            skip.append(n)
+        if base == "tiles" and low == "extension":
+            skip.append(n)
+    return skip
+
+
 def _strip_python_sources(out_root: Path, *, py_exe: Path) -> None:
-    """把 UI 编成 .pyc 后删除 .py，避免分发包直接泄露源码。
+    """把 UI / vendor Python 编成 .pyc 后删除 .py，避免分发包直接泄露源码。
 
     注意：.pyc 仍可被反编译，只是提高门槛；真要强保护需 Nuitka 等另做。
     必须用「包内 embed 的同版本 python」编译，否则版本不匹配无法加载。
     """
-    scripts = out_root / "client" / "scripts"
-    if not scripts.is_dir():
-        return
     if not py_exe.is_file():
         _die(f"无法去源码：找不到 {py_exe}")
 
-    print("[安全] 编译 UI 为字节码并移除 .py 源码…", flush=True)
-    # -b: legacy 同目录 .pyc；-o 2: 去断言/部分调试信息
-    _run([
-        str(py_exe), "-m", "compileall", "-b", "-q", "-f", "-o", "2",
-        str(scripts),
-    ])
+    targets = [
+        out_root / "client" / "scripts",
+        out_root / "third_party" / "iphoto" / "src",
+    ]
+    targets = [t for t in targets if t.is_dir()]
+    if not targets:
+        return
+
+    print("[安全] 编译 Python 为字节码并移除 .py 源码…", flush=True)
+    for target in targets:
+        print(f"  · compileall {target.relative_to(out_root)}", flush=True)
+        # -b: legacy 同目录 .pyc；-o 2: 去断言/部分调试信息
+        _run([
+            str(py_exe), "-m", "compileall", "-b", "-q", "-f", "-o", "2",
+            str(target),
+        ])
 
     removed = 0
-    for py in scripts.rglob("*.py"):
-        try:
-            py.unlink()
-            removed += 1
-        except OSError:
-            pass
-    # 清掉残留 __pycache__（legacy 已写到旁路 .pyc）
-    for cache in scripts.rglob("__pycache__"):
-        shutil.rmtree(cache, ignore_errors=True)
+    for target in targets:
+        for py in target.rglob("*.py"):
+            try:
+                py.unlink()
+                removed += 1
+            except OSError:
+                pass
+        for cache in target.rglob("__pycache__"):
+            shutil.rmtree(cache, ignore_errors=True)
 
-    main_pyc = scripts / "main.pyc"
+    main_pyc = out_root / "client" / "scripts" / "main.pyc"
     if not main_pyc.is_file():
         _die("去源码失败：未生成 client/scripts/main.pyc")
     print(f"[安全] 已删除 {removed} 个 .py，入口: client/scripts/main.pyc", flush=True)
+
+
+def _security_audit_no_source(out_root: Path, *, strict: bool) -> None:
+    """外发前审计：业务 Python 不得残留 .py；禁止敏感目录进包。"""
+    forbidden_dirs = (
+        ".git",
+        ".cursor",
+        "agent-transcripts",
+        "docs/course",
+        "docs/design",
+        "cmake",
+        "src",  # C++ 源码树（引擎已是 bin）
+    )
+    problems: list[str] = []
+    for rel in forbidden_dirs:
+        p = out_root / rel
+        if p.exists():
+            problems.append(f"不应出现: {rel}")
+
+    py_roots = [
+        out_root / "client" / "scripts",
+        out_root / "third_party" / "iphoto" / "src",
+    ]
+    leftover: list[Path] = []
+    for root in py_roots:
+        if root.is_dir():
+            leftover.extend(root.rglob("*.py"))
+    # requirements.txt 等文本可留；只禁 .py
+    if leftover:
+        sample = ", ".join(str(p.relative_to(out_root)) for p in leftover[:8])
+        more = f" …共{len(leftover)}个" if len(leftover) > 8 else ""
+        problems.append(f"残留可读源码 .py: {sample}{more}")
+
+    # 密钥/私货（仅查业务树；runtime 内 certifi 的 cacert.pem 是公开 CA，不算泄露）
+    secret_names = {".env", "credentials.json", "id_rsa"}
+    secret_suffixes = (".pem", ".key")
+    hits: list[Path] = []
+    scan_roots = [
+        out_root / "client",
+        out_root / "third_party",
+        out_root / "models",
+        out_root / "tests",
+    ]
+    for root in scan_roots:
+        if not root.is_dir():
+            continue
+        for p in root.rglob("*"):
+            if not p.is_file():
+                continue
+            low = p.name.lower()
+            if low in secret_names or low.endswith(secret_suffixes):
+                hits.append(p)
+    for p in out_root.iterdir():
+        if p.is_file():
+            low = p.name.lower()
+            if low in secret_names or low.endswith(secret_suffixes):
+                hits.append(p)
+    if hits:
+        sample = ", ".join(str(h.relative_to(out_root)) for h in hits[:4])
+        problems.append(f"疑似密钥文件 ({len(hits)}): {sample}")
+
+    if not problems:
+        print("[安全审计] 通过：业务目录无 .py，无敏感树", flush=True)
+        return
+    for msg in problems:
+        print(f"[安全审计] {msg}", flush=True)
+    if strict:
+        _die(f"安全审计失败（{len(problems)} 项），拒绝外发")
+    print(f"[安全审计] 警告 {len(problems)} 项（非严格模式继续）", flush=True)
 
 
 def _remove_shipped_scenedetect_sources(out_root: Path) -> None:
@@ -550,9 +641,12 @@ def verify_portable_pack(out_root: Path, *, embed_python: bool, ship_source: boo
         if not (scripts / "main.pyc").is_file() and not (scripts / "main.py").is_file():
             errors.append("缺少 client/scripts/main.pyc")
         leftover = list(scripts.rglob("*.py"))
-        # requirements.txt 旁不应有大量源码
+        iphoto = out_root / "third_party" / "iphoto" / "src"
+        if iphoto.is_dir():
+            leftover.extend(iphoto.rglob("*.py"))
         if leftover:
-            warns.append(f"仍残留 {len(leftover)} 个 .py（期望仅字节码）")
+            sample = ", ".join(str(p.relative_to(out_root)) for p in leftover[:5])
+            errors.append(f"仍残留 {len(leftover)} 个可读 .py（{sample}…）")
     if embed_python:
         pyw = out_root / "runtime" / "pythonw.exe"
         py = out_root / "runtime" / "python.exe"
@@ -614,6 +708,7 @@ def pack(
     ship_source: bool = False,
     do_sign: bool = False,
     profile: str = "standard",
+    strict_no_source: bool = False,
 ) -> Path:
     if not BIN.is_dir():
         _die(f"未找到 {BIN}，请先 .\\build_x64.bat 或 setup_llama_gpu.py vulkan")
@@ -709,6 +804,20 @@ def pack(
         else:
             print("[警告] 未找到 PySceneDetect，跳过")
 
+    # 照片图库 vendor（Python；font/OBF 不入库）
+    iphoto_src = ROOT / "third_party" / "iphoto" / "src"
+    if (iphoto_src / "iPhoto").is_dir():
+        print("[拷贝] third_party/iphoto/src（无 maps/font）")
+        _copy_tree(iphoto_src, tp / "iphoto" / "src", ignore=_ignore_iphoto)
+        pin = ROOT / "third_party" / "iphoto" / "VENDOR_PIN.md"
+        if pin.is_file():
+            _copy_file(pin, tp / "iphoto" / "VENDOR_PIN.md")
+        assets = ROOT / "third_party" / "iphoto" / "src" / "maps" / "ASSETS.md"
+        if assets.is_file():
+            _copy_file(assets, tp / "iphoto" / "src" / "maps" / "ASSETS.md")
+    else:
+        print("[警告] 未找到 third_party/iphoto，照片图库将降级经典路径")
+
     models_dst = out_root / "models"
     models_dst.mkdir(parents=True, exist_ok=True)
     readme_models = ROOT / "models" / "README.md"
@@ -748,12 +857,18 @@ def pack(
             _remove_shipped_scenedetect_sources(out_root)
         if not ship_source:
             _strip_python_sources(out_root, py_exe=py)
+            # 默认严格：残留 .py / 敏感目录一律拒绝外发
+            _security_audit_no_source(out_root, strict=True)
         else:
-            print("[警告] --ship-source：分发包将包含可读 .py（仅调试用）", flush=True)
+            print("[警告] --ship-source：分发包将包含可读 .py（仅调试用，禁止外发）", flush=True)
+            if strict_no_source:
+                _die("--strict-no-source 与 --ship-source 互斥")
     else:
         print("[跳过] 内嵌 Python（--no-embed-python）；对方需自备 Python）")
         if not ship_source:
             print("[警告] 无内嵌 Python 时无法用同版本编译 .pyc，将保留 .py", flush=True)
+            if strict_no_source:
+                _die("严格去源码需要内嵌 Python（不要加 --no-embed-python）")
 
     _write_launcher(out_root, embed_python=embed_python)
     if do_sign:
@@ -842,9 +957,21 @@ def main() -> int:
     ap.add_argument(
         "--ship-source",
         action="store_true",
-        help="保留可读 .py 源码（默认删除，仅调试包使用）",
+        help="保留可读 .py 源码（默认删除；禁止外发，仅本机调试）",
+    )
+    ap.add_argument(
+        "--no-strict-no-source",
+        action="store_false",
+        dest="strict_no_source",
+        default=True,
+        help="关闭严格审计（不推荐；外发勿用）",
     )
     args = ap.parse_args()
+
+    if args.ship_source:
+        # 调试包允许 .py；强制关闭严格审计
+        args.strict_no_source = False
+        print("[警告] --ship-source：将保留可读 .py，仅本机调试，禁止外发", flush=True)
 
     prof = dict(PACK_PROFILES[args.profile])
     with_models = bool(prof["with_models"]) and not args.skip_models
@@ -869,12 +996,15 @@ def main() -> int:
         ship_source=args.ship_source,
         do_sign=args.sign,
         profile=args.profile,
+        strict_no_source=args.strict_no_source,
     )
     print(
         "\n发给别人: 整个文件夹或 .zip；"
         "对方解压后双击 MusicEditing.exe"
         + ("（无需安装 Python）" if not args.no_embed_python else ""),
     )
+    if not args.ship_source:
+        print("安全：业务 Python 已去 .py（.pyc 仍可被专业工具反编译，非绝对保密）")
     return 0
 
 

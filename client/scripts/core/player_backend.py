@@ -182,6 +182,8 @@ class PlayerBackend:
         env["PATH"] = exe_dir + os.pathsep + env.get("PATH", "")
         env["MUSIC_LOG_FILE"] = media_player_log_path()
         env.setdefault("MUSIC_LOG_LEVEL", os.environ.get("MUSIC_LOG_LEVEL", "INFO"))
+        from core.win_subprocess import hide_console_kwargs
+
         self._proc = subprocess.Popen(
             [str(self._exe)],
             stdin=subprocess.PIPE,
@@ -193,6 +195,7 @@ class PlayerBackend:
             env=env,
             cwd=exe_dir,
             bufsize=1,
+            **hide_console_kwargs(),
         )
         self._stderr_thread = threading.Thread(
             target=self._drain_stderr, args=(self._proc,), daemon=True

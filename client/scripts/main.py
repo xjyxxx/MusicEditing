@@ -11,6 +11,14 @@ scripts_dir = Path(__file__).resolve().parent
 if str(scripts_dir) not in sys.path:
     sys.path.insert(0, str(scripts_dir))
 
+# 便携包用 pythonw：必须尽早隐藏 media_cli/ffmpeg 等控制台子进程，否则狂闪黑框且 UI 卡
+try:
+    from core.win_subprocess import install_hidden_console_patch
+
+    install_hidden_console_patch()
+except Exception:
+    pass
+
 from core.app_logger import setup_logging
 
 setup_logging("MusicEditing", os.environ.get("MUSIC_LOG_LEVEL", "INFO"))

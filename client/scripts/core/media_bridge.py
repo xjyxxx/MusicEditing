@@ -518,7 +518,18 @@ class MediaBridge:
         self._local_probe_cache: dict[str, tuple[float, "VideoInfo"]] = {}
         self._ctypes_mode = "unknown"  # unknown | on | off
 
-        ver = self._run(["version"]).strip()
+        ver = ""
+        try:
+            from core.media_engine_ctypes import get_media_engine
+
+            eng = get_media_engine()
+            if eng is not None:
+                ver = (eng.ffmpeg_version() or "").strip()
+                self._ctypes_mode = "on"
+        except Exception:
+            ver = ""
+        if not ver:
+            ver = self._run(["version"]).strip()
         self._ffmpeg_version = ver or "unknown"
 
     def set_yt_dlp_cookies_from_browser(self, browser: str) -> None:
@@ -656,6 +667,8 @@ class MediaBridge:
     def _run(self, args: list[str], timeout: Optional[int] = None) -> str:
         cmd = [str(self._cli)] + args
         try:
+            from core.win_subprocess import hide_console_kwargs
+
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -665,9 +678,11 @@ class MediaBridge:
                 env=self._env,
                 timeout=timeout,
                 cwd=str(self._cli.parent),
+                **hide_console_kwargs(),
             )
         except subprocess.TimeoutExpired as e:
             raise RuntimeError(f"命令超时: {' '.join(cmd)}") from e
+
 
         if result.stderr:
             for line in result.stderr.splitlines():

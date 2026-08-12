@@ -782,7 +782,7 @@ scripts/run_regression_short.bat
 
 **长页滚动：** 封面工厂整页可滚；音频趣味 / BGM / 溯源各 Tab、队列右侧参数区用 `wrap_tab_scroll`，避免矮窗裁半。
 
-**便携分发：** `pack_portable.py --profile slim|standard|full`；`accept_portable.py` 验收；`build_installer.bat` 打 Inno 安装包；可选 `--sign`。
+**便携分发：** 外发用 `pack_for_share`（严格无业务 `.py`）；或 `pack_portable.py --profile slim|standard|full`；`accept_portable.py` 验收；`build_installer.bat` 打 Inno；可选 `--sign`。详见 [distribution.md](distribution.md) §1.1。
 
 **诊断包：** 个人中心「一键打包诊断日志」→ `core/diag_pack.py`  
 写入桌面（或 `docs/diagnostics/`）zip：`log_media_player` / `log_media_cli` / Python 日志、`ort_ep_report.json`、`diag_snapshot.json`。  

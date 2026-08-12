@@ -123,7 +123,7 @@ MainWindow.shutdown()
 | FFmpeg 视频打开/探测 | ✅ | VideoDecoder + probe |
 | 视频帧遍历 | ✅ | iterateFrames + CLI |
 | 缩略图提取 | ✅ | ctypes/`media_cli` thumbnail + 磁盘小图缓存 |
-| MediaBridge ctypes | ✅ | `probe`/`thumbnail` 直连 `media_engine.dll`；失败回退 CLI；mtime 缓存 |
+| MediaBridge ctypes | ✅ | `probe`/`thumbnail` 直连 `media_engine.dll`；失败回退 CLI；mtime 缓存；Windows 子进程 `CREATE_NO_WINDOW`（便携包无黑框） |
 | 导出 remux 优先 | ✅ | 高光分段/拼接 `-c copy`；按参数整段一次重编码；AAC 分档 + faststart |
 | OpenCV 帧处理 | ✅ | `FrameProcessor`：CPU + **OpenCL UMat**；标题 `OpenCV:clahe/opencl` |
 | GLEW / OpenGL 第三方 | ✅ | `third_party/opengl`；`media_player` 链 GLEW |
@@ -214,7 +214,7 @@ MainWindow.shutdown()
 |------|------|------|
 | 回归短测 | ✅ | SHM/Seek、超分、队列、竖屏、Cookie、试用、激活、打包、**地点叠层 smoke** |
 | 发版 checklist | ✅ | [release_checklist.md](release_checklist.md) · [distribution.md](distribution.md) |
-| 便携打包 | ✅ | `--profile` + 验收 + 可选 `--sign`；`accept_portable.py` |
+| 便携打包 | ✅ | `--profile` + 验收 + 可选 `--sign`；`pack_for_share` 严格无源码；启动隐藏 CLI 黑框；`accept_portable.py` |
 | Inno 安装包 | ✅ | `scripts/build_installer.bat` + `scripts/inno/MusicEditing.iss` |
 | 一键发版 | ✅ | `release_oneclick.py`：回归→pack→accept→Inno→清单 |
 | 自动更新检查 | ✅ | `update_check.py`；`publish_update_manifest` / `serve_update_channel`；启动静默检查；帮助/个人中心 |
@@ -250,6 +250,7 @@ MainWindow.shutdown()
 .\scripts\download_vosk_model.bat          # 演讲金句 ASR：vosk-model-small-cn-0.22 → models/
 .\scripts\install_scenedetect.bat          # 游戏高光：安装 PySceneDetect（scenedetect）
 .\scripts\release_oneclick.bat       # 一键发版：回归→pack→accept→Inno→清单
+.\scripts\pack_for_share.bat         # 外发：zip + 内嵌 Python + 严格无业务 .py → dist\
 .\scripts\pack_portable.bat          # 打便携包 → dist\（可加 --zip）
 python .\scripts\pack_portable.py --zip
 python .\scripts\accept_portable.py  # 验收便携包关键文件 + 干净机清单

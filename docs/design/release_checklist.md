@@ -42,31 +42,35 @@
 ## 3. 便携分发（给别人用）
 
 ```powershell
+# 外发推荐（强制 zip + 严格无业务源码）:
+.\scripts\pack_for_share.bat
+# 演示包:
+python scripts\pack_for_share.py --profile slim
+# 通用便携（同样默认去 .py）:
 .\scripts\pack_portable.bat
-# 演示包（无大 ONNX）:
-python scripts\pack_portable.py --profile slim --zip
-# 默认可卖:
 python scripts\pack_portable.py --profile standard --zip
 # 含 LLM/vosk:
 python scripts\pack_portable.py --profile full --zip
 # 有代码签名证书时:
-$env:MUSIC_CODE_SIGN_THUMBPRINT="你的证书SHA1"; python scripts\pack_portable.py --zip --sign
+$env:MUSIC_CODE_SIGN_THUMBPRINT="你的证书SHA1"; python scripts\pack_for_share.py --sign
 ```
 
-输出：`dist/MusicEditing_Portable_YYYYMMDD[_slim|_full]/`（可选同名 `.zip`）。打包结束会做**验收**（exe/pyc/runtime/引擎）。
+输出：`dist/MusicEditing_Share_*`（外发）或 `dist/MusicEditing_Portable_*`（通用）；打包结束会做**验收**（exe/pyc/runtime/引擎 + 无业务 `.py`）。
 
 | 选项 | 含义 |
 |------|------|
 | `--profile slim\|standard\|full` | 体积档：演示 / 默认可卖 / 含语音模型 |
-| `--zip` | 额外打 zip |
+| `--zip` | 额外打 zip（`pack_for_share` 已强制） |
 | `--skip-models` | 不带 lama/超分 ONNX（覆盖 profile） |
 | `--with-cuda-ort` | 带 CUDA ORT EP（约 +300MB） |
 | `--with-llm` | 额外带 `.gguf` / vosk |
 | `--sign` | 尝试 `signtool` 签 `MusicEditing.exe` |
-| `--ship-source` | **调试用**：保留可读 `.py`（默认删除，外发勿开） |
+| `--ship-source` | **禁止外发**：保留可读 `.py`（仅本机调试） |
 | `--no-scenedetect` | 不带 PySceneDetect |
 
 对方解压后双击 **MusicEditing.exe**（推荐）。包内另有备用 `.bat`。**默认已内嵌 `runtime\`，对方不用再装 Python**；仅 Windows 10/11 x64。
+
+**代码安全：** 默认删除业务 `.py`；`.pyc` 仍可被专业工具反编译。详见 [distribution.md](distribution.md) §1.1。
 
 **闪退 / SmartScreen：** 先装 VC++ 2015–2022 x64；未签名时点「更多信息 → 仍要运行」。详见包内 `使用说明.txt`。
 

@@ -16,6 +16,9 @@ python scripts\release_oneclick.py --profile slim --no-installer
 python scripts\release_oneclick.py --skip-regression --sign
 
 # 分步:
+# 外发给别人（推荐：强制 zip + 严格无业务 .py）:
+.\scripts\pack_for_share.bat
+# 或通用便携:
 python scripts\pack_portable.py --profile standard --zip
 python scripts\accept_portable.py
 ```
@@ -23,6 +26,28 @@ python scripts\accept_portable.py
 输出清单：`dist/RELEASE_MANIFEST_*.txt`。
 
 档位：`slim`（演示/无大 ONNX） / `standard`（默认可卖） / `full`（含 LLM/vosk）。
+
+---
+
+## 1.1 代码安全（外发必读）
+
+| 措施 | 说明 |
+|------|------|
+| 默认去源码 | `client/scripts`、`third_party/iphoto` 编成 `.pyc` 后删除 `.py` |
+| 严格审计 | 残留业务 `.py` / `.git` / `docs/design` / 顶层 `src` / 密钥类文件 → **拒绝出包** |
+| 不进包 | C++ 工程源、设计文档、课程文稿、`.cursor`、地图 font/OBF |
+| 禁止外发开关 | `--ship-source`（可读 `.py`）；外发请用 `pack_for_share` |
+| 诚实边界 | `.pyc` **仍可被反编译**，只是提高门槛；军工级需另行 Nuitka/加壳 |
+| 无黑框子进程 | 启动时 `install_hidden_console_patch`：media_cli/ffmpeg/media_player 等不再弹控制台（否则 pythonw 下狂闪且 UI 卡） |
+
+```powershell
+# 唯一推荐外发入口（禁止带源码）
+.\scripts\pack_for_share.bat
+# 演示体积:
+python scripts\pack_for_share.py --profile slim
+```
+
+输出：`dist/MusicEditing_Share_YYYYMMDD*.zip`。
 
 ---
 
