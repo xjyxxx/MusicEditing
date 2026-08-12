@@ -34,7 +34,7 @@ flowchart LR
 | 地图 | `third_party/iphoto/src/maps` 仅 Python；font / OBF 扩展见 `maps/ASSETS.md` |
 | **播放器边界** | **不修改** `VideoPlayerWidget` / `media_player.exe`。详情页 Live 可用 iPhoto 自带 `VideoArea`；需要进本应用工作流时用宿主栏「用本应用播放 / 图片增强 / 去水印」回调 |
 | 依赖 | 核心：`requirements.txt`；完整图库：`requirements-iphoto.txt`（勿塞进每次 `run_ui` 的默认 pip） |
-| 启动 | 默认**嵌入**「照片图库」页；大图用 `SoftImageViewer`（`MUSIC_IPHOTO_SOFT_VIEWER=1`）避免 QRhi 空白；`MUSIC_IPHOTO_TOPLEVEL=1` 可改独立窗口；方向键切图；经典/iPhotron 可互切 |
+| 启动 | 默认**嵌入**；大图 SoftImageViewer；地点地图在宿主下强制 CPU + QWidget 照片标记叠层（避免 GL 后绘空白）；经典/iPhotron 可互切 |
 
 经典路径（`PhotoLibraryPage` + `services/photo_library_service.py` + `core/photo_*`）仍保留：Folder-native、SQLite、简化 sidecar v2、GL/NumPy 编辑对话框。
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from logging import getLogger
 from pathlib import Path
 from typing import Dict, Iterable, Optional, cast
+import os
 
 from PySide6.QtCore import QObject, QRectF, Qt, QEvent, Signal, Slot
 from PySide6.QtGui import (
@@ -540,7 +541,17 @@ class PhotoMapView(QWidget):
             logger.info("Photo map runtime capability: %s", self._map_runtime_capabilities.status_message)
         self._layout.addWidget(self._map_widget)
 
-        if self._overlay_attachment.supports_post_render(self._map_widget):
+        # MusicEditing 嵌入：不用 GL 后绘（易空白），改用 QWidget 叠层画缩略图
+        hosted = os.environ.get("MUSIC_IPHOTO_HOSTED", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        use_post_render = (
+            not hosted and self._overlay_attachment.supports_post_render(self._map_widget)
+        )
+        if use_post_render:
             self._overlay = _GLMarkerLayer(self._map_widget)
             self._overlay_attachment.attach(
                 self._map_widget,
@@ -548,6 +559,7 @@ class PhotoMapView(QWidget):
             )
         else:
             self._overlay = _MarkerLayer(self)
+            self._overlay.show()
             self._overlay_attachment.attach(
                 self._map_widget,
                 callback=None,
@@ -555,6 +567,7 @@ class PhotoMapView(QWidget):
                 overlay_geometry=self._map_widget.geometry(),
                 raise_overlay=True,
             )
+            self._overlay.raise_()
         self._marker_paint_callback = self._overlay_attachment.callback
 
         self._event_bridge.bind(self._map_widget)

@@ -49,6 +49,16 @@ def _opengl_explicitly_disabled() -> bool:
     }
 
 
+def _hosted_in_musicediting() -> bool:
+    """MusicEditing 嵌入时强制 CPU 地图，保证地点缩略图叠层可见。"""
+    return os.environ.get("MUSIC_IPHOTO_HOSTED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _native_widget_runtime_is_usable() -> bool:
     return _native_widget_runtime_is_usable_for_root(_MAPS_PACKAGE_ROOT)
 
@@ -295,8 +305,10 @@ def create_map_widget(
     """Build a map widget and apply the shared native/GL/CPU fallback policy."""
 
     active_logger = log or logger
+    # 嵌入宿主：禁用 OpenGL/Native，避免 GL 后绘照片标记空白、与主程序抢上下文
+    force_cpu = _hosted_in_musicediting() or _opengl_explicitly_disabled()
     if map_runtime_capabilities is not None:
-        use_opengl = map_runtime_capabilities.python_gl_available
+        use_opengl = bool(map_runtime_capabilities.python_gl_available) and not force_cpu
         widget_cls, resolved_map_source, backend_kind = _choose_map_widget_backend_with_runtime(
             map_source,
             use_opengl=use_opengl,
@@ -304,11 +316,21 @@ def create_map_widget(
             package_root=package_root,
         )
     else:
-        use_opengl = check_opengl_support()
+        use_opengl = check_opengl_support() and not force_cpu
         widget_cls, resolved_map_source, backend_kind = _choose_map_widget_backend_for_root(
             map_source,
             use_opengl=use_opengl,
             package_root=package_root,
+        )
+
+    if force_cpu:
+        # 强制 Python CPU MapWidget，跳过 NativeOsmAnd / MapGL*
+        widget_cls = MapWidget
+        if backend_kind == "osmand_native":
+            backend_kind = "osmand_python"
+        active_logger.info(
+            "Photo map forced to CPU MapWidget (hosted/disabled-GL) for %s",
+            context,
         )
 
     assert resolved_map_source is not None
