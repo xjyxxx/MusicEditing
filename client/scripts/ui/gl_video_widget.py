@@ -34,8 +34,19 @@ _FRAG = """#version 330 core
 in vec2 vUv;
 out vec4 FragColor;
 uniform sampler2D uTex;
+uniform float uExposure;
+uniform float uContrast;
+uniform float uSaturation;
+uniform float uTemperature;
 void main() {
-    FragColor = texture(uTex, vUv);
+    vec3 color = texture(uTex, vUv).rgb;
+    color *= exp2(uExposure);
+    color = (color - vec3(0.5)) * (1.0 + uContrast) + vec3(0.5);
+    float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    color = mix(vec3(luminance), color, 1.0 + uSaturation);
+    color.r += uTemperature * 0.08;
+    color.b -= uTemperature * 0.08;
+    FragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
 }
 """
 
@@ -54,6 +65,8 @@ class GlVideoWidget(QOpenGLWidget):
     """将 RGB24 帧作为 OpenGL 纹理绘制；无帧时显示占位文字。点击画面可切换播放。"""
 
     clicked = Signal()
+    renderReady = Signal()
+    renderFailed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -68,13 +81,34 @@ class GlVideoWidget(QOpenGLWidget):
         self._tex_h = 0
         self._pending_image: QImage | None = None
         self._pending_keep: bytes | None = None
+        # 始终保留最近一帧；自定义 Shader 失败时由 QPainter 直接显示。
+        self._current_image: QImage | None = None
         self._paused_overlay = False
+        # 默认参数是恒等变换；视频播放器无需感知照片编辑功能。
+        self._photo_adjustments = (0.0, 0.0, 0.0, 0.0)
+        self._view_zoom = 1.0
 
         self._program: QOpenGLShaderProgram | None = None
         self._vao: QOpenGLVertexArrayObject | None = None
         self._vbo: QOpenGLBuffer | None = None
         self._texture: QOpenGLTexture | None = None
+        self._uniform_locations: dict[str, int] = {}
         self._gl_ready = False
+        self._render_ready_emitted = False
+        self._gl_error = ""
+
+    @property
+    def gl_ready(self) -> bool:
+        return self._gl_ready
+
+    @property
+    def gl_error(self) -> str:
+        return self._gl_error
+
+    def _fail_gl(self, reason: str) -> None:
+        self._gl_ready = False
+        self._gl_error = reason or "OpenGL 初始化失败"
+        self.renderFailed.emit(self._gl_error)
 
     def set_placeholder(self, text: str) -> None:
         self._placeholder = text or ""
@@ -89,10 +123,32 @@ class GlVideoWidget(QOpenGLWidget):
         self._paused_overlay = paused
         self.update()
 
+    def set_photo_adjustments(
+        self, exposure: float = 0.0, contrast: float = 0.0,
+        saturation: float = 0.0, temperature: float = 0.0,
+    ) -> None:
+        """设置照片非破坏编辑的 GPU 预览参数，默认值不会影响视频播放。"""
+        self._photo_adjustments = (
+            max(-3.0, min(3.0, float(exposure))),
+            max(-1.0, min(1.0, float(contrast))),
+            max(-1.0, min(1.0, float(saturation))),
+            max(-1.0, min(1.0, float(temperature))),
+        )
+        self.update()
+
+    def set_view_zoom(self, zoom: float = 1.0) -> None:
+        """设置相对“适合窗口”的画布缩放，视频播放器默认保持 1.0。"""
+        value = max(0.25, min(4.0, float(zoom)))
+        if abs(value - self._view_zoom) < 1e-6:
+            return
+        self._view_zoom = value
+        self.update()
+
     def clear_frame(self) -> None:
         self._has_frame = False
         self._pending_image = None
         self._pending_keep = None
+        self._current_image = None
         self.update()
 
     def set_rgb_frame(self, rgb: bytes | bytearray, width: int, height: int) -> None:
@@ -108,6 +164,7 @@ class GlVideoWidget(QOpenGLWidget):
             keep = bytes(rgb[:need])
         img = QImage(keep, width, height, width * 3, QImage.Format_RGB888)
         self._pending_keep = keep
+        self._current_image = img
         self._pending_image = img
         self._has_frame = True
         self.update()
@@ -116,9 +173,10 @@ class GlVideoWidget(QOpenGLWidget):
         if image.isNull():
             return
         # 与视频帧一致：不做 mirrored，由绘制 UV 翻转
-        img = image.convertToFormat(QImage.Format_RGB888)
+        img = image.convertToFormat(QImage.Format_RGB888).copy()
         self._pending_keep = None
-        self._pending_image = img.copy() if img.isNull() is False else img
+        self._current_image = img
+        self._pending_image = img
         self._has_frame = True
         self.update()
 
@@ -126,46 +184,61 @@ class GlVideoWidget(QOpenGLWidget):
         return QSize(640, 360)
 
     def initializeGL(self) -> None:
-        self._program = QOpenGLShaderProgram(self)
-        ok = (
-            self._program.addShaderFromSourceCode(QOpenGLShader.Vertex, _VERT)
-            and self._program.addShaderFromSourceCode(QOpenGLShader.Fragment, _FRAG)
-            and self._program.link()
-        )
-        if not ok:
-            self._gl_ready = False
+        context = self.context()
+        if context is None or not context.isValid():
+            self._fail_gl("OpenGL 上下文不可用")
             return
+        try:
+            self._program = QOpenGLShaderProgram(self)
+            if not self._program.addShaderFromSourceCode(QOpenGLShader.Vertex, _VERT):
+                self._fail_gl("顶点 Shader 编译失败: " + self._program.log())
+                return
+            if not self._program.addShaderFromSourceCode(QOpenGLShader.Fragment, _FRAG):
+                self._fail_gl("片元 Shader 编译失败: " + self._program.log())
+                return
+            if not self._program.link():
+                self._fail_gl("Shader 链接失败: " + self._program.log())
+                return
+            self._uniform_locations = {
+                name: self._program.uniformLocation(name.encode("ascii"))
+                for name in ("uTex", "uExposure", "uContrast", "uSaturation", "uTemperature")
+            }
+            missing = [name for name, location in self._uniform_locations.items() if location < 0]
+            if missing:
+                self._fail_gl("Shader uniform 不可用: " + ", ".join(missing))
+                return
 
-        verts = [
-            -1.0, -1.0, 0.0, 0.0,
-             1.0, -1.0, 1.0, 0.0,
-            -1.0,  1.0, 0.0, 1.0,
-             1.0,  1.0, 1.0, 1.0,
-        ]
-        raw = array.array("f", verts).tobytes()
-
-        self._vao = QOpenGLVertexArrayObject(self)
-        if not self._vao.create():
-            self._gl_ready = False
-            return
-        self._vao.bind()
-
-        self._vbo = QOpenGLBuffer(QOpenGLBuffer.VertexBuffer)
-        if not self._vbo.create():
-            self._gl_ready = False
-            return
-        self._vbo.bind()
-        self._vbo.allocate(raw, len(raw))
-
-        self._program.bind()
-        self._program.enableAttributeArray(0)
-        self._program.setAttributeBuffer(0, GL_FLOAT, 0, 2, 16)
-        self._program.enableAttributeArray(1)
-        self._program.setAttributeBuffer(1, GL_FLOAT, 8, 2, 16)
-        self._program.release()
-        self._vbo.release()
-        self._vao.release()
-        self._gl_ready = True
+            verts = [
+                -1.0, -1.0, 0.0, 0.0,
+                 1.0, -1.0, 1.0, 0.0,
+                -1.0,  1.0, 0.0, 1.0,
+                 1.0,  1.0, 1.0, 1.0,
+            ]
+            raw = array.array("f", verts).tobytes()
+            self._vao = QOpenGLVertexArrayObject(self)
+            if not self._vao.create():
+                self._fail_gl("无法创建 OpenGL VAO")
+                return
+            self._vao.bind()
+            self._vbo = QOpenGLBuffer(QOpenGLBuffer.VertexBuffer)
+            if not self._vbo.create():
+                self._vao.release()
+                self._fail_gl("无法创建 OpenGL VBO")
+                return
+            self._vbo.bind()
+            self._vbo.allocate(raw, len(raw))
+            self._program.bind()
+            self._program.enableAttributeArray(0)
+            self._program.setAttributeBuffer(0, GL_FLOAT, 0, 2, 16)
+            self._program.enableAttributeArray(1)
+            self._program.setAttributeBuffer(1, GL_FLOAT, 8, 2, 16)
+            self._program.release()
+            self._vbo.release()
+            self._vao.release()
+            self._gl_error = ""
+            self._gl_ready = True
+        except Exception as exc:
+            self._fail_gl(f"OpenGL 初始化异常: {exc}")
 
     def resizeGL(self, w: int, h: int) -> None:
         funcs = self.context().functions() if self.context() else None
@@ -179,26 +252,50 @@ class GlVideoWidget(QOpenGLWidget):
         funcs.glClearColor(0.039, 0.039, 0.071, 1.0)
         funcs.glClear(GL_COLOR_BUFFER_BIT)
 
-        if self._pending_image is not None:
-            self._upload_texture(self._pending_image)
-            self._pending_image = None
-            self._pending_keep = None
+        if self._pending_image is not None and self._gl_ready:
+            try:
+                self._upload_texture(self._pending_image)
+                self._pending_image = None
+            except Exception as exc:
+                self._fail_gl(f"纹理上传失败: {exc}")
 
         drew_frame = bool(
             self._gl_ready and self._has_frame and self._texture and self._program
         )
         if drew_frame:
-            self._draw_textured_quad()
+            try:
+                self._draw_textured_quad()
+                if not self._render_ready_emitted:
+                    self._render_ready_emitted = True
+                    self.renderReady.emit()
+            except Exception as exc:
+                drew_frame = False
+                self._fail_gl(f"OpenGL 绘制失败: {exc}")
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.TextAntialiasing)
-        if not drew_frame:
+        if not drew_frame and self._has_frame and self._current_image is not None:
+            self._draw_software_frame(painter, self._current_image)
+        elif not drew_frame:
             painter.setPen(Qt.gray)
             painter.drawText(self.rect(), Qt.AlignCenter, self._placeholder)
         if self._paused_overlay:
             self._draw_play_icon(painter)
         painter.end()
+
+    def _draw_software_frame(self, painter: QPainter, image: QImage) -> None:
+        """自定义 Shader 不可用时仍显示最近一帧，避免主页有声音却黑屏。"""
+        if image.isNull():
+            return
+        iw, ih = max(1, image.width()), max(1, image.height())
+        scale = min(self.width() / float(iw), self.height() / float(ih)) * self._view_zoom
+        width, height = iw * scale, ih * scale
+        target = QRectF(
+            (self.width() - width) * 0.5, (self.height() - height) * 0.5,
+            width, height,
+        )
+        painter.drawImage(target, image)
 
     def _draw_play_icon(self, painter: QPainter) -> None:
         """暂停时显示三角播放标志（提示点击继续）。"""
@@ -256,6 +353,8 @@ class GlVideoWidget(QOpenGLWidget):
         else:
             sx = 1.0
             sy = widget_aspect / tex_aspect
+        sx *= self._view_zoom
+        sy *= self._view_zoom
 
         # QImage 顶→底；OpenGL 纹理底→顶：用 V 翻转 UV，避免每帧 mirrored
         verts = [
@@ -272,7 +371,13 @@ class GlVideoWidget(QOpenGLWidget):
 
         self._program.bind()
         self._texture.bind()
-        self._program.setUniformValue("uTex", 0)
+        locations = self._uniform_locations
+        self._program.setUniformValue(locations["uTex"], 0)
+        exposure, contrast, saturation, temperature = self._photo_adjustments
+        self._program.setUniformValue(locations["uExposure"], float(exposure))
+        self._program.setUniformValue(locations["uContrast"], float(contrast))
+        self._program.setUniformValue(locations["uSaturation"], float(saturation))
+        self._program.setUniformValue(locations["uTemperature"], float(temperature))
         funcs = self.context().functions()
         funcs.glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
         self._texture.release()
@@ -281,10 +386,12 @@ class GlVideoWidget(QOpenGLWidget):
         self._vao.release()
 
     def cleanup_gl(self) -> None:
-        if not self.context():
+        context = self.context()
+        if context is None or not context.isValid() or not self.isValid():
+            self._gl_ready = False
             return
-        self.makeCurrent()
         try:
+            self.makeCurrent()
             if self._texture is not None:
                 self._texture.destroy()
                 self._texture = None
@@ -295,6 +402,8 @@ class GlVideoWidget(QOpenGLWidget):
                 self._vao.destroy()
                 self._vao = None
             self._program = None
+        except Exception:
+            pass
         finally:
             self.doneCurrent()
         self._gl_ready = False

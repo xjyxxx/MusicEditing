@@ -67,6 +67,7 @@
 | 封面工厂 | `CoverPage` | 趣味 | 最清晰帧 + 标题 PNG（[feature_flows](feature_flows.md) §5.14） |
 | 音频趣味 | `AudioFunPage` | 趣味 | 整轨趣味 + 梗音叠加/倍数（[feature_flows](feature_flows.md) §5.15） |
 | 个人中心 | `ProfilePage` | 帮助 | 卡密/联网激活、试用配额、购买页、GPU、输出目录、诊断 |
+| 照片图库 | `PhotoLibraryPage` + `PhotoEditDialog` | 工作流 | Folder-native 索引、智能相册、Live Photo、非破坏编辑；见 [photo_manager.md](photo_manager.md) |
 
 播放器组件：`client/scripts/ui/video_player.py`（`GlVideoWidget` OpenGL + `PlayerBackend` → `media_player.exe`）
 
@@ -74,15 +75,15 @@
 
 全局样式集中在 `client/scripts/ui/theme.py`，由 `MainWindow.setStyleSheet(app_stylesheet())` 注入。
 
-**方向：** 借鉴媒体工具（Splice 炭黑扁平、Cinema Studio 琥珀 CTA）——深炭画布 + 发丝边 + 琥珀主按钮，去掉旧版紫调 `#5b5bd6`。
+**方向：** macOS 风格浅色桌面媒体工具——暖白画布、白色内容面、发丝边、系统蓝 CTA；照片图库使用三栏 Photos 式布局。
 
 | 令牌 | 色值 | 用途 |
 |------|------|------|
-| `BG` | `#0E1116` | 窗口底 |
-| `SURFACE` / `SURFACE_2` | `#161B22` / `#1C2330` | 顶栏、Tab 面板 |
-| `ACCENT` | `#E8A45C` | 主按钮 / 选中 Tab / 进度条 |
-| `SIGNAL` | `#3DB8A8` | 信息文字、GroupBox 标题 |
-| 字体 | YaHei UI / Segoe UI Semibold | 中文桌面可读 |
+| `BG` | `#F5F5F7` | 窗口底 |
+| `SURFACE` / `SURFACE_2` | `#FFFFFF` / `#F2F2F7` | 顶栏、Tab 面板 |
+| `ACCENT` | `#0A84FF` | 主按钮 / 选中 Tab / 进度条 |
+| `SIGNAL` | `#007AFF` | 信息文字、GroupBox 标题 |
+| 字体 | SF Pro（可用时）/ Segoe UI Variable / 微软雅黑 | 跨平台桌面可读 |
 
 顶栏为圆角 `TopChrome`：品牌名 + 当前页胶囊 + GPU/授权/天气 + 版本号。主功能入口为菜单栏。主按钮用 `objectName="primaryButton"` 或 Studio `StudioPrimary`。长路径标签用 `ui/elided_label.ElidedPathLabel`（中间省略 + Tooltip），避免撑开布局。
 

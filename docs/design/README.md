@@ -12,6 +12,7 @@
 |------|------|
 | [**implementation_flow.md**](implementation_flow.md) | **枢纽**：架构、构建、状态表、命令速查 |
 | [mvvm_and_ui.md](mvvm_and_ui.md) | MVVM、页面导航、滤镜、GPU、去水印/超分 UI |
+| [photo_manager.md](photo_manager.md) | Folder-native 图库、索引、任务服务、Live Photo、非破坏编辑与安全透视裁剪 |
 | [media_engine.md](media_engine.md) | VideoDecoder、C API、CLI、llama.cpp |
 | [feature_flows.md](feature_flows.md) | 各业务端到端链路（UI → 引擎） |
 | [deps_and_extending.md](deps_and_extending.md) | 模块依赖树、扩展与路线图 |

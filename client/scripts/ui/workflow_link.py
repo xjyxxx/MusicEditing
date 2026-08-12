@@ -23,6 +23,7 @@ TAB_BGM = 8
 TAB_PROFILE = 9
 TAB_LIBRARY = 10
 TAB_STEGO = 11
+TAB_PHOTOS = 12
 
 # ask_video_handoff 特殊返回：打开所在文件夹（非页面索引）
 OPEN_FOLDER = -100
@@ -40,6 +41,7 @@ PAGE_TITLES: dict[int, str] = {
     TAB_PROFILE: "个人中心",
     TAB_LIBRARY: "本地素材库",
     TAB_STEGO: "溯源水印",
+    TAB_PHOTOS: "照片图库",
 }
 
 # 菜单：(菜单标题, [(动作文案, page_index), ...])
@@ -59,6 +61,7 @@ MENU_GROUPS: Sequence[Tuple[str, Sequence[Tuple[str, int]]]] = (
         (
             ("全流程队列", TAB_PIPELINE),
             ("本地素材库", TAB_LIBRARY),
+            ("照片图库", TAB_PHOTOS),
             ("下载与热评", TAB_DOWNLOAD),
             ("BGM 混音", TAB_BGM),
         ),

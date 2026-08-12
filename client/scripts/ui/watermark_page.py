@@ -319,14 +319,21 @@ class WatermarkPage(QWidget):
     def _on_import_image(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "选择图片", "",
-            "图片 (*.png *.jpg *.jpeg *.bmp *.webp);;所有文件 (*.*)",
+            "图片 (*.png *.jpg *.jpeg *.bmp *.webp *.heic *.heif *.tif *.tiff);;所有文件 (*.*)",
         )
-        if not path:
-            return
+        if path:
+            self.open_image(path)
+
+    def open_image(self, path: str) -> bool:
+        """供照片图库等页面复用的静图导入入口。"""
+        if not path or not os.path.isfile(path):
+            QMessageBox.warning(self, "去水印", "图片文件不存在")
+            return False
         preview = load_preview(path, max_side=4096)
         if not preview.ok:
-            QMessageBox.warning(self, "提示", "无法加载图片")
-            return
+            QMessageBox.warning(self, "去水印", "无法加载图片")
+            return False
+        self._tabs.setCurrentIndex(0)
         self._vm.import_image(path)
         self._img_path_label.setText(path)
         self._img_selector.load_pixmap(preview.pixmap, preview.native_size)
@@ -335,6 +342,7 @@ class WatermarkPage(QWidget):
             f"已加载图片: {path}  ·  {preview.native_width}×{preview.native_height}"
             f"  ·  解码 {preview.backend}"
         )
+        return True
 
     def focus_video_tab(self) -> None:
         self._tabs.setCurrentIndex(1)

@@ -3,27 +3,28 @@
 from __future__ import annotations
 
 # ── 设计令牌 ──────────────────────────────────────────────
-BG = "#0E1116"          # 画布底
-SURFACE = "#161B22"     # 面板
-SURFACE_2 = "#1C2330"   # 抬升面
-ELEVATED = "#242B38"    # 控件底
-BORDER = "#2A3344"      # 发丝边
-BORDER_STRONG = "#3A465C"
-TEXT = "#E8EDF5"
-TEXT_MUTED = "#8B95A8"
-TEXT_DIM = "#5C677A"
-ACCENT = "#E8A45C"      # 主强调（CTA）
-ACCENT_HOVER = "#F0B874"
-ACCENT_PRESSED = "#D49048"
-ACCENT_ON = "#12151C"   # 强调色上的字
-SIGNAL = "#3DB8A8"      # 次要信号（链接/信息）
-SIGNAL_SOFT = "#2A4A48"
-DANGER = "#E07070"
-OK = "#6BCB8A"
-PLAYER_BG = "#080A0E"
+# macOS 风格：暖白画布、半透明浅灰面板和系统蓝强调色。
+BG = "#F5F5F7"          # 画布底
+SURFACE = "#FFFFFF"     # 面板
+SURFACE_2 = "#F2F2F7"   # 抬升面
+ELEVATED = "#E8E8ED"    # 控件底
+BORDER = "#D2D2D7"      # 发丝边
+BORDER_STRONG = "#C7C7CC"
+TEXT = "#1D1D1F"
+TEXT_MUTED = "#6E6E73"
+TEXT_DIM = "#8E8E93"
+ACCENT = "#0A84FF"      # macOS 系统蓝
+ACCENT_HOVER = "#0077ED"
+ACCENT_PRESSED = "#006EDC"
+ACCENT_ON = "#FFFFFF"   # 强调色上的字
+SIGNAL = "#007AFF"      # 次要信号（链接/信息）
+SIGNAL_SOFT = "#E5F1FF"
+DANGER = "#D70015"
+OK = "#248A3D"
+PLAYER_BG = "#000000"
 
-FONT_UI = '"Segoe UI Semibold", "Microsoft YaHei UI", "Segoe UI", sans-serif'
-FONT_BODY = '"Microsoft YaHei UI", "Segoe UI", sans-serif'
+FONT_UI = '"SF Pro Display", "Segoe UI Variable", "Microsoft YaHei UI", "Segoe UI", sans-serif'
+FONT_BODY = '"SF Pro Text", "Segoe UI", "Microsoft YaHei UI", sans-serif'
 
 
 def app_stylesheet() -> str:

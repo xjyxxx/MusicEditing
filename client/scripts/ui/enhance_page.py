@@ -953,10 +953,16 @@ class EnhancePage(QWidget):
     def _on_import_image(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "选择图片", "",
-            "图片 (*.png *.jpg *.jpeg *.bmp *.webp);;所有文件 (*.*)",
+            "图片 (*.png *.jpg *.jpeg *.bmp *.webp *.heic *.heif *.tif *.tiff);;所有文件 (*.*)",
         )
-        if not path:
-            return
+        if path:
+            self.open_image(path)
+
+    def open_image(self, path: str) -> bool:
+        """供照片图库等页面复用的静图导入入口。"""
+        if not path or not os.path.isfile(path):
+            QMessageBox.warning(self, "画质增强", "图片文件不存在")
+            return False
         self._vm.import_image(path)
         self._src_image_path = path
         self._img_path_label.setText(path)
@@ -970,6 +976,7 @@ class EnhancePage(QWidget):
         self._btn_folder_result.setEnabled(False)
         be = self._img_compare.left_view.load_backend() or "—"
         self._status.setText(f"已导入: {os.path.basename(path)}  ·  解码 {be}")
+        return True
 
     def focus_video_tab(self) -> None:
         self._tabs.setCurrentIndex(1)

@@ -26,6 +26,7 @@ from ui.enhance_page import EnhancePage
 from ui.export_options_dialog import ExportOptionsDialog
 from ui.highlight_timeline import HighlightTimelineWidget
 from ui.media_library_page import MediaLibraryPage
+from ui.photo_library_page import PhotoLibraryPage
 from ui.pipeline_queue_page import PipelineQueuePage
 from ui.profile_page import ProfilePage
 from ui.setup_wizard import SetupWizardDialog
@@ -51,6 +52,7 @@ from ui.workflow_link import (
     TAB_ENHANCE,
     TAB_HOME,
     TAB_LIBRARY,
+    TAB_PHOTOS,
     TAB_PIPELINE,
     TAB_PROFILE,
     TAB_SLICE,
@@ -986,8 +988,9 @@ class MainWindow(QMainWindow):
         self._bgm_page = None
         self._profile_page = None
         self._library_page = None
+        self._photo_library_page = None
         self._stego_page = None
-        for i in range(TAB_STEGO + 1):
+        for i in range(TAB_PHOTOS + 1):
             ph = QWidget()
             ph.setObjectName(f"PagePlaceholder_{i}")
             self._stack.addWidget(ph)
@@ -1095,6 +1098,13 @@ class MainWindow(QMainWindow):
             return MediaLibraryPage(self._vm, handoff=self.open_with_video)
         if index == TAB_STEGO:
             return StegoPage(self._vm)
+        if index == TAB_PHOTOS:
+            return PhotoLibraryPage(
+                self._vm,
+                open_image_editor=self.open_photo_image_editor,
+                open_video_editor=self.open_photo_video_editor,
+                open_video_preview=self._on_preview_play,
+            )
         return QWidget()
 
     def _ensure_page(self, index: int) -> QWidget:
@@ -1127,6 +1137,7 @@ class MainWindow(QMainWindow):
             TAB_PROFILE: "_profile_page",
             TAB_LIBRARY: "_library_page",
             TAB_STEGO: "_stego_page",
+            TAB_PHOTOS: "_photo_library_page",
         }.get(index)
         if attr:
             setattr(self, attr, page)
@@ -1179,6 +1190,7 @@ class MainWindow(QMainWindow):
             "pipeline": TAB_PIPELINE,
             "profile": TAB_PROFILE,
             "library": TAB_LIBRARY,
+            "photos": TAB_PHOTOS,
             "cover": TAB_COVER,
             "stego": TAB_STEGO,
         }
@@ -1364,7 +1376,7 @@ class MainWindow(QMainWindow):
 
     def _goto_page(self, index: int):
         """切换功能页（菜单 / 接力 / 下载完成共用）；首次进入时懒创建。"""
-        if index < 0 or index > TAB_STEGO:
+        if index < 0 or index > TAB_PHOTOS:
             return
         # 首次建页较重：关掉更新再切，减少「整窗闪一下/抖一下」
         self.setUpdatesEnabled(False)
@@ -1439,6 +1451,21 @@ class MainWindow(QMainWindow):
                 self._on_weather_clicked()
                 return True
         return super().eventFilter(obj, event)
+
+    def open_photo_image_editor(self, path: str, target: str) -> None:
+        """由照片图库直达既有的图片增强/去水印页，不创建第二套处理链。"""
+        if not path or not os.path.isfile(path):
+            QMessageBox.warning(self, "照片图库", f"文件不存在：\n{path}")
+            return
+        tab = TAB_ENHANCE if target == "enhance" else TAB_WATERMARK
+        page = self._ensure_page(tab)
+        self._goto_page(tab)
+        if not page.open_image(path):
+            return
+
+    def open_photo_video_editor(self, path: str, target: str) -> None:
+        """照片图库的视频项目继续复用 C++ 引擎的视频处理工作流。"""
+        self.open_with_video(path, TAB_ENHANCE if target == "enhance" else TAB_WATERMARK)
 
     def open_with_video(self, path: str, tab_index: int) -> None:
         """切功能页 + 异步 import_video（probe 在后台，不卡主线程）。"""

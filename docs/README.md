@@ -19,6 +19,7 @@
 | 了解整体架构与构建 | [design/implementation_flow.md](design/implementation_flow.md)（枢纽） |
 | 查某功能 UI→引擎链路 | [design/feature_flows.md](design/feature_flows.md) |
 | 改 Python MVVM / 页面 | [design/mvvm_and_ui.md](design/mvvm_and_ui.md) |
+| 改照片图库 / 非破坏编辑 | [design/photo_manager.md](design/photo_manager.md) |
 | 改 C++ 引擎 / CLI | [design/media_engine.md](design/media_engine.md) |
 | 改首页播放器解码 | [design/player_decode_flow.md](design/player_decode_flow.md) |
 | 看依赖树 / 扩展路线 | [design/deps_and_extending.md](design/deps_and_extending.md) |
