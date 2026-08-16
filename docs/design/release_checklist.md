@@ -68,9 +68,11 @@ $env:MUSIC_CODE_SIGN_THUMBPRINT="你的证书SHA1"; python scripts\pack_for_shar
 | `--ship-source` | **禁止外发**：保留可读 `.py`（仅本机调试） |
 | `--no-scenedetect` | 不带 PySceneDetect |
 
-对方解压后双击 **MusicEditing.exe**（推荐）。包内另有备用 `.bat`。**默认已内嵌 `runtime\`，对方不用再装 Python**；仅 Windows 10/11 x64。
+对方解压后双击 **MusicEditing.exe**（推荐）。包内另有备用 `.bat`。**默认已内嵌 `runtime\`，对方不用再装 Python / Visual Studio**；仅 Windows 10/11 x64。打包会尽量随带 VC++ CRT DLL。
 
 **代码安全：** 默认删除业务 `.py`；`.pyc` 仍可被专业工具反编译。详见 [distribution.md](distribution.md) §1.1。
+
+**闪退 / SmartScreen：** 极少数机再装「VC++ **可再发行组件** x64」（不是 VS）；未签名时点「更多信息 → 仍要运行」。详见包内 `使用说明.txt` 与 [distribution.md](distribution.md) §1.2。
 
 **闪退 / SmartScreen：** 先装 VC++ 2015–2022 x64；未签名时点「更多信息 → 仍要运行」。详见包内 `使用说明.txt`。
 
@@ -105,6 +107,7 @@ python scripts\publish_update_manifest.py --version 0.2.0 --notes "说明" --bas
 # 上传 dist\update\ 到 CDN
 # 客户端 app.conf: update_manifest_url=…/musicediting_update.json
 # 可选: update_check_on_startup=true
+# OTA 预留: 客户端「下载到本地」→ 暂存+校验；自动替换见 distribution.md §5.3（默认关闭）
 # 本地联调: python scripts\serve_update_channel.py
 # 发版包勿留下 127.0.0.1 联调地址
 ```

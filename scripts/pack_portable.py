@@ -79,6 +79,17 @@ SKIP_BIN_NAMES = {
     "_sr_test_out.png",
 }
 
+# 随包携带 VC++ CRT（不是 Visual Studio），对方一般不用再装运行库
+VCRUNTIME_DLLS = (
+    "vcruntime140.dll",
+    "vcruntime140_1.dll",
+    "msvcp140.dll",
+    "msvcp140_1.dll",
+    "msvcp140_2.dll",
+    "msvcp140_atomic_wait.dll",
+    "concrt140.dll",
+)
+
 # slim=演示体积 / standard=默认可卖 / full=含语音模型
 PACK_PROFILES: dict[str, dict] = {
     "slim": {
@@ -377,6 +388,70 @@ def struct_calcsize_p() -> int:
     return struct.calcsize("P")
 
 
+def _find_vcruntime_sources() -> list[Path]:
+    """定位可再分发的 VC++ CRT DLL 目录（优先 VS Redist，其次 System32）。"""
+    dirs: list[Path] = []
+    # 1) 本机构建产物旁若已有
+    if BIN.is_dir():
+        dirs.append(BIN)
+    # 2) VS VC Redist
+    vswhere = Path(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe")
+    if vswhere.is_file():
+        try:
+            r = subprocess.run(
+                [
+                    str(vswhere), "-latest", "-products", "*",
+                    "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                    "-property", "installationPath",
+                ],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+            root = (r.stdout or "").strip()
+            if root:
+                redist = Path(root) / "VC" / "Redist" / "MSVC"
+                if redist.is_dir():
+                    for ver in sorted(redist.iterdir(), reverse=True):
+                        crt2 = ver / "x64"
+                        if not crt2.is_dir():
+                            continue
+                        for sub in crt2.glob("Microsoft.VC*.CRT"):
+                            if sub.is_dir():
+                                dirs.append(sub)
+        except OSError:
+            pass
+    # 3) 系统目录（Win10+ 通常已有；随包复制合法且利于干净机）
+    sys32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+    if sys32.is_dir():
+        dirs.append(sys32)
+    return dirs
+
+
+def _bundle_vcruntime(out_bin: Path) -> int:
+    """把 VC++ 运行库 DLL 拷进引擎目录，避免对方安装 Visual Studio / 手动装运行库。"""
+    sources = _find_vcruntime_sources()
+    n = 0
+    for name in VCRUNTIME_DLLS:
+        dst = out_bin / name
+        if dst.is_file():
+            continue
+        src = None
+        for d in sources:
+            cand = d / name
+            if cand.is_file():
+                # 跳过 debug 变体名（本列表已不含 *d.dll）
+                src = cand
+                break
+        if src is None:
+            continue
+        _copy_file(src, dst)
+        n += 1
+    if n:
+        print(f"[拷贝] VC++ 运行库 DLL ×{n}（对方无需装 Visual Studio）", flush=True)
+    else:
+        print("[提示] 未找到可随包的 VC++ CRT；多数 Win10/11 仍可直接运行", flush=True)
+    return n
+
+
 def _find_vcvars64() -> Path | None:
     vswhere = Path(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe")
     if not vswhere.is_file():
@@ -556,13 +631,20 @@ def _write_readme(
     txt = out_root / "使用说明.txt"
     if embed_python:
         need = [
-            "一、对方电脑需要",
-            "  1. Windows 10/11 64 位",
-            "  2. 一般无需安装 Python（本包已内嵌 runtime\\）",
-            "  3. 若双击闪退：安装 Microsoft Visual C++ 2015–2022 Redistributable (x64)",
-            "     https://learn.microsoft.com/zh-cn/cpp/windows/latest-supported-vc-redist",
-            "  4. 显卡驱动建议较新。演讲金句 GPU 加速用驱动自带的 Vulkan 运行时，",
-            "     不需要 Vulkan SDK；没有独显则自动 CPU，其它功能仍可用。",
+            "一、对方电脑需要什么",
+            "  只要：Windows 10/11 64 位。解压后双击 MusicEditing.exe 即可。",
+            "",
+            "  不需要安装：",
+            "  - Visual Studio（那是开发者本机编译用的）",
+            "  - Python / pip",
+            "  - CUDA Toolkit / Vulkan SDK",
+            "",
+            "  本包已内嵌 runtime\\（Python+依赖）与引擎 DLL；",
+            "  并尽量随包携带 VC++ 运行库 DLL（不是 Visual Studio）。",
+            "  极少数干净机若双击闪退：再装「Visual C++ 2015–2022 可再发行组件 x64」",
+            "  （约几 MB 的小运行库，不是 VS 整套 IDE）：",
+            "  https://learn.microsoft.com/zh-cn/cpp/windows/latest-supported-vc-redist",
+            "  显卡驱动建议较新；无独显则自动 CPU，其它功能仍可用。",
             "",
             "二、怎么启动",
             "  解压后双击 MusicEditing.exe（推荐，无黑框）",
@@ -570,13 +652,12 @@ def _write_readme(
             "",
             "  若 Windows 提示「未知发布者 / SmartScreen」：",
             "  点「更多信息」→「仍要运行」（未做代码签名时正常）。",
-            "  若双击无反应或闪退：先装 VC++ x64 运行库（见上），再试 bat。",
         ]
     else:
         need = [
             "一、对方电脑需要",
             "  1. Windows 10/11 64 位 + 自备 64 位 Python 3.10+",
-            "  2. VC++ 2015–2022 x64 运行库",
+            "  2. 不需要 Visual Studio",
             "",
             "二、怎么启动",
             "  双击 MusicEditing.exe 或「启动 MusicEditing.bat」",
@@ -609,7 +690,7 @@ def _write_readme(
         f"  models: {'已包含' if with_models else '未包含'}",
         "",
         "五、常见问题",
-        "  - 闪退：装 VC++ 2015–2022 x64 运行库（少数机器缺）。",
+        "  - 闪退：极少数机缺系统运行库时，装「VC++ 可再发行组件 x64」（不是 Visual Studio）。",
         "  - 抖音失败：下载页导入 Netscape cookies.txt。",
         "  - 演讲慢：个人中心开 GPU，准备 .gguf；需驱动支持 Vulkan。",
         "",
@@ -745,6 +826,8 @@ def pack(
     else:
         print("  （跳过 onnxruntime_providers_cuda/tensorrt，可用 --with-cuda-ort）")
 
+    _bundle_vcruntime(out_bin)
+
     bin_res = BIN / "resources"
     if bin_res.is_dir():
         _copy_tree(bin_res, out_bin / "resources")
@@ -871,6 +954,11 @@ def pack(
                 _die("严格去源码需要内嵌 Python（不要加 --no-embed-python）")
 
     _write_launcher(out_root, embed_python=embed_python)
+    # OTA 助手（系统 PowerShell 执行；需随包带走）
+    helper_src = ROOT / "scripts" / "ota_apply_helper.ps1"
+    if helper_src.is_file():
+        _copy_file(helper_src, out_root / "scripts" / "ota_apply_helper.ps1")
+        print("[拷贝] scripts/ota_apply_helper.ps1（OTA 自动替换）", flush=True)
     if do_sign:
         exe = out_root / "MusicEditing.exe"
         if exe.is_file():

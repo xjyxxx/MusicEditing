@@ -11,5 +11,5 @@ if errorlevel 1 (
 )
 echo.
 echo 把 dist\ 里的 MusicEditing_Share_*.zip 发给对方即可
-echo 对方解压后双击 MusicEditing.exe；闪退请装 VC++ 2015-2022 x64
+echo 对方：解压 -^> 双击 MusicEditing.exe（无需装 VS / Python）
 exit /b 0

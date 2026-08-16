@@ -6,4 +6,5 @@ python scripts\pack_for_share.py %*
 if errorlevel 1 exit /b 1
 echo.
 echo 输出: dist\MusicEditing_Share_*.zip
+echo 对方无需安装 Visual Studio / Python，解压双击即可
 exit /b 0

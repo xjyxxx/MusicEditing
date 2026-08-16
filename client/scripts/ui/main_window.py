@@ -1030,6 +1030,20 @@ class MainWindow(QMainWindow):
         ))
         # 配置了 update_manifest_url 且开启 startup 时，空闲静默检查（不打断首屏）
         QTimer.singleShot(3500, self._startup_update_check)
+        QTimer.singleShot(2500, self._startup_ota_pending_hint)
+
+    def _startup_ota_pending_hint(self) -> None:
+        try:
+            from core.ota_update import resume_pending_if_any
+
+            tip = resume_pending_if_any()
+            if tip:
+                self._status_label.setText("OTA: 检测到未完成升级标记")
+                import logging
+
+                logging.getLogger("MusicEditing.ota").warning("%s", tip)
+        except Exception:
+            pass
 
     def _startup_update_check(self) -> None:
         try:
@@ -1047,19 +1061,9 @@ class MainWindow(QMainWindow):
                     self._status_label.setText(info.message)
                 return
             remember_notified_version(info.remote_version)
-            if info.url:
-                from PySide6.QtGui import QDesktopServices
-                from PySide6.QtCore import QUrl
+            from ui.update_dialog import prompt_update_result
 
-                r = QMessageBox.question(
-                    self,
-                    "发现新版本",
-                    f"{info.message}\n\n{info.notes}\n\n是否打开下载页？",
-                )
-                if r == QMessageBox.StandardButton.Yes:
-                    QDesktopServices.openUrl(QUrl(info.url))
-            else:
-                QMessageBox.information(self, "发现新版本", f"{info.message}\n\n{info.notes}")
+            prompt_update_result(self, info)
         except Exception:
             pass
 
@@ -1424,28 +1428,9 @@ class MainWindow(QMainWindow):
                 remember_notified_version(info.remote_version)
             except Exception:
                 pass
-        if not info.configured:
-            from core.update_check import setup_help_text
+        from ui.update_dialog import prompt_update_result
 
-            QMessageBox.information(
-                self,
-                "检查更新",
-                f"{info.message}\n\n{setup_help_text()}",
-            )
-            return
-        if info.has_update and info.url:
-            from PySide6.QtGui import QDesktopServices
-            from PySide6.QtCore import QUrl
-
-            r = QMessageBox.question(
-                self,
-                "发现新版本",
-                f"{info.message}\n\n{info.notes}\n\n是否打开下载页？",
-            )
-            if r == QMessageBox.StandardButton.Yes:
-                QDesktopServices.openUrl(QUrl(info.url))
-            return
-        QMessageBox.information(self, "检查更新", info.message)
+        prompt_update_result(self, info)
 
     @Slot()
     def _on_about(self):

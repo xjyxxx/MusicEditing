@@ -218,6 +218,7 @@ MainWindow.shutdown()
 | Inno 安装包 | ✅ | `scripts/build_installer.bat` + `scripts/inno/MusicEditing.iss` |
 | 一键发版 | ✅ | `release_oneclick.py`：回归→pack→accept→Inno→清单 |
 | 自动更新检查 | ✅ | `update_check.py`；`publish_update_manifest` / `serve_update_channel`；启动静默检查；帮助/个人中心 |
+| OTA 升级模板 | ✅ | 下载+SHA+便携 zip 退出后替换（`ota_update.py` / `ota_apply_helper.ps1`）；见 §5.3 |
 | 卡密激活服务 | ✅ | `scripts/license_server/`（签发 + POST /v1/activate + 演示购买页） |
 | llama.cpp GPU 推理 | ✅ | 推荐 Vulkan（免 Toolkit）；或 CUDA；`MUSIC_LLM_N_GPU_LAYERS`；`setup_llama_gpu.py` |
 | 开箱依赖向导 | ✅ | 缺啥摘要 + **试跑 15 秒成片**；模型/GPU/Cookie/yt-dlp/场景/LLM（§5.18） |

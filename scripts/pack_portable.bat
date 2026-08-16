@@ -12,5 +12,5 @@ if errorlevel 1 (
 )
 echo.
 echo 输出在 dist\ 目录 — 对方解压后双击 MusicEditing.exe
-echo 闪退请装 VC++ 2015-2022 x64；SmartScreen 点「仍要运行」
+echo 对方无需装 Visual Studio / Python；极少数闪退再装 VC++ 可再发行组件（不是 VS）
 exit /b 0

@@ -43,6 +43,12 @@ class UpdateInfo:
     url: str = ""
     notes: str = ""
     message: str = ""
+    sha256: str = ""
+    size_bytes: int = 0
+    package_kind: str = ""
+    channel: str = ""
+    # 原始 manifest 片段，供 OTA 模板使用
+    manifest_extra: dict | None = None
 
 
 def manifest_url() -> str:
@@ -99,6 +105,9 @@ def setup_help_text() -> str:
         "本地联调：\n"
         "  python scripts/serve_update_channel.py\n"
         "  update_manifest_url=http://127.0.0.1:8777/musicediting_update.json\n\n"
+        "OTA 预留（下载到暂存 + 手动覆盖；默认不自动替换）：\n"
+        "  ota_apply_enabled=true   # 半自动提示；inplace 仍未实现\n"
+        "  详见 docs/design/distribution.md §5.3\n\n"
         "详见 docs/design/distribution.md §5。"
     )
 
@@ -136,6 +145,14 @@ def check_for_update(local_version: str, *, timeout: float = 8.0) -> UpdateInfo:
         remote = str(data.get("version") or "").strip()
         dl = str(data.get("url") or data.get("download_url") or "").strip()
         notes = str(data.get("notes") or data.get("changelog") or "").strip()
+        sha256 = str(data.get("sha256") or data.get("hash") or "").strip().lower()
+        package_kind = str(data.get("package_kind") or data.get("kind") or "").strip()
+        channel = str(data.get("channel") or "").strip()
+        size_bytes = 0
+        try:
+            size_bytes = int(data.get("size_bytes") or data.get("size") or 0)
+        except (TypeError, ValueError):
+            size_bytes = 0
         if not remote:
             raise ValueError("缺少 version 字段")
         # 相对 url：拼到 manifest 所在目录
@@ -150,6 +167,11 @@ def check_for_update(local_version: str, *, timeout: float = 8.0) -> UpdateInfo:
             remote_version=remote,
             url=dl,
             notes=notes,
+            sha256=sha256,
+            size_bytes=size_bytes,
+            package_kind=package_kind,
+            channel=channel,
+            manifest_extra=data,
             message=(
                 f"发现新版本 {remote}（当前 {local}）"
                 if newer

@@ -42,7 +42,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
     if (GetFileAttributesW(pythonw) == INVALID_FILE_ATTRIBUTES) {
         fail(L"Missing runtime\\pythonw.exe\n"
              L"Please use a full portable package.\n"
-             L"If the app flashes and exits: install VC++ 2015-2022 x64.");
+             L"Do NOT install Visual Studio.\n"
+             L"If the app flashes and exits: install VC++ Redistributable x64\n"
+             L"(small runtime, not Visual Studio).");
         return 2;
     }
 
@@ -79,9 +81,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
     if (!CreateProcessW(
             pythonw, cmdline, NULL, NULL, FALSE, 0, NULL, exe_path, &si, &pi)) {
         fail(L"Failed to start runtime\\pythonw.exe\n"
-             L"1) Install VC++ 2015-2022 x64 redistributable\n"
-             L"2) If SmartScreen blocked the zip, unblock / re-extract\n"
-             L"3) Try 「启动 MusicEditing.bat」");
+             L"1) Do NOT install Visual Studio\n"
+             L"2) If flash-exit: install VC++ Redistributable x64 (small runtime)\n"
+             L"3) If SmartScreen blocked the zip, unblock / re-extract\n"
+             L"4) Try 「启动 MusicEditing.bat」");
         return 4;
     }
 

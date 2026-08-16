@@ -609,28 +609,9 @@ class ProfilePage(QWidget):
                 remember_notified_version(info.remote_version)
             except Exception:
                 pass
-        if not info.configured:
-            from core.update_check import setup_help_text
+        from ui.update_dialog import prompt_update_result
 
-            QMessageBox.information(
-                self,
-                "检查更新",
-                f"{info.message}\n\n{setup_help_text()}",
-            )
-            return
-        if info.has_update and info.url:
-            from PySide6.QtGui import QDesktopServices
-            from PySide6.QtCore import QUrl
-
-            r = QMessageBox.question(
-                self,
-                "发现新版本",
-                f"{info.message}\n\n{info.notes}\n\n是否打开下载页？",
-            )
-            if r == QMessageBox.StandardButton.Yes:
-                QDesktopServices.openUrl(QUrl(info.url))
-            return
-        QMessageBox.information(self, "检查更新", info.message)
+        prompt_update_result(self, info)
 
     @Slot()
     def _on_open_wizard(self):

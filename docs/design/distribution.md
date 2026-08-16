@@ -51,6 +51,24 @@ python scripts\pack_for_share.py --profile slim
 
 ---
 
+## 1.2 最终用户要装什么？（结论：基本不用）
+
+| 角色 | 需要 |
+|------|------|
+| **开发者本机** | Visual Studio / CMake / Python（用来编译与打包） |
+| **收到 zip 的对方** | 只要 **Windows 10/11 64 位**；解压 → 双击 `MusicEditing.exe` |
+
+对方**不需要**安装：Visual Studio、Python、CUDA Toolkit、Vulkan SDK。
+
+打包脚本会：
+
+1. 内嵌 `runtime\`（官方 embeddable Python + PySide6 等）  
+2. 尽量把 **VC++ CRT DLL**（`vcruntime140.dll` / `msvcp140.dll` 等）拷进引擎目录——这是「可再发行运行库」，**不是** Visual Studio  
+
+极少数干净机仍闪退时，再装微软官网的「Visual C++ 2015–2022 **可再发行组件** x64」（几 MB），仍然**不是**装 VS。
+
+---
+
 ## 2. 代码签名
 
 1. 购买 Windows 代码签名证书（OV/EV，支持 Authenticode）  
@@ -157,6 +175,31 @@ REM   update_check_on_startup=true
 
 **注意：** 仓库默认 `app.conf` 不要保留 `127.0.0.1` 联调地址（发版/给别人用会误弹更新）。本地联调时临时取消注释即可。
 
+### 5.3 OTA 远程升级
+
+| 阶段 | 状态 | 说明 |
+|------|------|------|
+| 检查 manifest | ✅ | `core/update_check.py` |
+| 下载到暂存 | ✅ | `%LOCALAPPDATA%/MusicEditing/ota/<ver>/` |
+| SHA256 校验 | ✅ | manifest 含 `sha256` 时 |
+| 打开下载页 | ✅ | 帮助 / 个人中心 / 启动提示 |
+| **便携 zip 自动替换** | ✅ | 「下载并升级」→ 解压 → `pending_ota.json` → `ota_apply_helper.ps1` 等进程退出 → 改名替换 → 拉起 `MusicEditing.exe` |
+| Inno Setup | ✅ 半自动 | 下载后 `os.startfile` 打开安装包 |
+| 启动器内嵌热切换 | ⏳ | 当前用系统 PowerShell 助手，不改 `portable_launcher.c` |
+
+流程：
+
+1. `publish_update_manifest.py` 生成带 `sha256` / `package_kind` / `ota.apply_mode` 的 JSON  
+2. 客户端「检查更新」→ **下载并升级…** → 确认「立即升级并退出」  
+3. 助手日志：`%LOCALAPPDATA%\MusicEditing\ota\apply_helper.log`  
+4. 旧目录备份名：`原目录名.ota_bak_时间戳`（成功后会尽量删除）
+
+配置：`ota_apply_enabled`（下载后默认可走 zip 半自动）、`ota_staging_dir`。  
+**注意：** 请对**打包后的便携目录**使用；不要对开发仓库根目录点「立即升级」。  
+包内需带 `scripts/ota_apply_helper.ps1`（`pack_portable` / `pack_for_share` 已拷贝）。
+
+冒烟：`python tests/regression/test_ota_update.py`
+
 ---
 
 ## 6. 上线跑通清单（P0→P3）
@@ -177,9 +220,10 @@ REM   update_check_on_startup=true
 1. 另找一台未装本项目依赖的 Win10/11 x64  
 2. 解压 `MusicEditing_Portable_*.zip` 或跑 `MusicEditing_Setup_*.exe`  
 3. 若 SmartScreen：更多信息 → 仍要运行  
-4. 缺 VC++：装 [VC++ 2015–2022 x64](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)  
-5. 双击 `MusicEditing.exe`：打开 `tests\test_video.mp4`（包内若有）→ 播放 / Seek  
-6. 个人中心看试用配额；帮助「检查更新」在未配置 URL 时应提示未配置（勿指 127.0.0.1）
+4. 双击 `MusicEditing.exe`（**无需装 Visual Studio / Python**）  
+5. 若闪退：装 [VC++ 可再发行组件 x64](https://learn.microsoft.com/zh-cn/cpp/windows/latest-supported-vc-redist)（小运行库，不是 VS）  
+6. 打开 `tests\test_video.mp4`（包内若有）→ 播放 / Seek  
+7. 个人中心看试用配额；帮助「检查更新」在未配置 URL 时应提示未配置（勿指 127.0.0.1）
 
 本机预检：
 

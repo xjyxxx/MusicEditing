@@ -778,7 +778,8 @@ scripts/run_regression_short.bat
 
 发版前清单见 [release_checklist.md](release_checklist.md)；分发/安装/卡密/自动更新见 [distribution.md](distribution.md)（含 §6 上线跑通表）。
 
-**自动更新上线：** `publish_update_manifest.py` 生成 `dist/update/musicediting_update.json`；`serve_update_channel.py` 本地联调；客户端 `update_manifest_url` + 可选 `update_check_on_startup`（同版本只弹一次）。发版包勿留 `127.0.0.1` 联调地址。
+**自动更新上线：** `publish_update_manifest.py` 生成 `dist/update/musicediting_update.json`（含 `sha256` / `package_kind` / `ota`）；`serve_update_channel.py` 本地联调；客户端 `update_manifest_url` + 可选 `update_check_on_startup`（同版本只弹一次）。  
+**OTA：** `core/ota_update.py` 下载校验；UI「下载并升级」可调度 `scripts/ota_apply_helper.ps1` 在退出后替换便携目录并重启。详见 [distribution.md](distribution.md) §5.3。发版包勿留 `127.0.0.1` 联调地址。
 
 **长页滚动：** 封面工厂整页可滚；音频趣味 / BGM / 溯源各 Tab、队列右侧参数区用 `wrap_tab_scroll`，避免矮窗裁半。
 
