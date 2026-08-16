@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from core.image_loader import load_preview, probe_size
 from ui.elided_label import ElidedPathLabel
-from ui.exif_panel import ExifPanel, attach_exif_overlay
+from ui.exif_panel import ExifPanel, attach_exif_corner
 from ui.theme import BG, PLAYER_BG, TEXT, TEXT_MUTED, enhance_page_stylesheet
 from ui.studio_kit import make_fixed_ai_hint, make_studio_hero, set_ai_hint_text, studio_page_stylesheet
 from ui.workflow_link import TAB_WATERMARK, ask_video_handoff
@@ -212,6 +212,8 @@ class SideBySideCompare(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setMinimumHeight(280)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(4)
@@ -443,7 +445,10 @@ class EnhancePage(QWidget):
 
     def _build_image_tab(self) -> QWidget:
         page = QWidget()
-        layout = QVBoxLayout(page)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        body = QWidget()
+        layout = QVBoxLayout(body)
         layout.setSpacing(8)
 
         top = QHBoxLayout()
@@ -462,8 +467,11 @@ class EnhancePage(QWidget):
         layout.addWidget(self._img_meta)
 
         self._img_compare = SideBySideCompare()
+        self._img_compare.setMinimumHeight(320)
+        self._img_compare.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._img_exif = ExifPanel(lambda: self._vm.bridge)
-        layout.addWidget(attach_exif_overlay(self._img_compare, self._img_exif), 1)
+        # 右上角浮层：不占纵向，避免对比区被挤成一条缝
+        layout.addWidget(attach_exif_corner(self._img_compare, self._img_exif), 1)
 
         layout.addWidget(self._build_mode_panel("img", default_ai=True))
 
@@ -484,6 +492,10 @@ class EnhancePage(QWidget):
         actions.addWidget(self._btn_folder_result)
         actions.addStretch()
         layout.addLayout(actions)
+
+        scroll = QScrollArea()
+        _paint_scroll_dark(scroll, body)
+        outer.addWidget(scroll)
         return page
 
     def _build_video_tab(self) -> QWidget:

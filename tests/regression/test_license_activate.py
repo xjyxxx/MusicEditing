@@ -70,6 +70,24 @@ def main() -> int:
         except Exception:
             ok("reject short key")
 
+        # 支付成功后发卡钩子
+        issue_url = f"http://127.0.0.1:{port}/v1/issue"
+        issue_body = json.dumps(
+            {"product": "MusicEditing", "note": "test-order"}
+        ).encode("utf-8")
+        req3 = urllib.request.Request(
+            issue_url,
+            data=issue_body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req3, timeout=5) as resp:
+            issued = json.loads(resp.read().decode("utf-8"))
+        if not issued.get("ok") or not issued.get("key"):
+            fail(f"issue failed: {issued}")
+            return 1
+        ok(f"issue {issued['key'][:8]}…")
+
         httpd.shutdown()
     finally:
         td.cleanup()

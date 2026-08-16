@@ -203,17 +203,26 @@ def _enable_embed_site(runtime: Path) -> None:
     print(f"[嵌入] 已启用 site: {pth.name}", flush=True)
 
 
-def _ignore_iphoto(dirpath: str, names: list[str]) -> list[str]:
-    """Vendor 图库：不带 maps/font（~100MB）与 OBF extension。"""
+def _ignore_iphoto(dirpath: str, names: list[str], *, with_maps: bool = False) -> list[str]:
+    """Vendor 图库：默认不带 maps/font 与 OBF；--with-maps 时保留 font。"""
     skip = _ignore_pycache(dirpath, names)
     base = Path(dirpath).name.lower()
     for n in names:
         low = n.lower()
-        if low in (".git", ".github", "tests", "docs", "font"):
+        if low in (".git", ".github", "tests", "docs"):
+            skip.append(n)
+        if not with_maps and low == "font":
             skip.append(n)
         if base == "tiles" and low == "extension":
             skip.append(n)
     return skip
+
+
+def _make_ignore_iphoto(*, with_maps: bool):
+    def _ign(dirpath: str, names: list[str]) -> list[str]:
+        return _ignore_iphoto(dirpath, names, with_maps=with_maps)
+
+    return _ign
 
 
 def _strip_python_sources(out_root: Path, *, py_exe: Path) -> None:
@@ -336,7 +345,12 @@ def _remove_shipped_scenedetect_sources(out_root: Path) -> None:
         shutil.rmtree(sd, ignore_errors=True)
 
 
-def _embed_python_runtime(out_root: Path, *, with_scenedetect: bool) -> Path:
+def _embed_python_runtime(
+    out_root: Path,
+    *,
+    with_scenedetect: bool,
+    with_iphoto_extras: bool = False,
+) -> Path:
     """下载官方 embeddable Python，预装依赖（真正可拷到别人电脑）。"""
     if struct_calcsize_p() != 8:
         _die("打包机必须是 64 位 Python")
@@ -376,10 +390,23 @@ def _embed_python_runtime(out_root: Path, *, with_scenedetect: bool) -> Path:
         print("[嵌入] pip 安装 PySceneDetect", flush=True)
         _run([str(py), "-m", "pip", "install", str(sd)])
 
-    _run([
-        str(py), "-c",
-        "import PySide6, numpy; print('runtime OK', PySide6.__version__)",
-    ])
+    if with_iphoto_extras:
+        iphoto_req = ROOT / "client" / "scripts" / "requirements-iphoto.txt"
+        if iphoto_req.is_file():
+            print("[嵌入] pip 安装 requirements-iphoto（HEIC 等）…", flush=True)
+            _run([str(py), "-m", "pip", "install", "-r", str(iphoto_req)])
+            _copy_file(iphoto_req, out_root / "client" / "scripts" / "requirements-iphoto.txt")
+        else:
+            print("[警告] 未找到 requirements-iphoto.txt，跳过图库 extras", flush=True)
+
+    check = "import PySide6, numpy; print('runtime OK', PySide6.__version__)"
+    if with_iphoto_extras:
+        check = (
+            "import PySide6, numpy, importlib.util; "
+            "h=importlib.util.find_spec('pillow_heif'); "
+            "print('runtime OK', PySide6.__version__, 'pillow_heif', bool(h))"
+        )
+    _run([str(py), "-c", check])
     return py
 
 
@@ -627,6 +654,8 @@ def _write_readme(
     with_models: bool,
     embed_python: bool,
     ship_source: bool = False,
+    with_iphoto_extras: bool = False,
+    with_maps: bool = False,
 ) -> None:
     txt = out_root / "使用说明.txt"
     if embed_python:
@@ -693,6 +722,10 @@ def _write_readme(
         "  - 闪退：极少数机缺系统运行库时，装「VC++ 可再发行组件 x64」（不是 Visual Studio）。",
         "  - 抖音失败：下载页导入 Netscape cookies.txt。",
         "  - 演讲慢：个人中心开 GPU，准备 .gguf；需驱动支持 Vulkan。",
+        "  - 照片图库：HEIC/地点离线地图为可选依赖；缺 HEIC 编解码或 maps/font 时会降级，",
+        "    不等于图库损坏。完整能力见开发机 requirements-iphoto / 开箱向导提示。",
+        f"    本包: iphoto_extras={'已装' if with_iphoto_extras else '未装'}  "
+        f"maps/font={'已含' if with_maps else '未含（默认瘦包）'}",
         "",
         f"打包时间: {_dt.datetime.now().strftime('%Y-%m-%d %H:%M')}",
         "",
@@ -790,6 +823,8 @@ def pack(
     do_sign: bool = False,
     profile: str = "standard",
     strict_no_source: bool = False,
+    with_iphoto_extras: bool = False,
+    with_maps: bool = False,
 ) -> Path:
     if not BIN.is_dir():
         _die(f"未找到 {BIN}，请先 .\\build_x64.bat 或 setup_llama_gpu.py vulkan")
@@ -890,8 +925,12 @@ def pack(
     # 照片图库 vendor（Python；font/OBF 不入库）
     iphoto_src = ROOT / "third_party" / "iphoto" / "src"
     if (iphoto_src / "iPhoto").is_dir():
-        print("[拷贝] third_party/iphoto/src（无 maps/font）")
-        _copy_tree(iphoto_src, tp / "iphoto" / "src", ignore=_ignore_iphoto)
+        print("[拷贝] third_party/iphoto/src" + ("（含 maps/font）" if with_maps else "（无 maps/font）"))
+        _copy_tree(
+            iphoto_src,
+            tp / "iphoto" / "src",
+            ignore=_make_ignore_iphoto(with_maps=with_maps),
+        )
         pin = ROOT / "third_party" / "iphoto" / "VENDOR_PIN.md"
         if pin.is_file():
             _copy_file(pin, tp / "iphoto" / "VENDOR_PIN.md")
@@ -935,7 +974,11 @@ def pack(
             break
 
     if embed_python:
-        py = _embed_python_runtime(out_root, with_scenedetect=with_scenedetect)
+        py = _embed_python_runtime(
+            out_root,
+            with_scenedetect=with_scenedetect,
+            with_iphoto_extras=with_iphoto_extras,
+        )
         if with_scenedetect:
             _remove_shipped_scenedetect_sources(out_root)
         if not ship_source:
@@ -971,6 +1014,8 @@ def pack(
         with_models=with_models,
         embed_python=embed_python,
         ship_source=ship_source,
+        with_iphoto_extras=with_iphoto_extras,
+        with_maps=with_maps,
     )
     # 档位说明追加
     readme = out_root / "使用说明.txt"
@@ -1048,6 +1093,16 @@ def main() -> int:
         help="保留可读 .py 源码（默认删除；禁止外发，仅本机调试）",
     )
     ap.add_argument(
+        "--with-iphoto-extras",
+        action="store_true",
+        help="向 runtime 安装 requirements-iphoto（HEIC 等，体积增大）",
+    )
+    ap.add_argument(
+        "--with-maps",
+        action="store_true",
+        help="拷贝 iPhoto maps/font（若本机有；默认不拷以保瘦包）",
+    )
+    ap.add_argument(
         "--no-strict-no-source",
         action="store_false",
         dest="strict_no_source",
@@ -1085,6 +1140,8 @@ def main() -> int:
         do_sign=args.sign,
         profile=args.profile,
         strict_no_source=args.strict_no_source,
+        with_iphoto_extras=args.with_iphoto_extras,
+        with_maps=args.with_maps,
     )
     print(
         "\n发给别人: 整个文件夹或 .zip；"

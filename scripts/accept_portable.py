@@ -45,16 +45,39 @@ def _find_latest_portable() -> Path | None:
     return max(cands, key=lambda p: p.stat().st_mtime)
 
 
+def _signature_status(path: Path) -> str:
+    """返回 Valid / NotSigned / Unknown（仅 Windows）。"""
+    if sys.platform != "win32" or not path.is_file():
+        return "Unknown"
+    try:
+        import subprocess
+
+        ps = (
+            f"(Get-AuthenticodeSignature -LiteralPath '{path}').Status.ToString()"
+        )
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+        st = (r.stdout or "").strip()
+        return st or "Unknown"
+    except Exception:
+        return "Unknown"
+
+
 def _human_checklist() -> None:
     print(
         """
 ======== 干净机人工验收（约 5 分钟）========
 1. 解压到无空格短路径，例如 D:\\ME\\
-2. 若 SmartScreen「已保护你的电脑」→ 更多信息 → 仍要运行
-3. 双击 MusicEditing.exe（无黑框）；闪退则装 VC++ 2015-2022 x64：
-   https://learn.microsoft.com/zh-cn/cpp/windows/latest-supported-vc-redist
+2. 若 SmartScreen「已保护你的电脑」→ 更多信息 → 仍要运行（未签名时正常）
+3. 双击 MusicEditing.exe（无黑框）；闪退则装 VC++ 可再发行组件 x64（不是 VS）
 4. 首页能开；帮助→个人中心 能进；试跑/切片任选一
-5. 正式发版前：有证书则 pack 时加 --sign
+5. 正式发版：有证书则 pack --sign，且 build_installer 后会再签 Setup；无证书跳过属正常
 ==========================================
 """,
         flush=True,
@@ -113,6 +136,17 @@ def main() -> int:
         exe = root / "MusicEditing.exe"
         if exe.is_file():
             print(f"[验收] MusicEditing.exe  {exe.stat().st_size} bytes", flush=True)
+            print(f"[验收] MusicEditing.exe 签名状态: {_signature_status(exe)}", flush=True)
+        setups = sorted(
+            (ROOT / "dist").glob("MusicEditing_Setup_*.exe"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if setups:
+            print(
+                f"[验收] 最近 Setup: {setups[0].name} 签名状态: {_signature_status(setups[0])}",
+                flush=True,
+            )
         print("[验收] PASS", flush=True)
         _human_checklist()
         return 0

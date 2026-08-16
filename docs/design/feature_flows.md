@@ -773,7 +773,9 @@ scripts/run_regression_short.bat
   ├─ tests/regression/test_trial_policy.py        试用门禁 / 配额 / 卡密
   ├─ tests/regression/test_license_activate.py    激活服务 /v1/activate
   ├─ tests/regression/test_pack_verify.py         便携包验收逻辑
-  └─ tests/regression/test_update_check.py        自动更新 manifest
+  ├─ tests/regression/test_update_check.py        自动更新 manifest
+  ├─ tests/regression/test_ota_update.py          OTA sha/ZipSlip/取消
+  └─ tests/regression/test_ota_apply_helper.py    OTA 助手拒坏源 / bak 回滚
 ```
 
 发版前清单见 [release_checklist.md](release_checklist.md)；分发/安装/卡密/自动更新见 [distribution.md](distribution.md)（含 §6 上线跑通表）。
@@ -783,17 +785,20 @@ scripts/run_regression_short.bat
 
 **长页滚动：** 封面工厂整页可滚；音频趣味 / BGM / 溯源各 Tab、队列右侧参数区用 `wrap_tab_scroll`，避免矮窗裁半。
 
-**便携分发：** 外发用 `pack_for_share`（严格无业务 `.py`）；或 `pack_portable.py --profile slim|standard|full`；`accept_portable.py` 验收；`build_installer.bat` 打 Inno；可选 `--sign`。详见 [distribution.md](distribution.md) §1.1。
+**便携分发：** 外发用 `pack_for_share`（严格无业务 `.py`；可选 `--with-iphoto-extras` / `--with-maps`）；或 `pack_portable.py --profile slim|standard|full`；`accept_portable.py` 验收；`build_installer.bat` 打 Inno 并尝试签 Setup；可选 `--sign`。详见 [distribution.md](distribution.md) §1.1 / §5.4。
 
 **诊断包：** 个人中心「一键打包诊断日志」→ `core/diag_pack.py`  
-写入桌面（或 `docs/diagnostics/`）zip：`log_media_player` / `log_media_cli` / Python 日志、`ort_ep_report.json`、`diag_snapshot.json`。  
+写入桌面（或 `docs/diagnostics/`）zip：`log_media_player` / `log_media_cli` / Python 日志、`ort_ep_report.json`、`diag_snapshot.json`。
+
+**流畅与内存：** 预热延后、MediaBridge 延后、**图库缓存模式**（默认常驻休眠）、临时前缀扩展；见 [mvvm_and_ui.md](mvvm_and_ui.md) 启动流畅度。
+
 `MediaBridge` 启动时为 CLI 设置 `MUSIC_LOG_FILE=docs/log_media_cli.txt`。
 
 **资源清理：**
 
 | 能力 | 实现 |
 |------|------|
-| 超分/去水印临时帧 | 正常路径 `finally` 删除；启动清理 `music_sr_*` 等残留（>6h）；个人中心可手动全清 |
+| 超分/去水印临时帧 | 正常路径 `finally` 删除；启动清理 `music_sr_*` / `me_cover_` / `music_preview_` 等残留（>6h）；个人中心可手动全清 |
 | 队列产物上限 | `PipelineSettings.max_output_gb`（默认 20）；超限按最旧媒体文件删；队列页可改 |
 
 | 资源 | 路径 |

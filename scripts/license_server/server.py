@@ -5,6 +5,9 @@
 协议（与 client/scripts/core/network.py 对齐）:
   POST /v1/activate
     {"key","machine","product"} → {"ok": true|false, "message": "..."}
+  POST /v1/issue   （支付成功后发卡钩子，演示用）
+    {"product","note","token"?} → {"ok": true, "key": "..."}
+    若环境变量 MUSIC_LICENSE_ISSUE_TOKEN 非空，则要求 body.token 一致。
 
 另提供简易购买说明页 GET / （演示用，非真实支付收银台）。
 
@@ -20,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import secrets
 import string
 import sys
@@ -56,9 +60,23 @@ def issue_key() -> str:
     while True:
         raw = "".join(secrets.choice(alphabet) for _ in range(20))
         if any(c.isalpha() for c in raw) and any(c.isdigit() for c in raw):
-            # 分组便于阅读：XXXX-XXXX-XXXX-XXXX-XXXX
             parts = [raw[i : i + 4] for i in range(0, 20, 4)]
             return "-".join(parts)
+
+
+def persist_issued_key(*, note: str = "") -> str:
+    """写入 keys.json 并返回卡密明文。"""
+    keys: dict = _load_json(KEYS_PATH, {})
+    if not isinstance(keys, dict):
+        keys = {}
+    k = issue_key()
+    keys[normalize_key(k)] = {
+        "active": True,
+        "allow_rebind": True,
+        "note": note or "issue-api",
+    }
+    _save_json(KEYS_PATH, keys)
+    return k
 
 
 SHOP_HTML = """<!DOCTYPE html>
@@ -71,23 +89,52 @@ body{font-family:Segoe UI,sans-serif;max-width:640px;margin:40px auto;padding:0 
 code,pre{background:#f4f4f5;padding:2px 6px;border-radius:4px}
 .box{border:1px solid #ddd;border-radius:10px;padding:16px;margin:16px 0}
 h1{font-size:1.4rem}
+button{padding:8px 14px;font-size:1rem;cursor:pointer}
+#out{margin-top:12px;font-size:1.1rem;word-break:break-all}
 </style>
 </head>
 <body>
 <h1>MusicEditing 正式版</h1>
-<p>本页为<strong>演示购买入口</strong>。真实收款请换成你的商店（微信/支付宝/Lemon/Stripe 等），支付成功后把卡密发给用户。</p>
+<p>本页为<strong>演示购买入口</strong>。真实收款请换成你的商店（微信/支付宝/Lemon/Stripe 等），
+支付成功后由商店 webhook 调 <code>POST /v1/issue</code> 发卡，再把卡密发给用户。</p>
 <div class="box">
 <p><strong>客户端配置</strong>（<code>app.conf</code>）：</p>
 <pre>license_purchase_url=http://本机或域名:8765/
 license_server_url=http://本机或域名:8765</pre>
-<p>个人中心 →「打开购买页」会打开上面的购买 URL；兑换卡密时请求 <code>POST /v1/activate</code>。</p>
+<p>个人中心 →「打开购买页」；兑换时请求 <code>POST /v1/activate</code>。</p>
 </div>
 <div class="box">
-<p><strong>发卡</strong>（你在服务器上执行）：</p>
-<pre>python scripts/license_server/gen_keys.py --count 5</pre>
-<p>把生成的卡密发给付费用户，对方粘贴到个人中心兑换。</p>
+<p><strong>演示：模拟支付成功并发卡</strong></p>
+<p>生产请设环境变量 <code>MUSIC_LICENSE_ISSUE_TOKEN</code>，并在 JSON 里带同名 <code>token</code>。</p>
+<button type="button" id="btn">模拟支付成功 → 发卡</button>
+<div id="out"></div>
 </div>
-<p style="color:#666;font-size:0.9rem">闪退请装 VC++ 2015–2022 x64；SmartScreen 点「仍要运行」。</p>
+<div class="box">
+<p><strong>命令行发卡</strong>：</p>
+<pre>python scripts/license_server/gen_keys.py --count 5</pre>
+</div>
+<p style="color:#666;font-size:0.9rem">闪退请装 VC++ 可再发行组件 x64（不是 Visual Studio）；SmartScreen 点「仍要运行」。</p>
+<script>
+document.getElementById('btn').onclick = async () => {
+  const out = document.getElementById('out');
+  out.textContent = '请求中…';
+  try {
+    const r = await fetch('/v1/issue', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({product: 'MusicEditing', note: 'shop-demo'})
+    });
+    const j = await r.json();
+    if (j.ok && j.key) {
+      out.textContent = '卡密（请复制到个人中心）：' + j.key;
+    } else {
+      out.textContent = '失败：' + (j.message || r.status);
+    }
+  } catch (e) {
+    out.textContent = '网络错误：' + e;
+  }
+};
+</script>
 </body>
 </html>
 """
@@ -130,9 +177,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
-        if path != "/v1/activate":
-            self._send_json(404, {"ok": False, "message": "not found"})
-            return
         length = int(self.headers.get("Content-Length") or "0")
         raw = self.rfile.read(length) if length > 0 else b"{}"
         try:
@@ -140,6 +184,14 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._send_json(400, {"ok": False, "message": "invalid json"})
             return
+
+        if path == "/v1/issue":
+            self._handle_issue(payload)
+            return
+        if path != "/v1/activate":
+            self._send_json(404, {"ok": False, "message": "not found"})
+            return
+
         key = normalize_key(str(payload.get("key") or ""))
         machine = str(payload.get("machine") or "").strip()
         product = str(payload.get("product") or "")
@@ -153,9 +205,7 @@ class Handler(BaseHTTPRequestHandler):
         keys: dict = _load_json(KEYS_PATH, {})
         if not isinstance(keys, dict):
             keys = {}
-        # keys.json: { "NORMALIZED_KEY": {"note": "...", "active": true} }
         meta = keys.get(key) or keys.get(key.replace("-", ""))
-        # also try without dashes in stored form
         if meta is None:
             for k, v in keys.items():
                 if normalize_key(k).replace("-", "") == key.replace("-", ""):
@@ -172,7 +222,6 @@ class Handler(BaseHTTPRequestHandler):
         canon = key.replace("-", "")
         prev = bindings.get(canon)
         if prev and machine and prev != machine:
-            # 默认允许换机（演示）；生产可改为拒绝
             allow = meta.get("allow_rebind", True)
             if not allow:
                 self._send_json(403, {"ok": False, "message": "卡密已绑定其他设备"})
@@ -183,6 +232,31 @@ class Handler(BaseHTTPRequestHandler):
 
         self._send_json(200, {"ok": True, "message": "联网激活成功", "auth_type": "正式版"})
 
+    def _handle_issue(self, payload: dict) -> None:
+        product = str(payload.get("product") or "MusicEditing")
+        if product != "MusicEditing":
+            self._send_json(400, {"ok": False, "message": "unknown product"})
+            return
+        expect = (os.environ.get("MUSIC_LICENSE_ISSUE_TOKEN") or "").strip()
+        got = str(payload.get("token") or "").strip()
+        if expect and got != expect:
+            self._send_json(403, {"ok": False, "message": "issue token 无效"})
+            return
+        note = str(payload.get("note") or "api-issue").strip()
+        try:
+            key = persist_issued_key(note=note)
+        except OSError as e:
+            self._send_json(500, {"ok": False, "message": f"写入失败: {e}"})
+            return
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "key": key,
+                "message": "已发卡（演示钩子；生产请仅在支付成功 webhook 调用）",
+            },
+        )
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="MusicEditing license server")
@@ -191,10 +265,15 @@ def main() -> int:
     args = ap.parse_args()
     if not KEYS_PATH.is_file():
         _save_json(KEYS_PATH, {})
-        print(f"[提示] 已创建空 {KEYS_PATH.name}，请先 gen_keys.py", flush=True)
+        print(f"[提示] 已创建空 {KEYS_PATH.name}", flush=True)
+    token = (os.environ.get("MUSIC_LICENSE_ISSUE_TOKEN") or "").strip()
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"[license] http://{args.host}:{args.port}/", flush=True)
-    print(f"[license] activate POST /v1/activate  keys={KEYS_PATH}", flush=True)
+    print(f"[license] activate POST /v1/activate  issue POST /v1/issue", flush=True)
+    print(
+        f"[license] ISSUE_TOKEN={'set' if token else 'unset(demo open)'}",
+        flush=True,
+    )
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

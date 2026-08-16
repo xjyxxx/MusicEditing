@@ -292,6 +292,7 @@ class DownloadPage(QWidget):
         self._comments_done = True
         self._thread: QThread | None = None
         self._worker: _CommentFetchWorker | None = None
+        self._history_loaded = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
@@ -334,20 +335,38 @@ class DownloadPage(QWidget):
         outer.addWidget(scroll)
         self._scroll = scroll
 
-        yt_ok = bool(vm.bridge and getattr(vm.bridge, "yt_dlp_available", False))
-        if not yt_ok:
-            self._status.setText(
-                "未找到 yt-dlp.exe。请运行 scripts\\download_yt_dlp.bat"
-            )
-            self._btn_fetch.setEnabled(False)
-
         vm.downloadProgress.connect(self._on_progress)
         vm.downloadFinished.connect(self._on_finished)
         vm.downloadProbeReady.connect(self._on_probe_ready)
         vm.errorOccurred.connect(self._on_error)
+        vm.statusMessageChanged.connect(self._refresh_yt_availability)
 
-        self._reload_history_list()
+        self._refresh_yt_availability()
         self._update_result_ui()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._refresh_yt_availability()
+        if not self._history_loaded:
+            self._history_loaded = True
+            self._reload_history_list()
+
+    def _refresh_yt_availability(self, *_args) -> None:
+        yt_ok = bool(self._vm.bridge and getattr(self._vm.bridge, "yt_dlp_available", False))
+        if yt_ok:
+            self._btn_fetch.setEnabled(True)
+            return
+        if getattr(self, "_status", None) is None:
+            return
+        # 引擎仍在加载时不误报「未找到 yt-dlp」
+        if self._vm.bridge is None and "引擎加载" in (self._vm.status_message or ""):
+            self._status.setText("引擎加载中…稍后再获取")
+            self._btn_fetch.setEnabled(False)
+            return
+        self._status.setText(
+            "未找到 yt-dlp.exe。请运行 scripts\\download_yt_dlp.bat"
+        )
+        self._btn_fetch.setEnabled(False)
 
     # —— 构建 UI ——
 

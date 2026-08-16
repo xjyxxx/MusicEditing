@@ -6,8 +6,9 @@
 
 配置（app.conf）:
   update_manifest_url=…
-  ota_apply_enabled=false   # true 时下载后默认尝试半自动；UI 也可临时确认
+  ota_apply_enabled=false   # 仅加强「建议立即升级」提示；真正替换需用户确认
   ota_staging_dir=          # 空则 %LOCALAPPDATA%/MusicEditing/ota
+  ota_allow_no_hash=false   # 正式默认强制 sha256；联调可 true / MUSIC_OTA_ALLOW_NO_HASH=1
 
 manifest 见 docs/examples/musicediting_update.example.json
 """
@@ -90,9 +91,27 @@ class OtaApplyResult:
 
 
 ProgressCb = Callable[[int, int], None]
+AbortCb = Callable[[], bool]  # 返回 True 表示用户取消
+
+
+def ota_require_sha256() -> bool:
+    """正式通道默认强制 SHA256；本地联调可设 MUSIC_OTA_ALLOW_NO_HASH=1。"""
+    env = (os.environ.get("MUSIC_OTA_ALLOW_NO_HASH") or "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        return False
+    try:
+        from core.app_logic import load_app_config
+
+        v = (load_app_config().get("ota_allow_no_hash") or "").strip().lower()
+        if v in ("1", "true", "yes", "on"):
+            return False
+    except Exception:
+        pass
+    return True
 
 
 def ota_apply_enabled() -> bool:
+    """仅影响 UI 提示强度（是否更积极建议「立即升级」）；真正替换仍需用户确认 force_inplace。"""
     env = (os.environ.get("MUSIC_OTA_APPLY") or "").strip().lower()
     if env in ("1", "true", "yes", "on"):
         return True
@@ -236,15 +255,28 @@ def download_package(
     plan: OtaManifest,
     *,
     progress: Optional[ProgressCb] = None,
+    abort: Optional[AbortCb] = None,
     timeout: float = 120.0,
+    require_sha256: bool | None = None,
 ) -> OtaDownloadResult:
     if not plan.package_url:
         return OtaDownloadResult(False, stage=OtaStage.FAILED, message="缺少 package_url")
+    need_hash = ota_require_sha256() if require_sha256 is None else bool(require_sha256)
+    if need_hash and not (plan.sha256 or "").strip():
+        return OtaDownloadResult(
+            False,
+            stage=OtaStage.FAILED,
+            message="manifest 缺少 sha256，已拒绝下载（正式通道强制校验）。\n"
+            "本地联调可设 MUSIC_OTA_ALLOW_NO_HASH=1。",
+        )
     root = staging_root() / (plan.remote_version or "unknown")
     root.mkdir(parents=True, exist_ok=True)
     name = plan.package_url.rstrip("/").rsplit("/", 1)[-1] or "update.bin"
     dest = root / name
+    tmp = dest.with_suffix(dest.suffix + ".part")
     try:
+        if abort and abort():
+            return OtaDownloadResult(False, stage=OtaStage.FAILED, message="已取消下载")
         req = urllib.request.Request(
             plan.package_url,
             headers={"User-Agent": "MusicEditing-OTA/0.1"},
@@ -258,9 +290,17 @@ def download_package(
             if plan.size_bytes > 0 and total < 0:
                 total = plan.size_bytes
             received = 0
-            tmp = dest.with_suffix(dest.suffix + ".part")
             with tmp.open("wb") as out:
                 while True:
+                    if abort and abort():
+                        out.close()
+                        try:
+                            tmp.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                        return OtaDownloadResult(
+                            False, stage=OtaStage.FAILED, message="已取消下载"
+                        )
                     chunk = resp.read(1024 * 256)
                     if not chunk:
                         break
@@ -270,6 +310,10 @@ def download_package(
                         progress(received, total)
             tmp.replace(dest)
     except Exception as e:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
         return OtaDownloadResult(False, stage=OtaStage.FAILED, message=f"下载失败：{e}")
 
     sha_ok: bool | None = None
@@ -278,9 +322,13 @@ def download_package(
             got = file_sha256(dest)
             sha_ok = got.lower() == plan.sha256.lower()
             if not sha_ok:
+                try:
+                    dest.unlink(missing_ok=True)
+                except OSError:
+                    pass
                 return OtaDownloadResult(
                     False,
-                    path=dest,
+                    path=None,
                     stage=OtaStage.FAILED,
                     message=f"SHA256 不匹配\n期望 {plan.sha256}\n实际 {got}",
                     sha256_ok=False,
@@ -289,6 +337,10 @@ def download_package(
             return OtaDownloadResult(
                 False, path=dest, stage=OtaStage.FAILED, message=f"校验失败：{e}"
             )
+    elif need_hash:
+        return OtaDownloadResult(
+            False, stage=OtaStage.FAILED, message="缺少 sha256，拒绝升级"
+        )
 
     return OtaDownloadResult(
         True,
@@ -299,12 +351,43 @@ def download_package(
     )
 
 
+def _is_within_directory(directory: Path, target: Path) -> bool:
+    try:
+        directory = directory.resolve()
+        target = target.resolve()
+        return directory == target or directory in target.parents
+    except OSError:
+        return False
+
+
+def safe_extract_zip(zf: zipfile.ZipFile, dest: Path) -> None:
+    """防 Zip Slip：成员必须落在 dest 内。"""
+    dest = dest.resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+    for info in zf.infolist():
+        name = info.filename.replace("\\", "/")
+        if not name or name.endswith("/"):
+            # 目录项
+            target = (dest / name).resolve()
+            if not _is_within_directory(dest, target):
+                raise ValueError(f"Zip Slip（目录）: {info.filename}")
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        if name.startswith("/") or name.startswith("../") or "/../" in f"/{name}/":
+            raise ValueError(f"Zip Slip: {info.filename}")
+        target = (dest / name).resolve()
+        if not _is_within_directory(dest, target):
+            raise ValueError(f"Zip Slip: {info.filename}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with zf.open(info, "r") as src, target.open("wb") as out:
+            shutil.copyfileobj(src, out)
+
+
 def find_payload_root(extract_dir: Path) -> Path:
     """zip 解压后定位含 MusicEditing.exe 的目录。"""
     exe = next(extract_dir.rglob("MusicEditing.exe"), None)
     if exe is not None:
         return exe.parent
-    # 单顶层目录
     kids = [p for p in extract_dir.iterdir() if p.is_dir()]
     if len(kids) == 1:
         return kids[0]
@@ -320,8 +403,11 @@ def extract_package(package_path: Path, *, version: str) -> Path:
     out.mkdir(parents=True, exist_ok=True)
     if path.suffix.lower() == ".zip":
         with zipfile.ZipFile(path, "r") as zf:
-            zf.extractall(out)
-        return find_payload_root(out)
+            safe_extract_zip(zf, out)
+        root = find_payload_root(out)
+        if not (root / "MusicEditing.exe").is_file():
+            raise ValueError("解压后未找到 MusicEditing.exe，拒绝应用")
+        return root
     raise ValueError(f"暂不支持解压: {path.suffix}")
 
 
@@ -455,12 +541,7 @@ def apply_package(
     force_inplace: bool = False,
     wait_pid: int | None = None,
 ) -> OtaApplyResult:
-    """应用更新。
-
-    - zip + (force_inplace | apply_mode=inplace | ota_apply_enabled)：调度自动替换
-    - inno_setup：提示运行安装包（可 ShellExecute 预留）
-    - 其它：手动指引
-    """
+    """应用更新。真正替换仅当 force_inplace=True（用户确认）；ota_apply_enabled 不自动调度。"""
     path = Path(package_path)
     if not path.is_file():
         return OtaApplyResult(
@@ -527,8 +608,19 @@ def clear_staging(version: str | None = None) -> None:
         shutil.rmtree(target, ignore_errors=True)
 
 
+def clear_pending(root: Path | None = None) -> bool:
+    p = pending_path(root)
+    if not p.is_file():
+        return False
+    try:
+        p.unlink()
+        return True
+    except OSError:
+        return False
+
+
 def resume_pending_if_any() -> str | None:
-    """启动时：若存在 pending 且助手可能未跑完，提示路径（不自动强行替换）。"""
+    """启动时：若存在 pending，返回提示文案。"""
     p = pending_path()
     if not p.is_file():
         return None
@@ -536,7 +628,7 @@ def resume_pending_if_any() -> str | None:
         data = json.loads(p.read_text(encoding="utf-8"))
         return (
             f"检测到未完成的 OTA（{data.get('version', '?')}）。\n"
-            f"若升级中断，可删除 {p} 后重试，或查看\n"
+            f"若升级已中断：可忽略并删除标记，或查看日志\n"
             f"{staging_root() / 'apply_helper.log'}"
         )
     except Exception:

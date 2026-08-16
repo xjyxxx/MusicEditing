@@ -212,23 +212,23 @@ MainWindow.shutdown()
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
-| 回归短测 | ✅ | SHM/Seek、超分、队列、竖屏、Cookie、试用、激活、打包、**地点叠层 smoke** |
+| 回归短测 | ✅ | SHM/Seek、超分、队列、竖屏、Cookie、试用、激活/`issue`、打包、OTA/`ota_apply_helper` |
 | 发版 checklist | ✅ | [release_checklist.md](release_checklist.md) · [distribution.md](distribution.md) |
-| 便携打包 | ✅ | `--profile` + 验收 + 可选 `--sign`；`pack_for_share` 严格无源码；启动隐藏 CLI 黑框；`accept_portable.py` |
-| Inno 安装包 | ✅ | `scripts/build_installer.bat` + `scripts/inno/MusicEditing.iss` |
-| 一键发版 | ✅ | `release_oneclick.py`：回归→pack→accept→Inno→清单 |
+| 便携打包 | ✅ | `--profile` + 验收 + 可选 `--sign` / `--with-iphoto-extras` / `--with-maps`；`pack_for_share` 严格无源码；`accept_portable.py` |
+| Inno 安装包 | ✅ | `build_installer.bat` + Setup 后 `sign_artifact`（无证书跳过）；`MusicEditing.iss` |
+| 一键发版 | ✅ | `release_oneclick.py`：回归→pack→accept→Inno→签 Setup→清单 |
 | 自动更新检查 | ✅ | `update_check.py`；`publish_update_manifest` / `serve_update_channel`；启动静默检查；帮助/个人中心 |
-| OTA 升级模板 | ✅ | 下载+SHA+便携 zip 退出后替换（`ota_update.py` / `ota_apply_helper.ps1`）；见 §5.3 |
-| 卡密激活服务 | ✅ | `scripts/license_server/`（签发 + POST /v1/activate + 演示购买页） |
+| OTA 升级模板 | ✅ | 下载+SHA+便携 zip 退出后替换；助手失败回滚 bak；见 §5.3 |
+| 卡密激活服务 | ✅ | `license_server`：`/v1/activate` + **`/v1/issue` 发卡钩子** + 演示购买页 |
 | llama.cpp GPU 推理 | ✅ | 推荐 Vulkan（免 Toolkit）；或 CUDA；`MUSIC_LLM_N_GPU_LAYERS`；`setup_llama_gpu.py` |
 | 开箱依赖向导 | ✅ | 缺啥摘要 + **试跑 15 秒成片**；模型/GPU/Cookie/yt-dlp/场景/LLM（§5.18） |
 | 长任务进度 ETA | ✅ | 超分/去水印/补帧/队列线性外推「剩余约…」（§5.18） |
 | 诊断日志打包 | ✅ | 个人中心一键 zip：player/cli/ORT EP（§5.23） |
 | 临时帧/产物配额 | ✅ | 启动后台清理残留；队列 `max_output_gb`（§5.23） |
-| UI 启动流畅 | ✅ | 页懒创建 + **空闲预热**（个人中心/切片/增强/下载）；`media_player` 延迟到开文件 |
+| UI 启动流畅 | ✅ | 页懒创建 + 预热延后；延后 MediaBridge；**图库缓存模式**（休眠/秒开）；临时前缀扩展 |
 | 导出完成体验 | ✅ | 完成后可「打开文件夹」选中成片（`os_util.reveal_in_explorer`） |
 | Studio 页一致性 | ✅ | `studio_kit`：Hero/Card/滚动壳；切片/增强/队列 + **下载/素材库/封面/音频趣味**；首页轻量功能地图；音频/BGM/溯源 Tab 滚动 |
-| 授权/卡密 | ✅ | 本地卡密 + **试用配额/720p** + 可选联网激活/购买页；收银台在外部站点 |
+| 授权/卡密 | ✅ | 本地卡密 + **试用配额/720p** + 可选联网激活；外部收银台成功后调 `/v1/issue` |
 | 个人中心 | ✅ | 卡密、配额、购买页、GPU、输出目录、开箱向导、诊断打包、清理临时帧（§5.17/§5.23） |
 
 ---

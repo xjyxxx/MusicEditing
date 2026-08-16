@@ -71,9 +71,19 @@ def main() -> int:
     ap.add_argument("--min-version", default="0.1.0")
     ap.add_argument(
         "--apply-mode",
-        default="manual_replace",
+        default="inplace",
         choices=("manual_replace", "inno_setup", "inplace"),
-        help="OTA 应用策略（inplace 客户端仍为预留未实现）",
+        help="OTA 应用策略建议（客户端真正替换仍需用户确认「立即升级」）",
+    )
+    ap.add_argument(
+        "--landing-url",
+        default="",
+        help="可选说明/下载落地页；客户端「打开下载页」优先用它",
+    )
+    ap.add_argument(
+        "--allow-placeholder",
+        action="store_true",
+        help="无 dist 产物时仍写占位 manifest（不含 sha256，正式客户端会拒绝升级）",
     )
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
@@ -91,7 +101,14 @@ def main() -> int:
     size_bytes = 0
     kind = "unknown"
     if artifact is None:
-        print("[警告] dist 下没有 Setup / Share / Portable，manifest 的 url 仅写占位名")
+        if not args.allow_placeholder:
+            print(
+                "[失败] dist 下没有 Setup / Share / Portable。\n"
+                "请先打包，或显式加 --allow-placeholder（将不含 sha256，客户端默认拒绝升级）。",
+                flush=True,
+            )
+            return 1
+        print("[警告] 占位 manifest：无产物、无 sha256")
         fname = f"MusicEditing_Setup_{args.version}.exe"
         kind = "inno_setup"
     else:
@@ -107,6 +124,7 @@ def main() -> int:
 
     base = (args.base_url or "").rstrip("/")
     url = f"{base}/{fname}" if base else fname
+    landing = (args.landing_url or "").strip()
 
     data = {
         "version": args.version.strip(),
@@ -116,7 +134,6 @@ def main() -> int:
         "min_version": args.min_version.strip(),
         "channel": "stable",
         "package_kind": kind,
-        "sha256": sha,
         "size_bytes": size_bytes,
         "ota": {
             "apply_mode": args.apply_mode,
@@ -124,6 +141,10 @@ def main() -> int:
             "template": "v1",
         },
     }
+    if sha:
+        data["sha256"] = sha
+    if landing:
+        data["landing_url"] = landing
     out = args.out or (OUT_DIR / "musicediting_update.json")
     if not out.is_absolute():
         out = (ROOT / out).resolve()
@@ -135,8 +156,9 @@ def main() -> int:
         "\n上线步骤:\n"
         "  1) 把 dist/update/ 上传到你的 CDN/静态站\n"
         "  2) app.conf 设 update_manifest_url=https://你的域名/.../musicediting_update.json\n"
+        "     （正式包禁止 127.0.0.1）\n"
         "  3) 本机试: python scripts/serve_update_channel.py\n"
-        "  4) OTA：客户端「下载到本地」→ 暂存；自动替换为预留（见 distribution.md §5.3）\n"
+        "  4) OTA：检查更新 →「下载并升级」→ 确认立即升级（见 distribution.md §5.3）\n"
     )
     return 0
 

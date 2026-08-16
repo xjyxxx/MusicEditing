@@ -248,12 +248,14 @@ class ExifPanel(QFrame):
         super().mouseDoubleClickEvent(event)
 
 
-def attach_exif_overlay(host: QWidget, overlay: ExifPanel) -> QWidget:
-    """把 host 与右上角悬浮 EXIF 叠在同一格子，返回包装控件。"""
+def attach_exif_corner(host: QWidget, overlay: ExifPanel) -> QWidget:
+    """EXIF 叠在右上角，不占纵向空间（用于左右对比预览）。"""
     wrap = QWidget()
+    wrap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
     grid = QGridLayout(wrap)
     grid.setContentsMargins(0, 0, 0, 0)
     grid.setSpacing(0)
+    host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
     grid.addWidget(host, 0, 0)
 
     corner = QWidget()
@@ -263,4 +265,20 @@ def attach_exif_overlay(host: QWidget, overlay: ExifPanel) -> QWidget:
     corner_lay.setSpacing(0)
     corner_lay.addWidget(overlay)
     grid.addWidget(corner, 0, 0, Qt.AlignTop | Qt.AlignRight)
+    return wrap
+
+
+def attach_exif_overlay(host: QWidget, overlay: ExifPanel) -> QWidget:
+    """host 与 EXIF 上下排列（去水印框选区不挡鼠标）。"""
+    wrap = QWidget()
+    wrap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+    lay = QVBoxLayout(wrap)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(6)
+    host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+    lay.addWidget(host, 1)
+    # 避免 Fixed 宽把整列挤成窄条
+    overlay.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+    overlay.setMaximumHeight(120)
+    lay.addWidget(overlay, 0)
     return wrap

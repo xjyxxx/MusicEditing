@@ -101,6 +101,7 @@ class HomePage(QWidget):
         stage_layout.addWidget(self._player)
         # 弹幕叠在画面区域（相对 stage 定位，避免做 OpenGL 子控件）
         self._marquee = CommentMarquee(self._player_stage)
+        self._marquee.hide()  # 无弹幕时不占层，避免盖住播放器控件
         player_layout.addWidget(self._player_stage, 1)
 
         # 弹幕控制：速度 / 密度 / 显示区域
@@ -199,11 +200,17 @@ class HomePage(QWidget):
         self._layout_marquee()
 
     def _layout_marquee(self):
+        """弹幕只罩住画面区（display_widget），绝不盖住标题/波形/按钮。"""
         host = self._player.display_widget
+        if host is None or not self._marquee.has_active_content():
+            self._marquee.hide()
+            return
         top_left = host.mapTo(self._player_stage, QPoint(0, 0))
         w = max(1, host.width())
         h = max(1, host.height())
+        # 限制在 player 画面矩形内
         self._marquee.setGeometry(top_left.x(), top_left.y(), w, h)
+        self._marquee.show()
         self._marquee.raise_()
 
     @Slot(str)
@@ -218,8 +225,8 @@ class HomePage(QWidget):
         self._loading_with_comments = True
         try:
             self._player.open_file(path, auto_play=auto_play)
-            self._layout_marquee()
             self._marquee.set_comments(list(comments or []))
+            self._layout_marquee()
         finally:
             self._loading_with_comments = False
 
@@ -1021,27 +1028,35 @@ class MainWindow(QMainWindow):
         self._start_weather_refresh()
 
         # 向导 / CPU 提示挪到首屏显示后再扫依赖，避免启动主线程再卡 ~300ms
-        from core.app_logic import AppLogic
-        app = AppLogic()
-        QTimer.singleShot(500, lambda: self._post_show_setup(app))
-        # 空闲时预热常用页，避免第一次点开现场建页抖动
-        QTimer.singleShot(1200, lambda: self._prewarm_pages(
-            [TAB_PROFILE, TAB_SLICE, TAB_ENHANCE, TAB_DOWNLOAD]
+        # 复用 VM 内 AppLogic，避免再跑一次 nvidia-smi
+        # 图库缓存模式（默认开）：离开只休眠；关缓存才允许空闲卸载
+        try:
+            from core.iphoto_bootstrap import iphoto_idle_teardown_sec
+
+            self._iphoto_idle_teardown_sec = iphoto_idle_teardown_sec()
+        except Exception:
+            self._iphoto_idle_teardown_sec = 0
+        self._iphoto_idle_timer = QTimer(self)
+        self._iphoto_idle_timer.setSingleShot(True)
+        if self._iphoto_idle_teardown_sec > 0:
+            self._iphoto_idle_timer.setInterval(self._iphoto_idle_teardown_sec * 1000)
+            self._iphoto_idle_timer.timeout.connect(self._on_iphoto_idle_teardown)
+        QTimer.singleShot(500, lambda: self._post_show_setup(self._vm.app))
+        # 空闲预热：更晚、更稀、最重页最后，少抢首屏交互
+        QTimer.singleShot(3000, lambda: self._prewarm_pages(
+            [TAB_PROFILE, TAB_SLICE, TAB_DOWNLOAD, TAB_ENHANCE]
         ))
+        # 缓存模式下后台预热 iPhoto import
+        QTimer.singleShot(4500, self._prewarm_iphoto_modules)
         # 配置了 update_manifest_url 且开启 startup 时，空闲静默检查（不打断首屏）
         QTimer.singleShot(3500, self._startup_update_check)
         QTimer.singleShot(2500, self._startup_ota_pending_hint)
 
     def _startup_ota_pending_hint(self) -> None:
         try:
-            from core.ota_update import resume_pending_if_any
+            from ui.update_dialog import prompt_pending_ota
 
-            tip = resume_pending_if_any()
-            if tip:
-                self._status_label.setText("OTA: 检测到未完成升级标记")
-                import logging
-
-                logging.getLogger("MusicEditing.ota").warning("%s", tip)
+            prompt_pending_ota(self)
         except Exception:
             pass
 
@@ -1081,7 +1096,7 @@ class MainWindow(QMainWindow):
                 pass
             rest = pending[1:]
             if rest:
-                QTimer.singleShot(400, lambda: self._prewarm_pages(rest))
+                QTimer.singleShot(700, lambda: self._prewarm_pages(rest))
 
         QTimer.singleShot(0, _one)
 
@@ -1394,6 +1409,7 @@ class MainWindow(QMainWindow):
         """切换功能页（菜单 / 接力 / 下载完成共用）；首次进入时懒创建。"""
         if index < 0 or index > TAB_PHOTOS:
             return
+        prev = self._stack.currentIndex()
         # 首次建页较重：关掉更新再切，减少「整窗闪一下/抖一下」
         self.setUpdatesEnabled(False)
         try:
@@ -1407,6 +1423,60 @@ class MainWindow(QMainWindow):
             self.setWindowTitle(f"MusicEditing · {title}")
         finally:
             self.setUpdatesEnabled(True)
+        self._update_iphoto_idle_timer(prev, index)
+
+    def _prewarm_iphoto_modules(self) -> None:
+        """后台预热 iPhoto 模块 import，缩短首次进入图库时间。"""
+        try:
+            from core.iphoto_bootstrap import prewarm_iphoto_import
+
+            prewarm_iphoto_import(background=True)
+        except Exception:
+            pass
+
+    def _update_iphoto_idle_timer(self, prev: int, index: int) -> None:
+        """离开照片图库：缓存休眠；非缓存才可空闲 teardown。"""
+        timer = getattr(self, "_iphoto_idle_timer", None)
+        page = self._page_by_tab.get(TAB_PHOTOS)
+        if index == TAB_PHOTOS:
+            if timer is not None:
+                timer.stop()
+            wake = getattr(page, "ensure_iphoto_awake", None)
+            if callable(wake):
+                try:
+                    wake()
+                except Exception:
+                    pass
+            return
+        if prev == TAB_PHOTOS and index != TAB_PHOTOS:
+            sleep = getattr(page, "enter_cache_sleep", None)
+            if callable(sleep):
+                try:
+                    sleep()
+                except Exception:
+                    pass
+            else:
+                pause = getattr(page, "pause_selection_watch", None)
+                if callable(pause):
+                    try:
+                        pause()
+                    except Exception:
+                        pass
+            if timer is not None and getattr(self, "_iphoto_idle_teardown_sec", 0) > 0:
+                timer.start()
+
+    def _on_iphoto_idle_teardown(self) -> None:
+        if getattr(self, "_iphoto_idle_teardown_sec", 0) <= 0:
+            return
+        if self._stack.currentIndex() == TAB_PHOTOS:
+            return
+        page = self._page_by_tab.get(TAB_PHOTOS)
+        release = getattr(page, "release_for_memory", None)
+        if callable(release):
+            try:
+                release()
+            except Exception:
+                pass
 
     @Slot()
     def _goto_hot_comments_tab(self):

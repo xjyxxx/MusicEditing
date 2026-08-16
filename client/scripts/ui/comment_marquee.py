@@ -67,14 +67,18 @@ class CommentMarquee(QWidget):
         self._rebuild_lanes()
         self._apply_spawn_interval()
         if self._comments:
+            self.show()
             self._spawn_one()
             if not self._paused:
                 self._spawn.start()
                 self._timer.start()
+        else:
+            self.hide()
 
     def spawn_comment(self, comment: HotComment):
         if not comment or not comment.display_text():
             return
+        self.show()
         self._spawn_one(forced=comment)
         if not self._paused and not self._timer.isActive():
             self._timer.start()
@@ -85,6 +89,11 @@ class CommentMarquee(QWidget):
         for b in self._items:
             b.label.deleteLater()
         self._items.clear()
+        self._comments = []
+        self.hide()
+
+    def has_active_content(self) -> bool:
+        return bool(self._comments or self._items)
 
     def pause(self):
         self._paused = True

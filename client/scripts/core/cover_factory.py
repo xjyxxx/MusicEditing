@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -93,29 +94,47 @@ def pick_sharpest_frame(
     )
     best: Optional[FrameCandidate] = None
     work = Path(tempfile.mkdtemp(prefix="me_cover_"))
-    for i, t in enumerate(times):
-        report(5.0 + 70.0 * i / max(1, len(times)), f"抽样 {i + 1}/{len(times)} @ {t:.1f}s")
-        out = work / f"f_{i:02d}_{t:.2f}.ppm"
+    keep_dir: Optional[Path] = None
+    try:
+        for i, t in enumerate(times):
+            report(5.0 + 70.0 * i / max(1, len(times)), f"抽样 {i + 1}/{len(times)} @ {t:.1f}s")
+            out = work / f"f_{i:02d}_{t:.2f}.ppm"
+            try:
+                path = bridge.extract_thumbnail(
+                    video_path,
+                    t,
+                    output_path=str(out),
+                    max_width=max_width,
+                    use_cache=False,
+                )
+                score = score_sharpness(path)
+            except Exception:
+                continue
+            if score < 0:
+                continue
+            cand = FrameCandidate(time_sec=t, path=path, sharpness=score)
+            if best is None or cand.sharpness > best.sharpness:
+                best = cand
+        if best is None:
+            raise RuntimeError("未能抽出可用帧，请确认视频有画面轨")
+        # 保留最佳帧到独立临时目录，再删抽样目录
+        keep_dir = Path(tempfile.mkdtemp(prefix="me_cover_"))
+        keep_path = keep_dir / Path(best.path).name
         try:
-            path = bridge.extract_thumbnail(
-                video_path,
-                t,
-                output_path=str(out),
-                max_width=max_width,
-                use_cache=False,
+            shutil.copy2(best.path, keep_path)
+            best = FrameCandidate(
+                time_sec=best.time_sec,
+                path=str(keep_path),
+                sharpness=best.sharpness,
             )
-            score = score_sharpness(path)
-        except Exception:
-            continue
-        if score < 0:
-            continue
-        cand = FrameCandidate(time_sec=t, path=path, sharpness=score)
-        if best is None or cand.sharpness > best.sharpness:
-            best = cand
-    if best is None:
-        raise RuntimeError("未能抽出可用帧，请确认视频有画面轨")
-    report(80.0, f"最清晰帧 @ {best.time_sec:.2f}s（锐度 {best.sharpness:.0f}）")
-    return best
+        except OSError:
+            keep_dir = None
+        report(80.0, f"最清晰帧 @ {best.time_sec:.2f}s（锐度 {best.sharpness:.0f}）")
+        return best
+    finally:
+        # 成功拷出最佳帧后清理抽样目录；失败则整棵 work 留给 orphan 清理
+        if best is None or keep_dir is not None:
+            shutil.rmtree(work, ignore_errors=True)
 
 
 def _wrap_title(text: str, max_chars: int = 14) -> List[str]:

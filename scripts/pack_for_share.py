@@ -41,6 +41,16 @@ def main() -> int:
     ap.add_argument("--no-scenedetect", action="store_true", help="不带 PySceneDetect")
     ap.add_argument("--with-llm", action="store_true", help="额外拷贝 .gguf / vosk")
     ap.add_argument("--sign", action="store_true", help="尝试签名 MusicEditing.exe")
+    ap.add_argument(
+        "--with-iphoto-extras",
+        action="store_true",
+        help="安装 requirements-iphoto（HEIC 等）",
+    )
+    ap.add_argument(
+        "--with-maps",
+        action="store_true",
+        help="拷贝 maps/font（体积大）",
+    )
     # 明确拒绝危险开关（若用户从别处抄命令带上）
     ap.add_argument("--ship-source", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--no-embed-python", action="store_true", help=argparse.SUPPRESS)
@@ -76,6 +86,8 @@ def main() -> int:
         do_sign=args.sign,
         profile=args.profile,
         strict_no_source=True,
+        with_iphoto_extras=args.with_iphoto_extras,
+        with_maps=args.with_maps,
     )
     print("\n可以发给别人的文件:", flush=True)
     print(f"  {result}", flush=True)

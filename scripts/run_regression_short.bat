@@ -31,6 +31,12 @@ if errorlevel 1 set FAIL=1
 python tests\regression\test_update_check.py
 if errorlevel 1 set FAIL=1
 
+python tests\regression\test_ota_update.py
+if errorlevel 1 set FAIL=1
+
+python tests\regression\test_ota_apply_helper.py
+if errorlevel 1 set FAIL=1
+
 python scripts\smoke_place_map_thumbs.py
 if errorlevel 1 set FAIL=1
 

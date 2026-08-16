@@ -47,6 +47,7 @@ class IPhotoHostPage(QWidget):
         self._fallback = None
         self._embed_mode = False
         self._booting = False
+        self._cache_sleeping = False
         self.setObjectName("IPhotoHostPage")
         self._root = QVBoxLayout(self)
         self._root.setContentsMargins(0, 0, 0, 0)
@@ -134,6 +135,7 @@ class IPhotoHostPage(QWidget):
             if mods is None:
                 _log.warning("iPhoto import failed: %s", err)
                 self._status.setText(f"iPhotron 不可用，已回退经典图库（{err}）")
+                self._booting = False
                 self._mount_legacy()
                 return
             self._mods = mods
@@ -142,10 +144,12 @@ class IPhotoHostPage(QWidget):
         except Exception as exc:  # noqa: BLE001
             _log.exception("iPhoto import stage failed")
             self._status.setText(f"导入失败，已回退经典图库：{exc}")
+            self._booting = False
             self._mount_legacy()
 
     def _boot_window(self) -> None:
         if self._fallback is not None or self._mods is None:
+            self._booting = False
             return
         try:
             from core.iphoto_bootstrap import ensure_iphoto_on_path
@@ -192,6 +196,7 @@ class IPhotoHostPage(QWidget):
         except Exception as exc:  # noqa: BLE001
             _log.exception("iPhoto window stage failed")
             self._status.setText(f"启动失败，已回退经典图库：{exc}")
+            self._booting = False
             self._mount_legacy()
 
     def _prepare_hosted_window(self, window) -> None:
@@ -418,27 +423,21 @@ class IPhotoHostPage(QWidget):
             if sm is not None and hasattr(sm, "set_scope_root"):
                 sm.set_scope_root(self if self._embed_mode else window)
             context.resume_startup_tasks()
-            try:
-                window.ui.sidebar.select_all_photos(emit_signal=True)
-            except Exception:  # noqa: BLE001
-                pass
+            # 选中「全部照片」放到下一拍，先让界面可交互
+            def _select_all():
+                try:
+                    window.ui.sidebar.select_all_photos(emit_signal=True)
+                except Exception:  # noqa: BLE001
+                    pass
+
+            QTimer.singleShot(50, _select_all)
             QTimer.singleShot(0, self._focus_gallery_grid)
             QTimer.singleShot(800, self._ensure_detail_surface)
             QTimer.singleShot(0, self._sync_hosted_theme_chrome)
             mode = "嵌入·软件预览" if self._embed_mode else "独立窗口"
-            hints = []
-            try:
-                from core.iphoto_bootstrap import iphoto_capability_hints
-
-                hints = iphoto_capability_hints()
-            except Exception:  # noqa: BLE001
-                hints = []
-            status = f"iPhotron 图库（{mode}）· 已就绪 · ←→↑↓ 切图"
-            if hints:
-                status = f"{status} · {hints[0]}"
-            self._status.setText(status)
-            if hints:
-                self._status.setToolTip("\n".join(hints))
+            # capability hints（含 pillow_heif 探测）延后，避免挡首屏就绪
+            self._status.setText(f"iPhotron 图库（{mode}）· 已就绪 · ←→↑↓ 切图")
+            QTimer.singleShot(0, lambda m=mode: self._apply_capability_hints(m))
             self._selection_timer.start()
             self._refresh_selection_chrome()
         except Exception as exc:  # noqa: BLE001
@@ -448,6 +447,115 @@ class IPhotoHostPage(QWidget):
                 "照片图库",
                 f"iPhotron 协调器启动失败：\n{exc}\n\n可点「经典图库」回退。",
             )
+        finally:
+            self._booting = False
+
+    def _apply_capability_hints(self, mode: str) -> None:
+        hints: list[str] = []
+        try:
+            from core.iphoto_bootstrap import iphoto_capability_hints
+
+            hints = iphoto_capability_hints()
+        except Exception:  # noqa: BLE001
+            hints = []
+        status = f"iPhotron 图库（{mode}）· 已就绪 · 缓存模式 · ←→↑↓ 切图"
+        if hints:
+            status = f"{status} · {hints[0]}"
+            self._status.setToolTip("\n".join(hints))
+        else:
+            try:
+                from core.iphoto_bootstrap import iphoto_cache_mode_enabled
+
+                if iphoto_cache_mode_enabled():
+                    self._status.setToolTip(
+                        "缓存模式：离开图库后窗体常驻，再进入秒开。"
+                        "关闭：app.conf 设 iphoto_cache_mode=false"
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+        self._status.setText(status)
+
+    def pause_selection_watch(self) -> None:
+        """离开图库页时停轮询，省 CPU；不卸载窗体。"""
+        if getattr(self, "_selection_timer", None) is not None:
+            self._selection_timer.stop()
+
+    def resume_selection_watch(self) -> None:
+        if self._iphoto_window is None or self._fallback is not None:
+            return
+        if getattr(self, "_selection_timer", None) is not None:
+            self._selection_timer.start()
+            self._refresh_selection_chrome()
+
+    def enter_cache_sleep(self) -> None:
+        """缓存模式：离开时休眠（不停毁窗体），再进可秒开。"""
+        from core.iphoto_bootstrap import iphoto_cache_mode_enabled
+
+        if not iphoto_cache_mode_enabled():
+            self.pause_selection_watch()
+            return
+        if self._fallback is not None or self._iphoto_window is None:
+            self.pause_selection_watch()
+            return
+        self.pause_selection_watch()
+        self._cache_sleeping = True
+        # 降低休眠时绘制开销
+        try:
+            if self._iphoto_window is not None:
+                self._iphoto_window.setUpdatesEnabled(False)
+        except Exception:  # noqa: BLE001
+            pass
+        self._status.setText("图库已缓存 · 再进入将秒开")
+
+    def wake_from_cache(self) -> bool:
+        """若窗体仍在缓存中，直接唤醒。命中返回 True。"""
+        if self._fallback is not None:
+            return False
+        if self._iphoto_window is None:
+            self._cache_sleeping = False
+            return False
+        try:
+            self._iphoto_window.setUpdatesEnabled(True)
+            self._iphoto_window.update()
+        except Exception:  # noqa: BLE001
+            pass
+        self._cache_sleeping = False
+        self.resume_selection_watch()
+        mode = "嵌入·软件预览" if self._embed_mode else "独立窗口"
+        self._status.setText(f"iPhotron 图库（{mode}）· 缓存命中 · 已就绪")
+        QTimer.singleShot(0, self._focus_gallery_grid)
+        return True
+
+    def is_cache_hit(self) -> bool:
+        return self._iphoto_window is not None and not self._booting
+
+    def release_for_memory(self) -> None:
+        """非缓存 / 显式卸载：销毁嵌入 iPhoto。"""
+        if self._fallback is not None:
+            return
+        if self._iphoto_window is None and self._coordinator is None:
+            return
+        self._cache_sleeping = False
+        self._status.setText("图库已卸载（再进入将重新加载）")
+        self._teardown_iphoto()
+        self._booting = False
+        self._context = None
+
+    def ensure_iphoto_awake(self) -> None:
+        """切回图库：优先缓存唤醒，否则冷启动。"""
+        if self._fallback is not None:
+            return
+        if self.wake_from_cache():
+            return
+        if self._booting:
+            return
+        self._status.setText("正在加载图库…")
+        self._booting = False
+        QTimer.singleShot(0, self._boot_import)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.ensure_iphoto_awake()
 
     def _ensure_detail_surface(self) -> None:
         window = self._iphoto_window

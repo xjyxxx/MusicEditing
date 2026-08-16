@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import mmap
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -16,8 +17,19 @@ from core.app_logger import media_player_log_path, setup_logging
 
 log = setup_logging("PlayerBackend", os.environ.get("MUSIC_LOG_LEVEL", "INFO"))
 
-# 预览帧上限（4K RGB24）；SCALE 后通常远小于此
-_SHM_CAPACITY = 3840 * 2160 * 3
+# 预览帧：默认按 1080p 分配，开文件后按探测分辨率调整，上限 4K
+_SHM_DEFAULT = 1920 * 1080 * 3
+_SHM_MAX = 3840 * 2160 * 3
+_SHM_CAPACITY = _SHM_MAX  # 兼容旧引用
+
+
+def _shm_bytes_for(width: int, height: int) -> int:
+    w = max(0, int(width))
+    h = max(0, int(height))
+    needed = w * h * 3
+    if needed <= 0:
+        return _SHM_DEFAULT
+    return min(_SHM_MAX, max(_SHM_DEFAULT, needed))
 
 
 def _find_player_exe() -> Path:
@@ -85,7 +97,7 @@ class PlayerBackend:
         base = f"MusicEditing_rgb_{os.getpid()}_{id(self) & 0xFFFFFFFF:x}"
         self._shm_names = [f"{base}_0", f"{base}_1"]
         self._shm: list[Optional[mmap.mmap]] = [None, None]
-        self._shm_capacity = _SHM_CAPACITY
+        self._shm_capacity = _SHM_DEFAULT
         self._prefetch: Optional[_PrefetchSlot] = None
         self._prefetch_gen = 0
         self._prefetch_busy = False
@@ -115,6 +127,21 @@ class PlayerBackend:
                 self._shm[i] = None
         self._use_shm = False
         self._shm_dual = False
+
+    def _resize_shm_for(self, width: int, height: int) -> None:
+        """按探测分辨率调整 SHM（须在子进程已启动且持锁时调用）。"""
+        needed = _shm_bytes_for(width, height)
+        if needed == self._shm_capacity and self._shm[0] is not None and self._shm[1] is not None:
+            if not self._use_shm:
+                self._bind_shm()
+            return
+        self._close_shm()
+        self._shm_capacity = needed
+        # 换名再建，避免 Windows 命名映射在关闭后立刻复用同名失败
+        base = f"MusicEditing_rgb_{os.getpid()}_{id(self) & 0xFFFFFFFF:x}_{needed:x}"
+        self._shm_names = [f"{base}_0", f"{base}_1"]
+        self._bind_shm()
+        log.info("SHM 容量调整为 %d (≈%dx%d)", needed, width, height)
 
     def _drain_stderr(self, proc: subprocess.Popen):
         if not proc.stderr:
@@ -421,10 +448,12 @@ class PlayerBackend:
                     elif k == "hw_name":
                         info.hw_name = v
             self._info = info
+            # OPEN 后按真实分辨率调整 SHM（1080p 不再占满 4K 双缓冲）
+            self._resize_shm_for(info.width, info.height)
             log.info(
-                "OPEN_OK %dx%d fps=%.2f hw=%s(%s) shm=%s dual=%s",
+                "OPEN_OK %dx%d fps=%.2f hw=%s(%s) shm=%s dual=%s cap=%d",
                 info.width, info.height, info.fps, info.hw_decode, info.hw_name,
-                self._use_shm, self._shm_dual,
+                self._use_shm, self._shm_dual, self._shm_capacity,
             )
             return info
 
@@ -526,6 +555,22 @@ class PlayerBackend:
         log.info("PlayerBackend shutdown")
         self._restart()
         self._close_shm()
+        self._shm_capacity = _SHM_DEFAULT
+        td = getattr(self, "_temp_dir", "") or ""
+        if td and os.path.isdir(td):
+            try:
+                shutil.rmtree(td, ignore_errors=True)
+            except Exception:
+                pass
+        self._temp_dir = ""
+
+    def release_media_buffers(self) -> None:
+        """卸文件/停播后释放预取与 SHM（进程可保留，下次 OPEN 再建）。"""
+        with self._lock:
+            self._invalidate_prefetch()
+            self._close_shm()
+            self._shm_capacity = _SHM_DEFAULT
+            self._info = PlayerInfo()
 
     @property
     def info(self) -> PlayerInfo:

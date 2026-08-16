@@ -78,9 +78,11 @@ python scripts\pack_for_share.py --profile slim
 ```powershell
 $env:MUSIC_CODE_SIGN_THUMBPRINT="你的SHA1"
 python scripts\pack_portable.py --profile standard --zip --sign
+.\scripts\build_installer.bat   # 生成 Setup 后自动尝试签名
+# 或单独: python scripts\sign_artifact.py --latest-setup
 ```
 
-无证书时 `--sign` 会跳过并提示（属正常）。未签名包务必在使用说明里写清 SmartScreen 步骤。
+无证书时 `--sign` / `sign_artifact` 会跳过并提示（属正常）。未签名包务必在使用说明里写清 SmartScreen 步骤。`accept_portable` 会打印 exe/Setup 的 Authenticode 状态。
 
 ---
 
@@ -128,11 +130,29 @@ license_server_url=http://127.0.0.1:8765
 POST /v1/activate
 {"key":"...","machine":"<fingerprint>","product":"MusicEditing"}
 → {"ok":true,"message":"联网激活成功"}
+
+POST /v1/issue   （支付成功后发卡钩子；演示购买页按钮可调）
+{"product":"MusicEditing","note":"order-123","token":"<可选>"}
+→ {"ok":true,"key":"XXXX-..."}
 ```
 
-**真实收款：** 用微信/支付宝/Lemon 等收银台，支付成功后调用 `gen_keys`（或你的发卡 API）把卡密发给用户。本仓库服务负责**激活校验**，不内置支付通道。
+若设置环境变量 `MUSIC_LICENSE_ISSUE_TOKEN`，则 `issue` 必须带同名 `token`（生产必设）。未设置时演示页开放发卡（仅本地联调）。
 
-生产建议：`MUSIC_LICENSE_OFFLINE_FALLBACK=0`，禁止联网失败时回退本地格式校验。
+**真实收款闭环：**
+
+1. 外部收银台收款成功  
+2. 商店 webhook / 你的后端调 `POST {license_server}/v1/issue`（或本机 `gen_keys.py`）  
+3. 把返回的 `key` 发给用户  
+4. 用户在个人中心粘贴；客户端 `POST /v1/activate`  
+
+本仓库**不内置**微信/支付宝 SDK。生产建议：`MUSIC_LICENSE_OFFLINE_FALLBACK=0`。
+
+正式配置清单：
+
+```
+license_purchase_url=https://你的商店页或演示服/
+license_server_url=https://你的激活服
+```
 
 ---
 
@@ -181,24 +201,37 @@ REM   update_check_on_startup=true
 |------|------|------|
 | 检查 manifest | ✅ | `core/update_check.py` |
 | 下载到暂存 | ✅ | `%LOCALAPPDATA%/MusicEditing/ota/<ver>/` |
-| SHA256 校验 | ✅ | manifest 含 `sha256` 时 |
-| 打开下载页 | ✅ | 帮助 / 个人中心 / 启动提示 |
-| **便携 zip 自动替换** | ✅ | 「下载并升级」→ 解压 → `pending_ota.json` → `ota_apply_helper.ps1` 等进程退出 → 改名替换 → 拉起 `MusicEditing.exe` |
-| Inno Setup | ✅ 半自动 | 下载后 `os.startfile` 打开安装包 |
-| 启动器内嵌热切换 | ⏳ | 当前用系统 PowerShell 助手，不改 `portable_launcher.c` |
+| SHA256 校验 | ✅ | **正式通道强制**（缺 hash 拒下载）；联调 `MUSIC_OTA_ALLOW_NO_HASH=1` |
+| 下载可取消 / 不堵 UI | ✅ | 后台线程 + abort；取消删 `.part` |
+| Zip Slip 防护 | ✅ | `safe_extract_zip`；助手校验含 `MusicEditing.exe` |
+| 打开下载页 | ✅ | 优先 `landing_url`；否则「在浏览器打开包」 |
+| **便携 zip 自动替换** | ✅ | 用户确认后 → pending → PowerShell 助手（失败回滚 bak） |
+| Inno Setup | ✅ 半自动 | 确认后 `os.startfile` |
+| 启动器内嵌热切换 | ⏳ | 仍用系统 PowerShell 助手 |
 
 流程：
 
-1. `publish_update_manifest.py` 生成带 `sha256` / `package_kind` / `ota.apply_mode` 的 JSON  
+1. `publish_update_manifest.py`（无产物默认失败；需 `--allow-placeholder` 才写无 hash 占位）  
 2. 客户端「检查更新」→ **下载并升级…** → 确认「立即升级并退出」  
 3. 助手日志：`%LOCALAPPDATA%\MusicEditing\ota\apply_helper.log`  
-4. 旧目录备份名：`原目录名.ota_bak_时间戳`（成功后会尽量删除）
+4. 失败时尽量把 `*.ota_bak_*` 改回安装目录  
 
-配置：`ota_apply_enabled`（下载后默认可走 zip 半自动）、`ota_staging_dir`。  
+配置：`ota_apply_enabled`（仅加强「建议立即升级」文案）、`ota_staging_dir`、`ota_allow_no_hash`（仅联调）。  
 **注意：** 请对**打包后的便携目录**使用；不要对开发仓库根目录点「立即升级」。  
-包内需带 `scripts/ota_apply_helper.ps1`（`pack_portable` / `pack_for_share` 已拷贝）。
+包内需带 `scripts/ota_apply_helper.ps1`。
 
-冒烟：`python tests/regression/test_ota_update.py`
+### 5.4 发版卫生（一眼能跟）
+
+1. 打外发包：`.\scripts\pack_for_share.bat`（或 `--profile standard`）  
+   - 图库完整：再加 `--with-iphoto-extras`（HEIC）与/或 `--with-maps`（font，体积大）  
+2. 生成并上传：`publish_update_manifest.py --base-url https://正式CDN/…` → 上传 `dist/update/`  
+3. 正式包 `app.conf`：`update_manifest_url=https://…/musicediting_update.json`（**禁止 127.0.0.1**）  
+4. 可选：`--sign` + `build_installer.bat`（Setup 自动再签）、购买/激活 URL、`update_check_on_startup=true`  
+5. 干净机手测（§6.1）  
+
+照片图库：HEIC / 离线 maps 为**可选**；默认瘦包可能降级，不是「图库坏了」。带 `--with-iphoto-extras` / `--with-maps` 才接近完整。
+
+冒烟：`python tests/regression/test_ota_update.py`、`test_ota_apply_helper.py`（已入 `run_regression_short.bat`）
 
 ---
 

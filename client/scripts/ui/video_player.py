@@ -134,8 +134,6 @@ class VideoPlayerWidget(QWidget):
         self._play_started_wall = 0.0
         self._info_busy = False
 
-
-
         # OpenGL 显示区：须在创建 QOpenGLWidget 前设置默认 SurfaceFormat
         QSurfaceFormat.setDefaultFormat(_default_surface_format())
 
@@ -143,8 +141,9 @@ class VideoPlayerWidget(QWidget):
         self._title.setObjectName("MutedText")
 
         self._display = GlVideoWidget()
-        self._display.set_placeholder("请打开本地视频或音乐\n点击画面可选文件；播放中点击可暂停 / 继续")
-
+        self._display.set_placeholder(
+            "请打开本地视频或音乐\n点击画面可选文件；播放中点击可暂停 / 继续"
+        )
         self._btn_open = QPushButton("打开文件")
         self._btn_play = QPushButton("播放")
 
@@ -290,8 +289,6 @@ class VideoPlayerWidget(QWidget):
         except FileNotFoundError as e:
 
             self._title.setText(str(e))
-
-
 
     @property
 
@@ -923,6 +920,8 @@ class VideoPlayerWidget(QWidget):
 
         self._position_sec = 0.0
         self._last_shown_frame_ts = -1.0
+        self._frame_rgb_buf = None
+        self._decode_token += 1
 
         self._progress.setValue(0)
         self._update_time_label()
@@ -946,6 +945,9 @@ class VideoPlayerWidget(QWidget):
             except RuntimeError:
 
                 pass
+            else:
+                # 首帧已显示后丢掉 Python 侧多余缓冲，降低停播 RSS
+                self._frame_rgb_buf = None
 
 
 
@@ -1368,11 +1370,6 @@ class VideoPlayerWidget(QWidget):
 
 
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-
-
-
     def shutdown(self):
         """停止播放并释放子进程（应用退出时调用）"""
         self._timer.stop()
@@ -1383,6 +1380,7 @@ class VideoPlayerWidget(QWidget):
         self._title.setToolTip("")
         self._decode_token += 1
         self._decode_future = None
+        self._frame_rgb_buf = None
         try:
             self._decode_pool.shutdown(wait=False, cancel_futures=True)
         except TypeError:
@@ -1391,6 +1389,10 @@ class VideoPlayerWidget(QWidget):
             pass
         self._audio.shutdown()
         if self._backend:
+            try:
+                self._backend.release_media_buffers()
+            except Exception:
+                pass
             self._backend.shutdown()
         if isinstance(self._display, GlVideoWidget):
             self._display.set_paused_overlay(False)

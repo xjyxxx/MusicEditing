@@ -237,7 +237,7 @@ VideoPlayerWidget 构造
     └─ _restart() 清掉子进程 + 临时目录随进程结束
 ```
 
-> 启动卡顿根因曾是：首页一创建就 `set_hwaccel` → `_send` → 立刻拉起 `media_player` + 分配约 50MB SHM。现已改为「打开文件时才起进程」。
+> 启动卡顿根因曾是：首页一创建就 `set_hwaccel` → `_send` → 立刻拉起 `media_player` + 分配约 50MB SHM。现已改为「打开文件时才起进程」；SHM 默认按 1080p 双缓冲，OPEN 后按探测分辨率调整（上限仍 4K）。`GlVideoWidget` 仍在播放器构造时创建（不延后换控件，避免叠层）。
 
 ---
 

@@ -17,6 +17,12 @@ TEMP_PREFIXES = (
     "me_player_",
     "me_lut_",
     "me_ebur_",
+    "me_cover_",
+    "music_preview_",
+    "me_rife_",
+    "me_echo_",
+    "me_face_",
+    "me_vertical_",
 )
 
 

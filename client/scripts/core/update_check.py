@@ -47,6 +47,7 @@ class UpdateInfo:
     size_bytes: int = 0
     package_kind: str = ""
     channel: str = ""
+    landing_url: str = ""
     # 原始 manifest 片段，供 OTA 模板使用
     manifest_extra: dict | None = None
 
@@ -105,9 +106,11 @@ def setup_help_text() -> str:
         "本地联调：\n"
         "  python scripts/serve_update_channel.py\n"
         "  update_manifest_url=http://127.0.0.1:8777/musicediting_update.json\n\n"
-        "OTA 预留（下载到暂存 + 手动覆盖；默认不自动替换）：\n"
-        "  ota_apply_enabled=true   # 半自动提示；inplace 仍未实现\n"
-        "  详见 docs/design/distribution.md §5.3\n\n"
+        "OTA（下载校验 + 便携 zip 退出后替换）：\n"
+        "  · 帮助/个人中心 → 检查更新 →「下载并升级」→ 确认立即升级\n"
+        "  · ota_apply_enabled=true 仅加强提示，真正替换仍需确认\n"
+        "  · 正式通道 manifest 必须含 sha256（联调可 MUSIC_OTA_ALLOW_NO_HASH=1）\n"
+        "  · 详见 docs/design/distribution.md §5.3\n\n"
         "详见 docs/design/distribution.md §5。"
     )
 
@@ -148,6 +151,7 @@ def check_for_update(local_version: str, *, timeout: float = 8.0) -> UpdateInfo:
         sha256 = str(data.get("sha256") or data.get("hash") or "").strip().lower()
         package_kind = str(data.get("package_kind") or data.get("kind") or "").strip()
         channel = str(data.get("channel") or "").strip()
+        landing = str(data.get("landing_url") or data.get("page_url") or "").strip()
         size_bytes = 0
         try:
             size_bytes = int(data.get("size_bytes") or data.get("size") or 0)
@@ -159,6 +163,9 @@ def check_for_update(local_version: str, *, timeout: float = 8.0) -> UpdateInfo:
         if dl and not dl.lower().startswith(("http://", "https://")):
             base = url.rsplit("/", 1)[0]
             dl = f"{base}/{dl.lstrip('/')}"
+        if landing and not landing.lower().startswith(("http://", "https://")):
+            base = url.rsplit("/", 1)[0]
+            landing = f"{base}/{landing.lstrip('/')}"
         newer = version_newer(remote, local)
         return UpdateInfo(
             configured=True,
@@ -171,6 +178,7 @@ def check_for_update(local_version: str, *, timeout: float = 8.0) -> UpdateInfo:
             size_bytes=size_bytes,
             package_kind=package_kind,
             channel=channel,
+            landing_url=landing,
             manifest_extra=data,
             message=(
                 f"发现新版本 {remote}（当前 {local}）"

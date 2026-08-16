@@ -20,6 +20,31 @@ class ImageRegion:
         return (self.x, self.y, self.w, self.h)
 
 
+def _corner_edge_score(img: QImage, x: int, y: int, rw: int, rh: int) -> float:
+    """简单灰度梯度能量；角标/logo 通常边缘更密。"""
+    w, h = img.width(), img.height()
+    x2 = min(w, x + rw)
+    y2 = min(h, y + rh)
+    x = max(0, x)
+    y = max(0, y)
+    if x2 - x < 4 or y2 - y < 4:
+        return 0.0
+    # 降采样累加
+    step = max(1, min((x2 - x) // 24, (y2 - y) // 24, 4))
+    energy = 0.0
+    n = 0
+    prev = None
+    for yy in range(y, y2, step):
+        for xx in range(x, x2, step):
+            c = img.pixelColor(xx, yy)
+            g = (c.red() + c.green() + c.blue()) / 3.0
+            if prev is not None:
+                energy += abs(g - prev)
+                n += 1
+            prev = g
+    return energy / max(1, n)
+
+
 class RegionSelectorWidget(QLabel):
     """在图片上拖拽绘制水印区域（支持多区域）"""
 
@@ -112,31 +137,6 @@ class RegionSelectorWidget(QLabel):
         region = ImageRegion(x, y, rw, rh)
         self.set_regions([region])
         return [region]
-
-
-def _corner_edge_score(img: QImage, x: int, y: int, rw: int, rh: int) -> float:
-    """简单灰度梯度能量；角标/logo 通常边缘更密。"""
-    w, h = img.width(), img.height()
-    x2 = min(w, x + rw)
-    y2 = min(h, y + rh)
-    x = max(0, x)
-    y = max(0, y)
-    if x2 - x < 4 or y2 - y < 4:
-        return 0.0
-    # 降采样累加
-    step = max(1, min((x2 - x) // 24, (y2 - y) // 24, 4))
-    energy = 0.0
-    n = 0
-    prev = None
-    for yy in range(y, y2, step):
-        for xx in range(x, x2, step):
-            c = img.pixelColor(xx, yy)
-            g = (c.red() + c.green() + c.blue()) / 3.0
-            if prev is not None:
-                energy += abs(g - prev)
-                n += 1
-            prev = g
-    return energy / max(1, n)
 
     def load_pixmap(self, pixmap: QPixmap, image_size: tuple[int, int]) -> None:
         self._source_pixmap = pixmap

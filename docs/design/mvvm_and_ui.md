@@ -265,8 +265,11 @@ MusicEditing   [GPU  RTX…]   [授权  试用]   [深圳 晴 26°C]          v0
 
 **启动流畅度：**
 - 功能页懒创建：`MainWindow` 启动只建首页，其它 TAB 首次点开再 `_ensure_page`
-- `media_player.exe` 延迟到首次打开本地视频再启动（见 [player_decode_flow](player_decode_flow.md) §7）
-- 临时帧清理在后台线程（`main.py`），不堵 UI
+- 空闲预热更晚更稀（约 3s 起，间隔 700ms；Enhance 最后）；Download 历史首次显示再加载
+- `MediaBridge` 延后到首屏后约 200ms；`media_player.exe` 仍开文件才起（`GlVideoWidget` 保持构造时创建，避免换控件叠层）
+- 照片图库 **缓存模式**（默认 `iphoto_cache_mode=true`）：首次加载后常驻，离开只休眠，再进「缓存命中」秒开；启动约 4.5s 后台预热 import  
+- 关闭缓存：`iphoto_cache_mode=false`，可选 `iphoto_idle_teardown_sec=90` 空闲卸载省内存
+- 临时帧清理在后台线程（`main.py`），前缀含 `me_cover_` / `music_preview_` 等；不堵 UI
 
 **检测实现（`client/scripts/core/app_logic.py`）：**
 

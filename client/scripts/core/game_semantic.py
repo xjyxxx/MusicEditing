@@ -204,8 +204,16 @@ def _onnx_event_scores(
     except Exception as e:
         log.warning("game_event.onnx 推理失败，回退 HUD: %s", e)
         cap.release()
+        try:
+            del sess
+        except Exception:
+            pass
         return None
     cap.release()
+    try:
+        del sess
+    except Exception:
+        pass
     log.info("game_event.onnx 打分 n=%d", len(scores))
     return scores
 

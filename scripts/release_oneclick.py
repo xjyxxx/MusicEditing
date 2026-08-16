@@ -129,8 +129,17 @@ def main() -> int:
             )
             if setups:
                 installer = setups[0]
+                if args.sign:
+                    print("[签名] Setup …", flush=True)
+                    _run(
+                        [sys.executable, str(ROOT / "scripts" / "sign_artifact.py"), str(installer)],
+                        check=False,
+                    )
                 manifest_lines.append(
                     f"installer={installer} ({installer.stat().st_size // (1024*1024)} MB)"
+                )
+                manifest_lines.append(
+                    "installer_sign=ATTEMPTED" if args.sign else "installer_sign=SKIPPED"
                 )
             else:
                 manifest_lines.append("installer=NOT_FOUND")
@@ -142,8 +151,8 @@ def main() -> int:
             "",
             "干净机下一步:",
             "  1) 解压 zip 或运行 Setup.exe",
-            "  2) SmartScreen → 更多信息 → 仍要运行（未签名时）",
-            "  3) 闪退则装 VC++ 2015-2022 x64",
+            "  2) SmartScreen → 更多信息 → 仍要运行（未签名时；有证书则不明显）",
+            "  3) 闪退则装 VC++ 可再发行组件 x64（不是 Visual Studio）",
             "  4) 详见 docs/design/distribution.md",
             "",
         ]

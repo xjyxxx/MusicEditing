@@ -58,5 +58,7 @@ if errorlevel 1 (
 
 echo.
 echo 输出在 dist\MusicEditing_Setup_*.exe
+echo [签名] 尝试签名 Setup（无证书则跳过，属正常）…
+python scripts\sign_artifact.py --latest-setup
 echo 发给用户前建议: python scripts\accept_portable.py "!PORTABLE_ABS!"
 exit /b 0

@@ -15,7 +15,7 @@ from typing import List, Optional
 
 
 
-from PySide6.QtCore import QObject, Property, Signal, Slot
+from PySide6.QtCore import QObject, Property, QTimer, Signal, Slot
 
 
 
@@ -139,7 +139,7 @@ class MainViewModel(QObject):
 
         self._asr = AsrEngine(self._app.vosk_model_dir or None)
 
-        self._status_message = "就绪"
+        self._status_message = "引擎加载中…"
 
         self._next_task_id = 1
         self._slice_running = False
@@ -152,12 +152,18 @@ class MainViewModel(QObject):
         self._pipeline_pause = threading.Event()
         self._pipeline_pause.set()
 
+        # 延后 MediaBridge，避免 MainWindow 构造时同步卡主线程
+        QTimer.singleShot(200, self._init_media_bridge)
 
+        self.gpuNameChanged.emit(self.gpu_name)
 
+        self.authTypeChanged.emit(self.auth_type)
+
+    def _init_media_bridge(self) -> None:
+        if self._bridge is not None:
+            return
         try:
-
             self._bridge = MediaBridge()
-
             self._bridge.set_prefer_hw_decode(self._app.prefer_hw_decode)
             # 超分 / LaMa：有 NVIDIA 时尝试 ORT CUDA EP（失败会回退 CPU）
             self._bridge.set_prefer_cuda(self._app.use_gpu)
@@ -167,18 +173,13 @@ class MainViewModel(QObject):
             self._bridge.set_yt_dlp_cookies_file(
                 getattr(self._app, "yt_dlp_cookies_file", "") or ""
             )
-
             self._status_message = f"引擎就绪 (FFmpeg {self._bridge.ffmpeg_version})"
-
         except FileNotFoundError as e:
-
             self._status_message = str(e)
-
-
-
+        except Exception as e:
+            self._status_message = f"引擎加载失败: {e}"
+        self.statusMessageChanged.emit(self._status_message)
         self.gpuNameChanged.emit(self.gpu_name)
-
-        self.authTypeChanged.emit(self.auth_type)
 
 
 
@@ -188,7 +189,10 @@ class MainViewModel(QObject):
 
         return self._bridge
 
-
+    @property
+    def app(self) -> AppLogic:
+        """供 MainWindow 复用，避免再 new AppLogic（重复 nvidia-smi）。"""
+        return self._app
 
     @Property(str, notify=statusMessageChanged)
 

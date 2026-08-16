@@ -19,7 +19,7 @@
 | `test_cookie_probe_hint.py` | Cookie/限流/无音轨白话提示 |
 | `test_trial_policy.py` | 试用配额门禁 |
 | `test_license_activate.py` | 卡密激活 |
-| `test_pack_verify.py` / `test_update_check.py` | 打包与更新探测 |
+| `test_pack_verify.py` / `test_update_check.py` / `test_ota_update.py` | 打包、更新探测、OTA 打磨 |
 | `scripts/smoke_place_map_thumbs.py` | 地点 CPU 叠层缩略图 + 无 GPS 空状态 |
 
 期望末行：`ALL PASS`
@@ -65,6 +65,8 @@ $env:MUSIC_CODE_SIGN_THUMBPRINT="你的证书SHA1"; python scripts\pack_for_shar
 | `--with-cuda-ort` | 带 CUDA ORT EP（约 +300MB） |
 | `--with-llm` | 额外带 `.gguf` / vosk |
 | `--sign` | 尝试 `signtool` 签 `MusicEditing.exe` |
+| `--with-iphoto-extras` | runtime 安装 HEIC 等（`requirements-iphoto`） |
+| `--with-maps` | 拷贝 maps/font（体积大；默认不拷） |
 | `--ship-source` | **禁止外发**：保留可读 `.py`（仅本机调试） |
 | `--no-scenedetect` | 不带 PySceneDetect |
 
@@ -72,9 +74,7 @@ $env:MUSIC_CODE_SIGN_THUMBPRINT="你的证书SHA1"; python scripts\pack_for_shar
 
 **代码安全：** 默认删除业务 `.py`；`.pyc` 仍可被专业工具反编译。详见 [distribution.md](distribution.md) §1.1。
 
-**闪退 / SmartScreen：** 极少数机再装「VC++ **可再发行组件** x64」（不是 VS）；未签名时点「更多信息 → 仍要运行」。详见包内 `使用说明.txt` 与 [distribution.md](distribution.md) §1.2。
-
-**闪退 / SmartScreen：** 先装 VC++ 2015–2022 x64；未签名时点「更多信息 → 仍要运行」。详见包内 `使用说明.txt`。
+**闪退 / SmartScreen：** 极少数机再装「VC++ **可再发行组件** x64」（不是 VS）；未签名时点「更多信息 → 仍要运行」。有证书时 `pack --sign` 签启动器，`build_installer.bat` 会再尝试签 Setup（无证书跳过属正常）。详见包内 `使用说明.txt` 与 [distribution.md](distribution.md) §1.2 / §2。
 
 打包机需有 VS C++ 工具链（用于编译无黑框启动器）；脚本写临时 `build_launcher.bat` 调 `vcvars64`，避免 `cmd /c` 嵌套引号导致 exe 编译失败。
 
@@ -82,8 +82,9 @@ $env:MUSIC_CODE_SIGN_THUMBPRINT="你的证书SHA1"; python scripts\pack_for_shar
 
 - 试用：AI 4× / 队列 / LaMa 门禁；高光≤20、竖屏≤10、最长边≤720p（`trial_policy`）
 - `app.conf`：`license_purchase_url`、`license_server_url`（`POST /v1/activate`）
-- 演示服务：`python scripts\license_server\server.py` + `gen_keys.py`（详见 [distribution.md](distribution.md)）
+- 演示服务：`python scripts\license_server\server.py` + `gen_keys.py`；支付成功后调 `POST /v1/issue` 发卡（详见 [distribution.md](distribution.md)）
 - 个人中心：「打开购买页」+ 卡密兑换
+- 可选打包：`--with-iphoto-extras` / `--with-maps`（图库完整能力，体积更大）
 
 ## 3.2 安装包（Inno）
 
@@ -100,16 +101,19 @@ python scripts\accept_portable.py
 # 然后按打印出的 SmartScreen / VC++ 步骤在另一台电脑手测
 ```
 
-## 3.4 自动更新通道（可选上线）
+## 3.4 自动更新 / OTA（可选上线）
 
 ```powershell
+# 先有 dist 产物（Share/Portable/Setup），再发 manifest（含 sha256）
 python scripts\publish_update_manifest.py --version 0.2.0 --notes "说明" --base-url https://cdn.example.com/me/
+# 可选落地页: --landing-url https://cdn.example.com/me/download.html
 # 上传 dist\update\ 到 CDN
-# 客户端 app.conf: update_manifest_url=…/musicediting_update.json
-# 可选: update_check_on_startup=true
-# OTA 预留: 客户端「下载到本地」→ 暂存+校验；自动替换见 distribution.md §5.3（默认关闭）
-# 本地联调: python scripts\serve_update_channel.py
-# 发版包勿留下 127.0.0.1 联调地址
+# 客户端 app.conf:
+#   update_manifest_url=https://cdn…/musicediting_update.json
+#   update_check_on_startup=true
+# OTA: 检查更新 →「下载并升级」→ 确认后退出替换便携目录（见 distribution.md §5.3）
+# 正式包禁止 127.0.0.1；本地联调: python scripts\serve_update_channel.py
+# 短测含: test_ota_update / test_ota_apply_helper
 ```
 
 完整 P0→P3 跑通表见 [distribution.md](distribution.md) §6。

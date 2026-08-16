@@ -64,10 +64,10 @@ class PhotoEditDialog(QDialog):
         self._viewer.renderFailed.connect(self._on_gpu_failed)
         self._preview_stack.addWidget(self._software)
         self._preview_stack.addWidget(self._viewer)
-        # 两层同时保持可见：软件画面在上层立即显示，底层 GL 可并行创建上下文。
-        # renderReady 到达后再把 GPU 层提升，避免初始化期间出现黑屏。
+        # 初始化用 StackAll 便于 GL 预热；就绪/失败后立刻改 StackOne，避免双层互盖
         self._preview_stack.layout().setStackingMode(QStackedLayout.StackAll)
         self._preview_stack.setCurrentWidget(self._software)
+        self._viewer.hide()
 
         preview_panel = QWidget()
         preview_layout = QVBoxLayout(preview_panel)
@@ -195,7 +195,10 @@ class PhotoEditDialog(QDialog):
         if self._gpu_attempted or self._source_image.isNull():
             return
         self._gpu_attempted = True
-        # StackAll 让隐藏在软件画面下方的 QOpenGLWidget 也能初始化；成功前不暴露空白层。
+        # 短暂显示隐藏的 GL 以初始化上下文；成功前软件层在上
+        self._viewer.show()
+        self._preview_stack.layout().setStackingMode(QStackedLayout.StackAll)
+        self._preview_stack.setCurrentWidget(self._software)
         self._viewer.update()
         QTimer.singleShot(900, self._gpu_watchdog)
 
@@ -204,16 +207,26 @@ class PhotoEditDialog(QDialog):
             reason = self._viewer.gl_error or "OpenGL 首帧未在 900ms 内就绪"
             self._on_gpu_failed(reason)
 
+    def _use_stack_one(self) -> None:
+        lay = self._preview_stack.layout()
+        if lay is not None:
+            lay.setStackingMode(QStackedLayout.StackOne)
+
     def _on_gpu_ready(self) -> None:
         self._gpu_rendered = True
+        self._use_stack_one()
         if self._has_geometry_adjustment():
+            self._viewer.hide()
             self._preview_stack.setCurrentWidget(self._software)
             self._render_status.setText("透视/旋转预览 · NumPy/OpenCV 安全裁剪")
         else:
+            self._viewer.show()
             self._preview_stack.setCurrentWidget(self._viewer)
             self._render_status.setText("GPU 实时预览 · OpenGL 3.3")
 
     def _on_gpu_failed(self, reason: str) -> None:
+        self._use_stack_one()
+        self._viewer.hide()
         self._preview_stack.setCurrentWidget(self._software)
         compact = " ".join(str(reason or "OpenGL 不可用").split())
         if "setUniformValue" in compact:
@@ -260,9 +273,13 @@ class PhotoEditDialog(QDialog):
             number = self._sliders[key].value() / float(scale)
             getattr(self, f"_{key}_label").setText(f"{number:+.{decimals}f}")
         if self._has_geometry_adjustment():
+            self._use_stack_one()
+            self._viewer.hide()
             self._preview_stack.setCurrentWidget(self._software)
             self._render_status.setText("透视/旋转预览 · NumPy/OpenCV 安全裁剪")
         elif self._viewer.gl_ready:
+            self._use_stack_one()
+            self._viewer.show()
             self._preview_stack.setCurrentWidget(self._viewer)
             self._render_status.setText("GPU 实时预览 · OpenGL 3.3")
         self._software_timer.start()
