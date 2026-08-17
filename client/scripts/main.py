@@ -19,6 +19,10 @@ try:
 except Exception:
     pass
 
+# 须在首次 import QtMultimedia 之前：用系统 WMF，避免与引擎目录 av*.dll 混载导致
+# 「一点播放就跳到最后一帧」。开发机也可设 QT_MEDIA_BACKEND=ffmpeg 覆盖。
+os.environ.setdefault("QT_MEDIA_BACKEND", "windows")
+
 from core.app_logger import setup_logging
 
 setup_logging("MusicEditing", os.environ.get("MUSIC_LOG_LEVEL", "INFO"))

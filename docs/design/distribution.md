@@ -39,15 +39,32 @@ python scripts\accept_portable.py
 | 禁止外发开关 | `--ship-source`（可读 `.py`）；外发请用 `pack_for_share` |
 | 诚实边界 | `.pyc` **仍可被反编译**，只是提高门槛；军工级需另行 Nuitka/加壳 |
 | 无黑框子进程 | 启动时 `install_hidden_console_patch`：media_cli/ffmpeg/media_player 等不再弹控制台（否则 pythonw 下狂闪且 UI 卡） |
+| 内嵌 runtime | 官方 embeddable Python + **瘦身后的** PySide6/numpy/opencv；默认**裁掉** WebEngine/Designer/3D 与未用的 scipy；vosk 仅 `full`/`--with-llm` |
+| 图库最小依赖 | 默认 `requirements-iphoto-min`（jsonschema/Pillow…，**不含** imagehash→scipy） |
 
 ```powershell
-# 唯一推荐外发入口（禁止带源码）
+# 唯一推荐外发入口（禁止带源码；默认瘦包）
+.\scripts\只打包.bat
+# 或:
 .\scripts\pack_for_share.bat
-# 演示体积:
+# 演示更小:
 python scripts\pack_for_share.py --profile slim
+# 需要去水印/超分 ONNX（约 +200MB）:
+python scripts\pack_for_share.py --with-models
 ```
 
 输出：`dist/MusicEditing_Share_YYYYMMDD*.zip`。
+
+### 体积预期（外发瘦包）
+
+| 项 | 约略 |
+|----|------|
+| zip（`compresslevel=9`） | 视机器约 **300–450MB**（旧包 700MB+ 多为未裁剪 / 带 models） |
+| 解压后目录 | runtime 裁剪后约 **400MB** + 引擎 DLL；无 `lama.onnx` 时通常 **&lt;700MB** |
+| 默认不带 | `models/*.onnx`、测试视频、WebEngine/Designer、scipy、vosk |
+| 硬底线 | 内嵌 Python + PySide6 + OpenCV + FFmpeg 引擎，无法压成「几 MB 单文件」 |
+
+打包日志应出现 `[裁剪] runtime 已删约 … MB`；若无此行，说明仍是旧脚本产物。
 
 ---
 
@@ -62,7 +79,7 @@ python scripts\pack_for_share.py --profile slim
 
 打包脚本会：
 
-1. 内嵌 `runtime\`（官方 embeddable Python + PySide6 等）  
+1. 内嵌 `runtime\`（官方 embeddable Python + 裁剪后的 PySide6/numpy/opencv；默认无 WebEngine/vosk/scipy）  
 2. 尽量把 **VC++ CRT DLL**（`vcruntime140.dll` / `msvcp140.dll` 等）拷进引擎目录——这是「可再发行运行库」，**不是** Visual Studio  
 
 极少数干净机仍闪退时，再装微软官网的「Visual C++ 2015–2022 **可再发行组件** x64」（几 MB），仍然**不是**装 VS。
@@ -254,14 +271,21 @@ REM   update_check_on_startup=true
 2. 解压 `MusicEditing_Portable_*.zip` 或跑 `MusicEditing_Setup_*.exe`  
 3. 若 SmartScreen：更多信息 → 仍要运行  
 4. 双击 `MusicEditing.exe`（**无需装 Visual Studio / Python**）  
-5. 若闪退：装 [VC++ 可再发行组件 x64](https://learn.microsoft.com/zh-cn/cpp/windows/latest-supported-vc-redist)（小运行库，不是 VS）  
-6. 打开 `tests\test_video.mp4`（包内若有）→ 播放 / Seek  
-7. 个人中心看试用配额；帮助「检查更新」在未配置 URL 时应提示未配置（勿指 127.0.0.1）
+5. 若闪退 / **黑框狂闪**：装 [VC++ 可再发行组件 x64](https://learn.microsoft.com/zh-cn/cpp/windows/latest-supported-vc-redist)（小运行库，不是 VS）；务必用完整解压目录里的 `MusicEditing.exe`  
+6. 打开包内测试视频 → 播放 / Seek；若打不开：看播放器标题「打开失败…」，并打开 `docs\log_playerbackend.txt`、`docs\log_media_player.txt`  
+7. **一点播放就跳到最后一帧**：确认是本轮修复后的新包（启动器不再污染 PATH + `QT_MEDIA_BACKEND=windows`）；临时验证可在 bat 里设 `set QT_MEDIA_BACKEND=windows`  
+8. **照片图库打不开**：新包已带 `requirements-iphoto-min`；旧包会因缺 `jsonschema` 回退经典图库。HEIC 另需 `--with-iphoto-extras`  
+9. 仍失败：个人中心关掉 GPU 再试；画面闪/黑可设 `MUSIC_SOFTWARE_GL=1` 后重启  
+10. 个人中心看试用配额；帮助「检查更新」在未配置 URL 时应提示未配置（勿指 127.0.0.1）
+
+`pack_portable` / `pack_for_share` 验收现已**硬检查**播放 DLL（`avcodec/avutil/swscale…`、`glew32`、`vcruntime140`、`msvcp140`）；缺了会打包失败，避免「本机能播、干净机不能播」。
 
 本机预检：
 
 ```powershell
 python scripts\accept_portable.py
+# 模拟外发环境（干净 PATH）：叠加最新修复后测图库 import + 解码 + 音频时钟
+python scripts\smoke_portable_env.py
 ```
 
 ### 6.2 更新通道一次上线（需你的 CDN）

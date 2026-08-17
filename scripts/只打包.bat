@@ -1,7 +1,9 @@
 @echo off
 setlocal
 cd /d "%~dp0\.."
-echo === 只打包（外发：zip + 内嵌 Python + 无业务源码）===
+echo === 只打包（外发瘦包：无 models / 无测试片 / zip 最高压缩）===
+echo 需要 ONNX 去水印超分时加: --with-models
+echo 需要测试视频时加: --with-tests
 python scripts\pack_for_share.py %*
 if errorlevel 1 exit /b 1
 echo.

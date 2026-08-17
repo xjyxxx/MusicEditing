@@ -36,7 +36,13 @@ def main() -> int:
         default="standard",
         help="slim=演示 / standard=默认可卖 / full=含 LLM+vosk",
     )
-    ap.add_argument("--skip-models", action="store_true", help="不拷贝 models")
+    ap.add_argument("--skip-models", action="store_true", help="不拷贝 models（省 ~200MB）")
+    ap.add_argument(
+        "--with-models",
+        action="store_true",
+        help="强制带上 ONNX models（覆盖默认瘦包）",
+    )
+    ap.add_argument("--with-tests", action="store_true", help="打包测试视频（默认不带）")
     ap.add_argument("--with-cuda-ort", action="store_true", help="包含 CUDA ORT EP")
     ap.add_argument("--no-scenedetect", action="store_true", help="不带 PySceneDetect")
     ap.add_argument("--with-llm", action="store_true", help="额外拷贝 .gguf / vosk")
@@ -62,7 +68,9 @@ def main() -> int:
         _die("外发包必须内嵌 Python（不可 --no-embed-python）。")
 
     prof = dict(PACK_PROFILES[args.profile])
-    with_models = bool(prof["with_models"]) and not args.skip_models
+    # 外发默认瘦包：不带 ONNX models（~200MB）；需要去水印/超分时加 --with-models
+    # --skip-models 保留兼容（与默认相同）；--with-models 才强制带上
+    with_models = bool(args.with_models) and not args.skip_models
     with_scenedetect = bool(prof["with_scenedetect"]) and not args.no_scenedetect
     with_llm = bool(prof["with_llm"]) or args.with_llm
     with_cuda_ort = bool(prof["with_cuda_ort"]) or args.with_cuda_ort
@@ -74,6 +82,11 @@ def main() -> int:
         out = (ROOT / out).resolve()
 
     print("=== 外发打包（强制：zip + 内嵌 Python + 严格无业务 .py）===", flush=True)
+    print(
+        f"  models={'是' if with_models else '否（默认瘦包，加 --with-models 可开）'}  "
+        f"tests={'是' if args.with_tests else '否'}",
+        flush=True,
+    )
     result = pack(
         out,
         with_models=with_models,
@@ -88,6 +101,7 @@ def main() -> int:
         strict_no_source=True,
         with_iphoto_extras=args.with_iphoto_extras,
         with_maps=args.with_maps,
+        skip_tests=not args.with_tests,
     )
     print("\n可以发给别人的文件:", flush=True)
     print(f"  {result}", flush=True)

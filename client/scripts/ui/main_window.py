@@ -1590,9 +1590,20 @@ class MainWindow(QMainWindow):
 
 
 def run_app():
+    import os
     import sys
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QSurfaceFormat
+    from ui.gl_video_widget import _default_surface_format
     from ui.theme import app_stylesheet, apply_dark_palette
     from ui.wheel_guard import harden_wheel_widgets, install_wheel_focus_guard
+
+    # 差显卡 / 远程桌面：设 MUSIC_SOFTWARE_GL=1 可减轻黑屏闪烁
+    if (os.environ.get("MUSIC_SOFTWARE_GL") or "").strip().lower() in ("1", "true", "yes", "on"):
+        QApplication.setAttribute(Qt.AA_UseSoftwareOpenGL, True)
+
+    # 须在 QApplication 之前设定，避免首个 GL 控件创建后再改 format 触发重布局抖动
+    QSurfaceFormat.setDefaultFormat(_default_surface_format())
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
@@ -1605,5 +1616,7 @@ def run_app():
     win = MainWindow()
     harden_wheel_widgets(win)
     app.aboutToQuit.connect(win.shutdown)
+    # 固定初始几何：偏竖构图，避免过宽、画面区过扁
+    win.resize(1080, 860)
     win.show()
     sys.exit(app.exec())

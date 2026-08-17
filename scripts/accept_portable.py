@@ -38,7 +38,11 @@ def _find_latest_portable() -> Path | None:
         return None
     cands = [
         p for p in dist.iterdir()
-        if p.is_dir() and p.name.startswith("MusicEditing_Portable")
+        if p.is_dir()
+        and (
+            p.name.startswith("MusicEditing_Portable")
+            or p.name.startswith("MusicEditing_Share")
+        )
     ]
     if not cands:
         return None
@@ -92,7 +96,7 @@ def main() -> int:
 
     target: Path | None = args.zip or args.path or _find_latest_portable()
     if target is None:
-        print("[失败] 未找到 dist/MusicEditing_Portable_*，请先打包", flush=True)
+        print("[失败] 未找到 dist/MusicEditing_Share_* 或 MusicEditing_Portable_*，请先打包", flush=True)
         return 1
     if not target.is_absolute():
         target = (ROOT / target).resolve()

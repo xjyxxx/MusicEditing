@@ -1,0 +1,5 @@
+# 外发包 runtime 依赖（对方电脑能跑即可；不含开发机可选 ASR）
+# 完整开发环境仍用 requirements.txt（含 vosk）
+PySide6>=6.6.0
+numpy>=1.24.0
+opencv-python-headless>=4.8.0

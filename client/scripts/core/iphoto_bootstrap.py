@@ -184,6 +184,11 @@ def try_import_iphoto():
         return mods, None
     except Exception as exc:  # noqa: BLE001 — 宿主页需要展示可读错误
         err = f"{type(exc).__name__}: {exc}"
+        low = err.lower()
+        if "jsonschema" in low or "no module named" in low:
+            err += (
+                "（外发包需含 requirements-iphoto-min；完整 HEIC 等请 --with-iphoto-extras 重打包）"
+            )
         _CACHED_ERR = err
         return None, err
 

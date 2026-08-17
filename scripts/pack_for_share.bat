@@ -1,8 +1,8 @@
 @echo off
 setlocal
 cd /d "%~dp0\.."
-echo === 外发打包 MusicEditing（zip + 内嵌 Python + 严格无业务源码）===
-echo 禁止带 --ship-source；输出 dist\MusicEditing_Share_*.zip
+echo === 外发打包 MusicEditing（瘦包：无 models / 无测试片 / zip 最高压缩）===
+echo 禁止 --ship-source；需要 ONNX 加 --with-models；输出 dist\MusicEditing_Share_*.zip
 echo.
 python scripts\pack_for_share.py %*
 if errorlevel 1 (

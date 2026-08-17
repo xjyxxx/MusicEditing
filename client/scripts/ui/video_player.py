@@ -144,6 +144,9 @@ class VideoPlayerWidget(QWidget):
         self._display.set_placeholder(
             "请打开本地视频或音乐\n点击画面可选文件；播放中点击可暂停 / 继续"
         )
+        self._display.renderFailed.connect(self._on_gl_render_failed)
+        self._gl_failed_once = False
+        self._eof_streak = 0
         self._btn_open = QPushButton("打开文件")
         self._btn_play = QPushButton("播放")
 
@@ -615,15 +618,30 @@ class VideoPlayerWidget(QWidget):
         self._decode_future = None
         self._last_shown_frame_ts = -1.0
 
-        if self._backend:
-            self._backend.set_hwaccel(self._hw_decode_preferred)
+        if not self._backend:
+            self._title.setText("打开失败: 未找到 media_player.exe（请用完整便携包）")
+            return
+
+        self._backend.set_hwaccel(self._hw_decode_preferred)
 
         try:
             info = self._backend.open(path)
         except RuntimeError as e:
-            log.error("打开视频失败: %s", e)
-            self._title.setText(f"打开失败: {e}")
-            return
+            # 部分干净机硬解驱动异常：自动关硬解再试一次
+            if self._hw_decode_preferred:
+                log.warning("硬解开失败，改 CPU 重试: %s", e)
+                try:
+                    self._backend.set_hwaccel(False)
+                    self._hw_decode_preferred = False
+                    info = self._backend.open(path)
+                except RuntimeError as e2:
+                    log.error("打开视频失败(CPU): %s", e2)
+                    self._title.setText(f"打开失败: {e2}")
+                    return
+            else:
+                log.error("打开视频失败: %s", e)
+                self._title.setText(f"打开失败: {e}")
+                return
 
         self._hw_decode_active = info.hw_decode
         self._apply_opencv_filter()
@@ -691,6 +709,17 @@ class VideoPlayerWidget(QWidget):
 
         if auto_play:
             self.play()
+
+    def _on_gl_render_failed(self, reason: str):
+        """差显卡 / 远程桌面：GL 失败时控件内已软件回退；标题给一次提示。"""
+        if self._gl_failed_once:
+            return
+        self._gl_failed_once = True
+        log.warning("OpenGL 显示失败，已软件回退: %s", reason)
+        tip = "画面已改用软件绘制（OpenGL 不可用）"
+        cur = self._title.text() or ""
+        if tip not in cur:
+            self._title.setText(f"{cur}  ·  {tip}" if cur else tip)
 
     def _apply_opencv_filter(self):
         """应用当前滤镜模式与设备（未编译 OpenCV 时静默忽略）"""
@@ -848,6 +877,7 @@ class VideoPlayerWidget(QWidget):
                     self._progress.setRange(0, max(int(dur * 1000), 1))
             self._audio.play(self._position_sec)
             self._playing = True
+            self._eof_streak = 0
             self._reset_transport_controls(playing=True)
             self._show_music_cover(playing=True)
             self._schedule_tick()
@@ -878,6 +908,7 @@ class VideoPlayerWidget(QWidget):
 
         self._playing = True
         self._reset_transport_controls(playing=True)
+        self._eof_streak = 0
         self._schedule_tick()
 
         log.info(
@@ -1180,8 +1211,19 @@ class VideoPlayerWidget(QWidget):
             result = self._pull_and_show_frame(apply_filter=None)
 
         if result is None:
-
-            # 记为片尾，便于下次点播放从头开始
+            # 单次 FRAME_EOF 可能是音频时钟异常追帧误伤；连续确认后再锁片尾
+            self._eof_streak = getattr(self, "_eof_streak", 0) + 1
+            near_end = (
+                self._duration_sec > 0
+                and self._position_sec >= self._duration_sec - 0.35
+            )
+            if self._eof_streak < 3 and not near_end:
+                log.warning(
+                    "疑似假 EOF streak=%d pos=%.2f dur=%.2f，继续播",
+                    self._eof_streak, self._position_sec, self._duration_sec,
+                )
+                self._schedule_tick(self._sync_timer_ms)
+                return
             if self._duration_sec > 0:
                 self._position_sec = self._duration_sec
                 self._progress.setValue(self._progress.maximum())
@@ -1189,6 +1231,7 @@ class VideoPlayerWidget(QWidget):
             self.pause()
             return
 
+        self._eof_streak = 0
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         self._schedule_tick(max(1, self._sync_timer_ms - elapsed_ms))
 
@@ -1219,6 +1262,20 @@ class VideoPlayerWidget(QWidget):
 
         audio_sec = self._audio.position_sec()
         now = time.monotonic()
+
+        # 开播保护：便携包若 Qt 音频时钟误跳到片尾，改走视频时钟，避免立刻追到 EOF
+        if (
+            self._play_started_wall
+            and now - self._play_started_wall < 2.5
+            and self._duration_sec > 1.0
+            and audio_sec >= max(0.0, self._duration_sec - 0.4)
+        ):
+            log.warning(
+                "音频时钟异常跳尾 audio=%.2f dur=%.2f，改用视频时钟",
+                audio_sec, self._duration_sec,
+            )
+            return self._pull_and_show_frame(apply_filter=None)
+
         audio_idx = self._frame_index(audio_sec)
 
         # 双时钟长期漂移 → 软校正（冷却 3.5s，连续约 12 次超阈值）
@@ -1292,7 +1349,12 @@ class VideoPlayerWidget(QWidget):
             return
         fi = self._frame_interval
         want_idx = shown_idx + 1
-        if audio_idx is not None and audio_idx - shown_idx > 6:
+        # 开播 2s 内禁止大跨度追帧，避免音频时钟异常把画面拽到片尾
+        catch_up_ok = (
+            not self._play_started_wall
+            or (time.monotonic() - self._play_started_wall) >= 2.0
+        )
+        if catch_up_ok and audio_idx is not None and audio_idx - shown_idx > 6:
             want_idx = audio_idx - 1
         target_min = max(0.0, want_idx * fi - fi * 0.02)
         token = self._decode_token

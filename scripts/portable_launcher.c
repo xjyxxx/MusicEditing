@@ -33,11 +33,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
     wchar_t pythonw[MAX_PATH];
     wchar_t script_pyc[MAX_PATH];
     wchar_t script_py[MAX_PATH];
-    wchar_t bin_dir[MAX_PATH];
     _snwprintf_s(pythonw, MAX_PATH, _TRUNCATE, L"%sruntime\\pythonw.exe", exe_path);
     _snwprintf_s(script_pyc, MAX_PATH, _TRUNCATE, L"%sclient\\scripts\\main.pyc", exe_path);
     _snwprintf_s(script_py, MAX_PATH, _TRUNCATE, L"%sclient\\scripts\\main.py", exe_path);
-    _snwprintf_s(bin_dir, MAX_PATH, _TRUNCATE, L"%sbuild_x64\\bin\\Release", exe_path);
 
     if (GetFileAttributesW(pythonw) == INVALID_FILE_ATTRIBUTES) {
         fail(L"Missing runtime\\pythonw.exe\n"
@@ -58,16 +56,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
         return 3;
     }
 
-    wchar_t old_path[32768];
-    DWORD plen = GetEnvironmentVariableW(L"PATH", old_path, 32768);
-    if (plen == 0 || plen >= 32768) {
-        old_path[0] = L'\0';
-    }
-    wchar_t new_path[32768];
-    _snwprintf_s(new_path, 32768, _TRUNCATE, L"%s;%s", bin_dir, old_path);
-    SetEnvironmentVariableW(L"PATH", new_path);
+    /* 勿把引擎 bin 塞进 Python PATH（会与 PySide6 FFmpeg 混载导致播放跳片尾）。
+     * media_player / media_cli 在各自 Popen 里单独 prepend exe 目录。 */
     SetEnvironmentVariableW(L"PYTHONUTF8", L"1");
     SetEnvironmentVariableW(L"PYTHONNOUSERSITE", L"1");
+    /* Windows 多媒体后端，避开 Qt FFmpeg 插件与引擎 av*.dll 冲突 */
+    SetEnvironmentVariableW(L"QT_MEDIA_BACKEND", L"windows");
 
     wchar_t cmdline[4096];
     _snwprintf_s(cmdline, 4096, _TRUNCATE, L"\"%s\" \"%s\"", pythonw, script);

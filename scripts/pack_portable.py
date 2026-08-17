@@ -345,11 +345,194 @@ def _remove_shipped_scenedetect_sources(out_root: Path) -> None:
         shutil.rmtree(sd, ignore_errors=True)
 
 
+def _rm_tree_or_file(path: Path) -> int:
+    """删除文件或目录，返回释放的字节数（尽力估算）。"""
+    if not path.exists():
+        return 0
+    freed = 0
+    try:
+        if path.is_file() or path.is_symlink():
+            freed = path.stat().st_size
+            path.unlink(missing_ok=True)
+            return freed
+        for p in path.rglob("*"):
+            if p.is_file() or p.is_symlink():
+                try:
+                    freed += p.stat().st_size
+                except OSError:
+                    pass
+        shutil.rmtree(path, ignore_errors=True)
+    except OSError:
+        pass
+    return freed
+
+
+def _prune_embed_runtime(
+    runtime: Path,
+    *,
+    keep_vosk: bool = False,
+    keep_maps_qt: bool = False,
+) -> int:
+    """裁剪外发 runtime：去掉 WebEngine / 开发工具 / 未使用科学计算包等。
+
+    业务未使用 QtWebEngine；imagehash→scipy 亦非必需。可省约 0.4~0.6GB。
+    """
+    site = runtime / "Lib" / "site-packages"
+    if not site.is_dir():
+        return 0
+    freed = 0
+    pyside = site / "PySide6"
+
+    # 1) 整包可删的 site-packages（死依赖 / 可选 ASR）
+    drop_pkgs = [
+        "scipy",
+        "scipy.libs",
+        "pywt",
+        "imagehash",
+        "ImageHash",
+        "pip",
+        "setuptools",
+        "wheel",
+        "pkg_resources",
+        # GUI 外发不需要 typer/rich 着色链（旧 min 依赖残留）
+        "typer",
+        "rich",
+        "pygments",
+        "markdown_it",
+        "mdurl",
+        "shellingham",
+        "click",
+    ]
+    if not keep_vosk:
+        drop_pkgs.extend(["vosk", "srt", "websockets"])
+    for name in drop_pkgs:
+        for p in site.glob(name):
+            freed += _rm_tree_or_file(p)
+        for p in site.glob(f"{name}-*.dist-info"):
+            freed += _rm_tree_or_file(p)
+        for p in site.glob(f"{name}.libs"):
+            freed += _rm_tree_or_file(p)
+
+    if not pyside.is_dir():
+        print(f"[裁剪] runtime 已删约 {freed / (1024 ** 2):.0f} MB（无 PySide6 目录）", flush=True)
+        return freed
+
+    # 2) PySide6：WebEngine / 3D / Designer / Charts…（桌面宿主不用）
+    name_globs = [
+        "*WebEngine*",
+        "*Quick3D*",
+        "*Qt3D*",
+        "*Designer*",
+        "*Charts*",
+        "*Graphs*",
+        "*DataVisualization*",
+        "*Pdf*",
+        "*Bluetooth*",
+        "*Nfc*",
+        "*Sensors*",
+        "*SerialBus*",
+        "*SerialPort*",
+        "*RemoteObjects*",
+        "*TextToSpeech*",
+        "*HttpServer*",
+        "*WebChannel*",
+        "*WebSockets*",
+        "*WebView*",
+        "*CanBus*",
+    ]
+    if not keep_maps_qt:
+        name_globs.extend(
+            [
+                "*Location*",
+                "*Positioning*",
+                "*VirtualKeyboard*",
+            ]
+        )
+    for pat in name_globs:
+        for p in pyside.glob(pat):
+            freed += _rm_tree_or_file(p)
+
+    for rel in (
+        "resources",
+        "translations/qtwebengine_locales",
+        "include",
+        "metatypes",
+        "typesystems",
+    ):
+        freed += _rm_tree_or_file(pyside / rel)
+
+    if not keep_maps_qt:
+        freed += _rm_tree_or_file(pyside / "qml")
+
+    # 开发期工具 exe
+    for pat in (
+        "assistant.exe",
+        "designer.exe",
+        "linguist.exe",
+        "qmlls.exe",
+        "qmlformat.exe",
+        "qml.exe",
+        "qmlcachegen.exe",
+        "qmlimportscanner.exe",
+        "qmllint.exe",
+        "qmltyperegistrar.exe",
+        "qsb.exe",
+        "pyside6-*.exe",
+    ):
+        for p in pyside.glob(pat):
+            freed += _rm_tree_or_file(p)
+    for p in pyside.glob("*.pyi"):
+        freed += _rm_tree_or_file(p)
+
+    # 翻译只留中英，其它语言包可省几十 MB
+    tr = pyside / "translations"
+    if tr.is_dir():
+        keep_tr = {"qt_zh_CN.qm", "qt_zh_TW.qm", "qt_en.qm", "qtbase_zh_CN.qm", "qtbase_en.qm"}
+        for f in tr.glob("*.qm"):
+            if f.name not in keep_tr and "webengine" not in f.name.lower():
+                # 非中英且非已删 webengine：可删大部分
+                if not (
+                    f.name.startswith("qt_zh")
+                    or f.name.startswith("qt_en")
+                    or f.name.startswith("qtbase_zh")
+                    or f.name.startswith("qtbase_en")
+                    or f.name.startswith("qt_help_zh")
+                    or f.name.startswith("qt_help_en")
+                ):
+                    freed += _rm_tree_or_file(f)
+
+    # plugins 里明显无用的
+    plug = pyside / "plugins"
+    if plug.is_dir():
+        for sub in (
+            "designer",
+            "qmltooling",
+            "webview",
+            "canbus",
+            "sensors",
+            "sceneparsers",
+            "assetimporters",
+            "geoservices",
+            "position",
+            "texttospeech",
+            "scxmldatamodel",
+            "sqldrivers",
+        ):
+            if keep_maps_qt and sub in ("geoservices", "position"):
+                continue
+            freed += _rm_tree_or_file(plug / sub)
+
+    print(f"[裁剪] runtime 已删约 {freed / (1024 ** 2):.0f} MB（WebEngine/scipy/工具等）", flush=True)
+    return freed
+
+
 def _embed_python_runtime(
     out_root: Path,
     *,
     with_scenedetect: bool,
     with_iphoto_extras: bool = False,
+    with_vosk: bool = False,
+    with_maps: bool = False,
 ) -> Path:
     """下载官方 embeddable Python，预装依赖（真正可拷到别人电脑）。"""
     if struct_calcsize_p() != 8:
@@ -377,13 +560,33 @@ def _embed_python_runtime(
     print("[嵌入] 安装 pip …", flush=True)
     _run([str(py), str(get_pip), "--no-warn-script-location"])
 
+    # 外发优先用瘦身 requirements-runtime（无 vosk）；开发机仍用 requirements.txt
+    req_runtime = ROOT / "client" / "scripts" / "requirements-runtime.txt"
     req = out_root / "client" / "scripts" / "requirements.txt"
-    if not req.is_file():
-        _die(f"缺少 {req}")
+    if req_runtime.is_file():
+        _copy_file(req_runtime, out_root / "client" / "scripts" / "requirements-runtime.txt")
+        req_use = out_root / "client" / "scripts" / "requirements-runtime.txt"
+    else:
+        if not req.is_file():
+            _die(f"缺少 {req}")
+        req_use = req
 
-    print("[嵌入] pip 安装 PySide6 / numpy / opencv / vosk …（需联网，数分钟）", flush=True)
+    print("[嵌入] pip 安装 PySide6 / numpy / opencv …（需联网，数分钟）", flush=True)
     _run([str(py), "-m", "pip", "install", "--upgrade", "pip", "wheel"])
-    _run([str(py), "-m", "pip", "install", "-r", str(req)])
+    _run([str(py), "-m", "pip", "install", "-r", str(req_use)])
+
+    if with_vosk:
+        print("[嵌入] pip 安装 vosk（ASR 可选）…", flush=True)
+        _run([str(py), "-m", "pip", "install", "vosk>=0.3.45"])
+
+    # 图库最小依赖：否则外发包一点「照片图库」就因缺 jsonschema 整页失败
+    iphoto_min = ROOT / "client" / "scripts" / "requirements-iphoto-min.txt"
+    if iphoto_min.is_file():
+        print("[嵌入] pip 安装 requirements-iphoto-min（图库可开）…", flush=True)
+        _run([str(py), "-m", "pip", "install", "-r", str(iphoto_min)])
+        _copy_file(iphoto_min, out_root / "client" / "scripts" / "requirements-iphoto-min.txt")
+    else:
+        print("[警告] 未找到 requirements-iphoto-min.txt", flush=True)
 
     sd = out_root / "third_party" / "PySceneDetect"
     if with_scenedetect and (sd / "scenedetect" / "__init__.py").is_file():
@@ -399,7 +602,19 @@ def _embed_python_runtime(
         else:
             print("[警告] 未找到 requirements-iphoto.txt，跳过图库 extras", flush=True)
 
-    check = "import PySide6, numpy; print('runtime OK', PySide6.__version__)"
+    # 外发裁剪：WebEngine / scipy / 开发工具等（可省数百 MB）
+    _prune_embed_runtime(
+        runtime,
+        keep_vosk=with_vosk,
+        keep_maps_qt=with_maps,
+    )
+
+    check = (
+        "import PySide6, numpy, cv2; "
+        "from PySide6.QtWidgets import QApplication; "
+        "from PySide6.QtMultimedia import QMediaPlayer; "
+        "print('runtime OK', PySide6.__version__)"
+    )
     if with_iphoto_extras:
         check = (
             "import PySide6, numpy, importlib.util; "
@@ -457,9 +672,11 @@ def _bundle_vcruntime(out_bin: Path) -> int:
     """把 VC++ 运行库 DLL 拷进引擎目录，避免对方安装 Visual Studio / 手动装运行库。"""
     sources = _find_vcruntime_sources()
     n = 0
+    missing: list[str] = []
     for name in VCRUNTIME_DLLS:
         dst = out_bin / name
         if dst.is_file():
+            n += 1
             continue
         src = None
         for d in sources:
@@ -469,14 +686,32 @@ def _bundle_vcruntime(out_bin: Path) -> int:
                 src = cand
                 break
         if src is None:
+            missing.append(name)
             continue
         _copy_file(src, dst)
         n += 1
+    if missing:
+        print(f"[提示] 未找到部分 VC++ CRT: {', '.join(missing)}", flush=True)
     if n:
-        print(f"[拷贝] VC++ 运行库 DLL ×{n}（对方无需装 Visual Studio）", flush=True)
+        print(f"[拷贝] VC++ 运行库 DLL 就绪 ×{n}（对方无需装 Visual Studio）", flush=True)
     else:
-        print("[提示] 未找到可随包的 VC++ CRT；多数 Win10/11 仍可直接运行", flush=True)
+        print("[警告] 未找到可随包的 VC++ CRT；干净机可能无法启动 media_player", flush=True)
     return n
+
+
+# 播放链路硬依赖（验收缺失则失败；本机有 VS PATH 时不易察觉）
+PLAYBACK_REQUIRED_GLOBS = (
+    "avcodec-*.dll",
+    "avformat-*.dll",
+    "avutil-*.dll",
+    "swscale-*.dll",
+    "swresample-*.dll",
+)
+PLAYBACK_REQUIRED_NAMES = (
+    "glew32.dll",
+    "vcruntime140.dll",
+    "msvcp140.dll",
+)
 
 
 def _find_vcvars64() -> Path | None:
@@ -610,9 +845,10 @@ if not exist "%BIN%\media_cli.exe" (
   exit /b 1
 )
 
-set "PATH=%BIN%;%PATH%"
+rem Do NOT prepend BIN to PATH (poisons Qt FFmpeg audio); child procs set their own PATH
 set PYTHONUTF8=1
 set PYTHONNOUSERSITE=1
+set QT_MEDIA_BACKEND=windows
 
 if exist "%~dp0client\scripts\main.pyc" (
   start "" "%PY%" "%~dp0client\scripts\main.pyc"
@@ -630,8 +866,8 @@ exit /b 0
 setlocal
 cd /d "%~dp0"
 where python >nul 2>&1 || (echo Need system Python & pause & exit /b 1)
-set "PATH=%~dp0build_x64\bin\Release;%PATH%"
 set PYTHONUTF8=1
+set QT_MEDIA_BACKEND=windows
 python -m pip install -r "%~dp0client\scripts\requirements.txt" -q
 if exist "%~dp0client\scripts\main.pyc" (
   python "%~dp0client\scripts\main.pyc"
@@ -640,6 +876,12 @@ if exist "%~dp0client\scripts\main.pyc" (
 )
 if errorlevel 1 pause
 """
+    try:
+        body.encode("ascii")
+    except UnicodeEncodeError as e:
+        raise RuntimeError(
+            "启动 bat 内容必须是纯 ASCII（cmd 兼容）；请检查 _write_launcher 的 body 字符串"
+        ) from e
     bat.write_text(body, encoding="ascii", newline="\r\n")
     if exe:
         print("[提示] 请双击 MusicEditing.exe 启动（.bat 仅备用）", flush=True)
@@ -718,8 +960,16 @@ def _write_readme(
         f"  CUDA ORT EP: {'已包含' if with_cuda_ort else '未包含（默认）'}",
         f"  models: {'已包含' if with_models else '未包含'}",
         "",
-        "五、常见问题",
-        "  - 闪退：极少数机缺系统运行库时，装「VC++ 可再发行组件 x64」（不是 Visual Studio）。",
+        "  - 本机能播、别的电脑播不了 / 一点播放就跳片尾：",
+        "    1) 必须用本轮新打的包（启动器不再把引擎 DLL 塞进 PATH）；",
+        "    2) 确认环境 QT_MEDIA_BACKEND=windows（新包默认）；",
+        "    3) 看 docs\\log_playerbackend.txt / log_media_player.txt；",
+        "    4) 个人中心关掉 GPU 后再试。",
+        "  - 照片图库不可用：新包已装 jsonschema 等最小依赖；HEIC 需 --with-iphoto-extras。",
+        "  - 闪退 / 黑框狂闪：确认用 MusicEditing.exe（不要只拷半个文件夹）；",
+        "    仍闪退则装「VC++ 2015–2022 可再发行组件 x64」（不是 Visual Studio）：",
+        "    https://learn.microsoft.com/zh-cn/cpp/windows/latest-supported-vc-redist",
+        "  - 画面闪 / 黑屏但有声音：可更新显卡驱动，或设 MUSIC_SOFTWARE_GL=1 后重启。",
         "  - 抖音失败：下载页导入 Netscape cookies.txt。",
         "  - 演讲慢：个人中心开 GPU，准备 .gguf；需驱动支持 Vulkan。",
         "  - 照片图库：HEIC/地点离线地图为可选依赖；缺 HEIC 编解码或 maps/font 时会降级，",
@@ -741,6 +991,15 @@ def verify_portable_pack(out_root: Path, *, embed_python: bool, ship_source: boo
     for name in REQUIRED_BIN:
         if not (bin_dir / name).is_file():
             errors.append(f"缺少 {bin_dir / name}")
+    # 播放硬依赖：缺了在本机常因 PATH/已装 VS 而「能播」，干净机则闪退/打不开
+    for pat in PLAYBACK_REQUIRED_GLOBS:
+        if not any(bin_dir.glob(pat)):
+            errors.append(f"缺少播放依赖 {pat}（应在 {bin_dir}）")
+    for name in PLAYBACK_REQUIRED_NAMES:
+        if not (bin_dir / name).is_file():
+            errors.append(f"缺少播放依赖 {bin_dir / name}")
+    if not any(bin_dir.glob("opencv_world*.dll")):
+        warns.append(f"缺少 opencv_world*.dll（滤镜/部分图像功能可能不可用）")
     bat = out_root / "启动 MusicEditing.bat"
     exe = out_root / "MusicEditing.exe"
     if not bat.is_file() and not exe.is_file():
@@ -775,7 +1034,7 @@ def verify_portable_pack(out_root: Path, *, embed_python: bool, ship_source: boo
         _die(f"便携包验收未通过（{len(errors)} 项）")
     for w in warns:
         print(f"[验收警告] {w}", flush=True)
-    print("[验收] 关键文件齐全", flush=True)
+    print("[验收] 关键文件齐全（含播放 DLL / VC CRT）", flush=True)
     return warns
 
 
@@ -825,6 +1084,7 @@ def pack(
     strict_no_source: bool = False,
     with_iphoto_extras: bool = False,
     with_maps: bool = False,
+    skip_tests: bool = True,
 ) -> Path:
     if not BIN.is_dir():
         _die(f"未找到 {BIN}，请先 .\\build_x64.bat 或 setup_llama_gpu.py vulkan")
@@ -966,11 +1226,15 @@ def pack(
     else:
         print("[跳过] models")
 
-    for name in ("test_video.mp4", "222222.mp4"):
+    for name in ("test_video.mp4", "222222.mp4", "测试视频.mp4"):
         src = ROOT / "tests" / name
         if src.is_file():
-            print(f"[拷贝] tests/{name}")
-            _copy_file(src, out_root / "tests" / name)
+            # 外发默认不带测试片（省体积）；需要时 --with-tests
+            if skip_tests:
+                print(f"[跳过] tests/{name}（外发瘦包）", flush=True)
+            else:
+                print(f"[拷贝] tests/{name}")
+                _copy_file(src, out_root / "tests" / name)
             break
 
     if embed_python:
@@ -978,6 +1242,8 @@ def pack(
             out_root,
             with_scenedetect=with_scenedetect,
             with_iphoto_extras=with_iphoto_extras,
+            with_vosk=with_llm,
+            with_maps=with_maps,
         )
         if with_scenedetect:
             _remove_shipped_scenedetect_sources(out_root)
@@ -1050,7 +1316,7 @@ def pack(
         if zip_path.exists():
             zip_path.unlink()
         print(f"[压缩] {zip_path.name} …")
-        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
             for dirpath, _dns, fns in os.walk(out_root):
                 for fn in fns:
                     fp = Path(dirpath) / fn

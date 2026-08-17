@@ -1,0 +1,8 @@
+# iPhotron 图库「能打开」最小依赖（外发包默认安装）
+# 完整 HEIC/RAW/地图等仍用 requirements-iphoto.txt + --with-iphoto-extras
+# 注意：不要加 imagehash（会拖进 scipy/pywt 上百 MB，业务未使用）
+jsonschema>=4
+Pillow>=10
+python-dateutil>=2
+xxhash>=3
+pyexiftool>=0.5.5
