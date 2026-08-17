@@ -4,7 +4,7 @@
 # 不要加：
 # - imagehash（拖 scipy/pywt）
 # - reverse-geocoder（也会拖 scipy ~40MB+）；geocoding 已软导入，缺则 GPS 地名降级
-# - mapbox-vector-tile（拖 shapely 等）；地图运行时已软导入，缺则地图不可用但不挡协调器
+# - mapbox-vector-tile（拖 shapely 等）；tile_parser / 地图运行时已软导入，缺则地图不可用但不挡协调器
 jsonschema>=4
 Pillow>=10
 python-dateutil>=2

@@ -118,7 +118,7 @@ class VideoPlayerWidget(QWidget):
         self._decode_token = 0
         self._seek_pending_resume: bool | None = None
         self._seek_busy = False
-        self._opencv_filter = load_app_config().get("opencv_filter", "clahe")
+        self._opencv_filter = load_app_config().get("opencv_filter", "off")
         _cfg = load_app_config()
         _pb = _cfg.get("opencv_filter_playback", "off").strip().lower()
         self._opencv_filter_playback = _pb not in ("0", "false", "off", "no")
@@ -126,6 +126,7 @@ class VideoPlayerWidget(QWidget):
         self._opencv_filter_active_device = "cpu"
         self._hw_decode_preferred = AppLogic().prefer_hw_decode
         self._hw_decode_active = False
+        self._eof_recovered_once = False
         self._audio_only = False
         self._audio_viz_token = 0
         # 音画双时钟：仅大偏差时软校正（常态 200~300ms 解码滞后不触发）
@@ -656,7 +657,21 @@ class VideoPlayerWidget(QWidget):
                 return
 
         self._hw_decode_active = info.hw_decode
-        self._apply_opencv_filter()
+        # 硬解 + OpenCV 滤镜在部分机器上会一路跳帧啃到 EOF（外发日志：无匹配 hw pixel + 假 EOF）
+        # 打开时先关滤镜拉首帧；滤镜仅在用户开启且非硬解预览时再套
+        if self._opencv_filter and self._opencv_filter != "off":
+            if self._hw_decode_active and not self._opencv_filter_playback:
+                try:
+                    self._backend.set_filter("off")
+                except Exception:
+                    pass
+            else:
+                self._apply_opencv_filter()
+        else:
+            try:
+                self._backend.set_filter("off")
+            except Exception:
+                pass
 
         self._current_path = os.path.abspath(path)
         self._duration_sec = info.duration_sec
@@ -699,7 +714,11 @@ class VideoPlayerWidget(QWidget):
         self._progress.setValue(0)
         self._update_time_label()
 
-        self._pull_and_show_frame(apply_filter=True)
+        # 首帧不用滤镜；硬解若把流啃光，下面探测失败会 CPU 重开
+        self._eof_recovered_once = False
+        self._pull_and_show_frame(apply_filter=False)
+        if not self._probe_and_recover_decoder():
+            log.warning("打开后首帧探测失败，已尝试 CPU 重开")
         self._refresh_filter_status()
         # 首帧滤镜后刷新标题中的 opencl/cpu
         if self._opencv_filter and self._opencv_filter != "off":
@@ -937,6 +956,20 @@ class VideoPlayerWidget(QWidget):
             self._backend.set_playback_scale(pw, ph)
 
         self._backend.resume()
+
+        # 打开阶段硬解若已把流读穿，resume 后仍 EOF；开播前强制 SEEK 对齐
+        try:
+            align = max(0.0, self._position_sec)
+            frame = self._backend.seek_and_frame(
+                align, min_ts=max(0.0, align - self._frame_interval * 0.5), apply_filter=False,
+            )
+            if frame:
+                ts, rgb, w, h = frame
+                self._show_frame(ts, rgb, w, h, update_progress=False)
+            else:
+                log.warning("开播对齐未拿到帧，稍后假 EOF 恢复会关硬解重试")
+        except Exception as e:
+            log.warning("开播视频对齐失败: %s", e)
 
         if self._has_audio:
             self._audio.play(self._position_sec)
@@ -1228,6 +1261,85 @@ class VideoPlayerWidget(QWidget):
 
 
 
+    def _probe_and_recover_decoder(self) -> bool:
+        """打开后同步探测能否出帧；失败则关硬解重开。"""
+        if not self._backend or not self._current_path:
+            return False
+        fut = self._decode_future
+        if fut is not None:
+            try:
+                fut.result(timeout=2.5)
+            except Exception:
+                pass
+            self._decode_future = None
+        try:
+            frame = self._backend.seek_and_frame(0.0, min_ts=0.0, apply_filter=False)
+            if frame:
+                ts, rgb, w, h = frame
+                self._show_frame(ts, rgb, w, h)
+                return True
+        except Exception as e:
+            log.warning("首帧探测异常: %s", e)
+        if not (self._hw_decode_preferred or self._hw_decode_active):
+            return False
+        log.warning("硬解首帧失败，改 CPU 重开")
+        return self._reopen_with_cpu_decode(show_frame=True)
+
+    def _reopen_with_cpu_decode(self, *, show_frame: bool) -> bool:
+        if not self._backend or not self._current_path:
+            return False
+        path = self._current_path
+        self._hw_decode_preferred = False
+        self._decode_token += 1
+        self._decode_future = None
+        try:
+            self._backend.set_hwaccel(False)
+            info = self._backend.open(path)
+            self._hw_decode_active = bool(info.hw_decode)
+            try:
+                self._backend.set_filter("off")
+            except Exception:
+                pass
+            if not show_frame:
+                return True
+            frame = self._backend.seek_and_frame(0.0, min_ts=0.0, apply_filter=False)
+            if not frame:
+                return False
+            ts, rgb, w, h = frame
+            self._show_frame(ts, rgb, w, h)
+            return True
+        except Exception as e:
+            log.error("CPU 重开失败: %s", e)
+            return False
+
+    def _try_recover_decode_after_eof(self) -> bool:
+        """播放早期持续 FRAME_EOF：关硬解重开并对齐音频时钟。"""
+        if self._eof_recovered_once or self._audio_only or not self._backend:
+            return False
+        self._eof_recovered_once = True
+        pos = 0.0
+        if self._has_audio:
+            try:
+                pos = max(0.0, float(self._audio.position_sec()))
+            except Exception:
+                pos = max(0.0, self._position_sec)
+        else:
+            pos = max(0.0, self._position_sec)
+        log.warning("播放早期假 EOF，关硬解重开并对齐 pos=%.2f", pos)
+        if not self._reopen_with_cpu_decode(show_frame=False):
+            return False
+        try:
+            frame = self._backend.seek_and_frame(pos, min_ts=max(0.0, pos - self._frame_interval), apply_filter=False)
+            if frame:
+                ts, rgb, w, h = frame
+                self._show_frame(ts, rgb, w, h, update_progress=False)
+            self._last_shown_frame_ts = pos - self._frame_interval
+            self._backend.resume()
+            return True
+        except Exception as e:
+            log.warning("EOF 恢复对齐失败: %s", e)
+            return False
+
     def _schedule_tick(self, delay_ms: int | None = None):
         if not self._playing or self._seeking:
             return
@@ -1256,6 +1368,17 @@ class VideoPlayerWidget(QWidget):
                 self._duration_sec > 0
                 and self._position_sec >= self._duration_sec - 0.35
             )
+            # 开播不久就持续 EOF：硬解把流啃光的典型外发症状（有声无画）
+            if (
+                self._eof_streak >= 2
+                and not near_end
+                and self._position_sec < 2.5
+                and self._duration_sec > 1.5
+                and self._try_recover_decode_after_eof()
+            ):
+                self._eof_streak = 0
+                self._schedule_tick(self._sync_timer_ms)
+                return
             if self._eof_streak < 3 and not near_end:
                 log.warning(
                     "疑似假 EOF streak=%d pos=%.2f dur=%.2f，继续播",

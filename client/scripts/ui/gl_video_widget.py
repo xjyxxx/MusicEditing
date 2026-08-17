@@ -5,7 +5,9 @@ from __future__ import annotations
 import array
 
 from PySide6.QtCore import Qt, QSize, QRectF, QPointF, Signal
-from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPolygonF, QSurfaceFormat, QMouseEvent
+from PySide6.QtGui import (
+    QBrush, QColor, QImage, QMouseEvent, QPainter, QPixmap, QPolygonF, QSurfaceFormat,
+)
 from PySide6.QtOpenGL import (
     QOpenGLBuffer,
     QOpenGLShader,
@@ -14,7 +16,7 @@ from PySide6.QtOpenGL import (
     QOpenGLVertexArrayObject,
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QLabel, QWidget
 
 GL_FLOAT = 0x1406
 GL_COLOR_BUFFER_BIT = 0x00004000
@@ -98,8 +100,12 @@ def _draw_frame_letterbox(
     painter.drawImage(target, image)
 
 
-class SoftVideoWidget(QWidget):
-    """纯软件绘制（QPainter）。OpenGL 不可用时的可靠回退，避免有声黑屏。"""
+class SoftVideoWidget(QLabel):
+    """用 QLabel/setPixmap 显示帧。
+
+    注意：全局 QSS 下自定义 QWidget.paintEvent 常被样式盖住（有声无画）。
+    QLabel.setPixmap 不受此影响，外发包必须走这条路径。
+    """
 
     clicked = Signal()
     renderReady = Signal()
@@ -107,11 +113,19 @@ class SoftVideoWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("SoftVideoDisplay")
         self.setMinimumHeight(240)
-        self.setAutoFillBackground(True)
-        pal = self.palette()
-        pal.setColor(self.backgroundRole(), QColor(8, 10, 14))
-        self.setPalette(pal)
+        self.setAlignment(Qt.AlignCenter)
+        self.setScaledContents(False)
+        self.setWordWrap(True)
+        # 本地样式压过全局 QWidget 规则，保证底色可见
+        self.setStyleSheet(
+            "QLabel#SoftVideoDisplay {"
+            "  background-color: #080A0E;"
+            "  color: #8A93A6;"
+            "  border: none;"
+            "}"
+        )
         self.setCursor(Qt.PointingHandCursor)
         self._placeholder = "请打开本地视频或音乐"
         self._has_frame = False
@@ -122,6 +136,7 @@ class SoftVideoWidget(QWidget):
         self._view_zoom = 1.0
         self._gl_error = "software"
         self._ready_emitted = False
+        self.setText(self._placeholder)
 
     @property
     def gl_ready(self) -> bool:
@@ -134,14 +149,15 @@ class SoftVideoWidget(QWidget):
     def set_placeholder(self, text: str) -> None:
         self._placeholder = text or ""
         if not self._has_frame:
-            self.update()
+            self.clear()
+            self.setText(self._placeholder)
 
     def set_paused_overlay(self, paused: bool) -> None:
         paused = bool(paused)
         if self._paused_overlay == paused:
             return
         self._paused_overlay = paused
-        self.update()
+        self._refresh_pixmap()
 
     def set_photo_adjustments(
         self, exposure: float = 0.0, contrast: float = 0.0,
@@ -153,20 +169,21 @@ class SoftVideoWidget(QWidget):
             max(-1.0, min(1.0, float(saturation))),
             max(-1.0, min(1.0, float(temperature))),
         )
-        self.update()
+        self._refresh_pixmap()
 
     def set_view_zoom(self, zoom: float = 1.0) -> None:
         value = max(0.25, min(4.0, float(zoom)))
         if abs(value - self._view_zoom) < 1e-6:
             return
         self._view_zoom = value
-        self.update()
+        self._refresh_pixmap()
 
     def clear_frame(self) -> None:
         self._has_frame = False
         self._pending_keep = None
         self._current_image = None
-        self.update()
+        self.clear()
+        self.setText(self._placeholder)
 
     def set_rgb_frame(self, rgb: bytes | bytearray, width: int, height: int) -> None:
         if width <= 0 or height <= 0:
@@ -174,15 +191,13 @@ class SoftVideoWidget(QWidget):
         need = width * height * 3
         if len(rgb) < need:
             return
-        if isinstance(rgb, bytes) and len(rgb) == need:
-            keep = rgb
-        else:
-            keep = bytes(rgb[:need])
-        img = QImage(keep, width, height, width * 3, QImage.Format_RGB888)
+        # 必须 copy：SHM/可复用 buffer 下一帧会被覆盖；QLabel 也要独立像素
+        keep = bytes(rgb[:need])
+        img = QImage(keep, width, height, width * 3, QImage.Format_RGB888).copy()
         self._pending_keep = keep
         self._current_image = img
         self._has_frame = True
-        self.update()
+        self._refresh_pixmap()
         if not self._ready_emitted:
             self._ready_emitted = True
             self.renderReady.emit()
@@ -194,7 +209,7 @@ class SoftVideoWidget(QWidget):
         self._pending_keep = None
         self._current_image = img
         self._has_frame = True
-        self.update()
+        self._refresh_pixmap()
         if not self._ready_emitted:
             self._ready_emitted = True
             self.renderReady.emit()
@@ -205,21 +220,30 @@ class SoftVideoWidget(QWidget):
     def cleanup_gl(self) -> None:
         return
 
-    def paintEvent(self, event) -> None:  # noqa: ARG002
-        painter = QPainter(self)
+    def resizeEvent(self, event) -> None:  # noqa: ANN001
+        super().resizeEvent(event)
+        if self._has_frame:
+            self._refresh_pixmap()
+
+    def _refresh_pixmap(self) -> None:
+        if not self._has_frame or self._current_image is None or self._current_image.isNull():
+            self.clear()
+            self.setText(self._placeholder)
+            return
+        w = max(1, self.width())
+        h = max(1, self.height())
+        # 在离屏图上 letterbox + 可选暂停图标，再交给 QLabel
+        canvas = QImage(w, h, QImage.Format_RGB888)
+        canvas.fill(QColor(8, 10, 14))
+        painter = QPainter(canvas)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(self.rect(), QColor(8, 10, 14))
-        if self._has_frame and self._current_image is not None:
-            _draw_frame_letterbox(
-                painter, self._current_image, self.width(), self.height(), self._view_zoom,
-            )
-        else:
-            painter.setPen(Qt.gray)
-            painter.drawText(self.rect(), Qt.AlignCenter, self._placeholder)
+        _draw_frame_letterbox(painter, self._current_image, w, h, self._view_zoom)
         if self._paused_overlay:
-            _draw_play_icon(painter, self.width(), self.height())
+            _draw_play_icon(painter, w, h)
         painter.end()
+        self.setText("")
+        self.setPixmap(QPixmap.fromImage(canvas))
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton:

@@ -1,7 +1,7 @@
 # 首页播放器：解码 / 接口调用链
 
 > 视频：`media_player.exe`（FFmpeg）解码 RGB → **命名共享内存双缓冲** → Python 上屏  
-> 显示：`GlVideoWidget`（兼容 Profile + GLSL 120）；失败则换 `SoftVideoWidget`（QPainter），避免便携包「有声无画」  
+> 显示：首页默认 `SoftVideoWidget`（**QLabel.setPixmap**，避开全局 QSS 盖住 paintEvent 导致有声无画）；`MUSIC_GL_VIDEO=1` 才用 OpenGL  
 > 音频：同文件走 Qt `QMediaPlayer`，不经 C++  
 > 协议：子进程 **stdin 命令 / stdout 一行响应**；日志走 stderr  
 > 预取：PlayerBackend 1 帧槽 + UI 侧 1 帧 lookahead；`FrameStats.from_prefetch`  
@@ -21,7 +21,7 @@ client/src/core/video_player_engine.cpp    VideoPlayerEngine
 shared/src/frame_shm.cpp                   FrameSharedMemory
 ```
 
-**有声无画（外发包）：** 部分环境 OpenGL Shader「成功」但纹理全黑。首页预览默认 `SoftVideoWidget`（QPainter）；`MUSIC_GL_VIDEO=1` 才用 `GlVideoWidget`（GLSL 120）。照片编辑器仍优先 GPU。
+**有声无画（外发包）：** 全局 QSS 会盖住自定义 `QWidget.paintEvent`；首页用 `SoftVideoWidget`（QLabel.setPixmap）。旧 OpenGL 路径在部分环境还会「成功但全黑」。`MUSIC_GL_VIDEO=1` 才启用 GL。
 
 ---
 

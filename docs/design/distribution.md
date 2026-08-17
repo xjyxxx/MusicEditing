@@ -274,10 +274,11 @@ REM   update_check_on_startup=true
 5. 若闪退 / **黑框狂闪**：装 [VC++ 可再发行组件 x64](https://learn.microsoft.com/zh-cn/cpp/windows/latest-supported-vc-redist)（小运行库，不是 VS）；务必用完整解压目录里的 `MusicEditing.exe`  
 6. 打开包内测试视频 → 播放 / Seek；若打不开：看播放器标题「打开失败…」，并打开 `docs\log_playerbackend.txt`、`docs\log_media_player.txt`  
 7. **一点播放就跳到最后一帧**：确认是本轮修复后的新包（启动器不再污染 PATH + `QT_MEDIA_BACKEND=windows`）；临时验证可在 bat 里设 `set QT_MEDIA_BACKEND=windows`  
-8. **有声音但画面黑**：首页预览已默认 `SoftVideoWidget`（软件绘制）。旧包请重打；临时可设 `MUSIC_SOFTWARE_GL=1`。若要坚持 GPU 显示设 `MUSIC_GL_VIDEO=1`（部分远程桌面仍可能黑屏）  
-9. **照片图库协调器 No module**：旧包裁掉 `QtPositioning` 或硬依赖 `reverse_geocoder`。新包保留 Positioning，且 geocoding/maps 软导入。请用最新 `只打包.bat` 重打。HEIC 另需 `--with-iphoto-extras`  
-10. 仍失败：个人中心关掉 GPU 再试；画面闪/黑可设 `MUSIC_SOFTWARE_GL=1` 后重启  
-11. 个人中心看试用配额；帮助「检查更新」在未配置 URL 时应提示未配置（勿指 127.0.0.1）
+8. **有声音但画面黑（无假 EOF）**：全局 QSS 盖住 paintEvent 时用 SoftVideo=`QLabel.setPixmap`；标题应有「软件画面」。  
+9. **照片图库协调器缺模块**（如 `mapbox_vector_tile`）：瘦包故意不装（会拖 shapely）。`tile_parser` 已软导入，缺则地图降级。请用含该修复的新包。  
+10. **有声音无画面 + 日志狂刷「假 EOF」/「无匹配的 hw pixel format」**：硬解像素格式回退曾返回 `NONE` 把流读穿。已修 C++ 回退 + 开播 SEEK 对齐 + 假 EOF 时自动关硬解重开。必须重编 `media_player` 后再 `只打包.bat`。  
+11. 仍失败：个人中心关掉 GPU 再试；画面闪/黑可设 `MUSIC_SOFTWARE_GL=1` 后重启  
+12. 个人中心看试用配额；帮助「检查更新」在未配置 URL 时应提示未配置（勿指 127.0.0.1）
 
 `pack_portable` / `pack_for_share` 验收现已**硬检查**播放 DLL（`avcodec/avutil/swscale…`、`glew32`、`vcruntime140`、`msvcp140`）；缺了会打包失败，避免「本机能播、干净机不能播」。
 

@@ -9,6 +9,7 @@ extern "C" {
 #include "libavcodec/avcodec.h"
 #include "libavutil/frame.h"
 #include "libavutil/hwcontext.h"
+#include "libavutil/pixdesc.h"
 #include "libavutil/pixfmt.h"
 }
 #else
@@ -16,6 +17,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/frame.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
 }
 #endif
@@ -23,6 +25,13 @@ extern "C" {
 namespace media::common {
 
 namespace {
+
+thread_local bool g_loggedHwPixFmtFallback = false;
+
+bool isHwPixelFormat(enum AVPixelFormat fmt) {
+    const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(fmt);
+    return desc && (desc->flags & AV_PIX_FMT_FLAG_HWACCEL) != 0;
+}
 
 enum AVPixelFormat getHwFormat(AVCodecContext* ctx, const enum AVPixelFormat* pix_fmts) {
     auto* hw = static_cast<HwAccelContext*>(ctx->opaque);
@@ -35,7 +44,20 @@ enum AVPixelFormat getHwFormat(AVCodecContext* ctx, const enum AVPixelFormat* pi
             return *p;
         }
     }
-    LOG_WARN("硬解：无匹配的 hw pixel format，回退软件解码");
+    // 勿返回 NONE（会导致解码失败/一路跳到 EOF）；选列表里第一个软件格式
+    for (const enum AVPixelFormat* p = pix_fmts; *p != AV_PIX_FMT_NONE; ++p) {
+        if (!isHwPixelFormat(*p)) {
+            if (!g_loggedHwPixFmtFallback) {
+                g_loggedHwPixFmtFallback = true;
+                LOG_WARN("硬解：无匹配的 hw pixel format，回退软件像素格式（后续同警告已抑制）");
+            }
+            return *p;
+        }
+    }
+    if (!g_loggedHwPixFmtFallback) {
+        g_loggedHwPixFmtFallback = true;
+        LOG_WARN("硬解：无可用像素格式");
+    }
     return AV_PIX_FMT_NONE;
 }
 
@@ -55,6 +77,7 @@ bool prepareVideoHwAccel(AVCodecContext* ctx, const AVCodec* codec, HwAccelConte
     if (!ctx || !codec || !hw || !hw->requested) {
         return false;
     }
+    g_loggedHwPixFmtFallback = false;
 
     enum AVPixelFormat hw_pix_fmt = AV_PIX_FMT_NONE;
     for (int i = 0;; ++i) {

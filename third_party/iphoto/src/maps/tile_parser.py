@@ -15,7 +15,10 @@ from pathlib import Path
 from threading import Lock
 from typing import Dict, Optional
 
-import mapbox_vector_tile
+try:
+    import mapbox_vector_tile
+except ImportError:  # pragma: no cover - lean host packs omit map deps
+    mapbox_vector_tile = None  # type: ignore[assignment]
 
 
 class TileLoadingError(Exception):
@@ -92,6 +95,10 @@ class TileParser:
         except OSError as exc:
             raise TileAccessError(f"Unable to read tile {z}/{x}/{y} from disk") from exc
 
+        if mapbox_vector_tile is None:
+            raise TileDecodeError(
+                "mapbox_vector_tile is not installed; vector tiles unavailable"
+            )
         try:
             return mapbox_vector_tile.decode(data)
         except Exception as exc:  # pragma: no cover - passthrough for third-party errors
