@@ -6,15 +6,20 @@ import math
 from functools import lru_cache
 from typing import Dict, Optional
 
-import reverse_geocoder  # type: ignore[import]
-
 from .logging import get_logger
+
+try:
+    import reverse_geocoder  # type: ignore[import]
+except ImportError:  # pragma: no cover - optional in lean host packs
+    reverse_geocoder = None  # type: ignore[assignment]
 
 
 @lru_cache(maxsize=1)
-def _geocoder() -> "reverse_geocoder.RGeocoder":
-    """Return a cached reverse geocoder instance."""
+def _geocoder():
+    """Return a cached reverse geocoder instance, or None if dependency missing."""
 
+    if reverse_geocoder is None:
+        return None
     return reverse_geocoder.RGeocoder(mode=1, verbose=False)
 
 
@@ -22,8 +27,12 @@ def _geocoder() -> "reverse_geocoder.RGeocoder":
 def _lookup_location_name(latitude_key: float, longitude_key: float) -> Optional[str]:
     """Resolve a stable location label for the rounded GPS coordinate."""
 
+    geocoder = _geocoder()
+    if geocoder is None:
+        return None
+
     try:
-        result = _geocoder().query([(latitude_key, longitude_key)])
+        result = geocoder.query([(latitude_key, longitude_key)])
     except Exception:
         return None
 
@@ -80,35 +89,24 @@ def resolve_location_name(gps: Optional[Dict[str, float]]) -> Optional[str]:
     Parameters
     ----------
     gps:
-        Mapping containing ``lat``/``lon`` keys (or ``latitude``/``longitude``
-        aliases). When either value is missing or the lookup fails the function
-        returns ``None``.
+        Mapping that may contain ``latitude`` / ``longitude`` keys.
     """
 
     if not gps:
         return None
-    latitude = _coerce_coordinate(gps.get("lat"))
-    if latitude is None:
-        latitude = _coerce_coordinate(gps.get("latitude"))
 
-    longitude = _coerce_coordinate(gps.get("lon"))
-    if longitude is None:
-        longitude = _coerce_coordinate(gps.get("longitude"))
-
+    latitude = _coerce_coordinate(gps.get("latitude"))
+    longitude = _coerce_coordinate(gps.get("longitude"))
     if latitude is None or longitude is None:
         return None
-
-    # City/admin names are stable at a much coarser resolution than the raw
-    # EXIF GPS coordinates, so rounding dramatically improves cache reuse for
-    # burst photos taken in the same area without changing the visible label.
-    latitude_key = round(latitude, 4) if math.isfinite(latitude) else latitude
-    longitude_key = round(longitude, 4) if math.isfinite(longitude) else longitude
-    location_name = _lookup_location_name(latitude_key, longitude_key)
-    if location_name is None:
+    if not math.isfinite(latitude) or not math.isfinite(longitude):
         return None
 
-    get_logger().debug("Resolved location display name: %s", location_name)
-    return location_name
-
-
-__all__ = ["resolve_location_name"]
+    # Quantize to reduce cache churn while keeping city-level precision.
+    latitude_key = round(latitude, 3)
+    longitude_key = round(longitude, 3)
+    try:
+        return _lookup_location_name(latitude_key, longitude_key)
+    except Exception as exc:  # pragma: no cover
+        get_logger(__name__).debug("reverse geocode failed: %s", exc)
+        return None

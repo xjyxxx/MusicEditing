@@ -40,7 +40,7 @@ python scripts\accept_portable.py
 | 诚实边界 | `.pyc` **仍可被反编译**，只是提高门槛；军工级需另行 Nuitka/加壳 |
 | 无黑框子进程 | 启动时 `install_hidden_console_patch`：media_cli/ffmpeg/media_player 等不再弹控制台（否则 pythonw 下狂闪且 UI 卡） |
 | 内嵌 runtime | 官方 embeddable Python + **瘦身后的** PySide6/numpy/opencv；默认**裁掉** WebEngine/Designer/3D 与未用的 scipy；vosk 仅 `full`/`--with-llm` |
-| 图库最小依赖 | 默认 `requirements-iphoto-min`（jsonschema/Pillow…，**不含** imagehash→scipy） |
+| 图库最小依赖 | 默认 `requirements-iphoto-min`（jsonschema/Pillow/xxhash/pyexiftool…，**不含** imagehash/reverse-geocoder→scipy）；地图/GPS 地名缺依赖时软降级，不挡协调器 |
 
 ```powershell
 # 唯一推荐外发入口（禁止带源码；默认瘦包）
@@ -274,9 +274,10 @@ REM   update_check_on_startup=true
 5. 若闪退 / **黑框狂闪**：装 [VC++ 可再发行组件 x64](https://learn.microsoft.com/zh-cn/cpp/windows/latest-supported-vc-redist)（小运行库，不是 VS）；务必用完整解压目录里的 `MusicEditing.exe`  
 6. 打开包内测试视频 → 播放 / Seek；若打不开：看播放器标题「打开失败…」，并打开 `docs\log_playerbackend.txt`、`docs\log_media_player.txt`  
 7. **一点播放就跳到最后一帧**：确认是本轮修复后的新包（启动器不再污染 PATH + `QT_MEDIA_BACKEND=windows`）；临时验证可在 bat 里设 `set QT_MEDIA_BACKEND=windows`  
-8. **照片图库打不开**：新包已带 `requirements-iphoto-min`；旧包会因缺 `jsonschema` 回退经典图库。HEIC 另需 `--with-iphoto-extras`  
-9. 仍失败：个人中心关掉 GPU 再试；画面闪/黑可设 `MUSIC_SOFTWARE_GL=1` 后重启  
-10. 个人中心看试用配额；帮助「检查更新」在未配置 URL 时应提示未配置（勿指 127.0.0.1）
+8. **有声音但画面黑**：首页预览已默认 `SoftVideoWidget`（软件绘制）。旧包请重打；临时可设 `MUSIC_SOFTWARE_GL=1`。若要坚持 GPU 显示设 `MUSIC_GL_VIDEO=1`（部分远程桌面仍可能黑屏）  
+9. **照片图库协调器 No module**：旧包裁掉 `QtPositioning` 或硬依赖 `reverse_geocoder`。新包保留 Positioning，且 geocoding/maps 软导入。请用最新 `只打包.bat` 重打。HEIC 另需 `--with-iphoto-extras`  
+10. 仍失败：个人中心关掉 GPU 再试；画面闪/黑可设 `MUSIC_SOFTWARE_GL=1` 后重启  
+11. 个人中心看试用配额；帮助「检查更新」在未配置 URL 时应提示未配置（勿指 127.0.0.1）
 
 `pack_portable` / `pack_for_share` 验收现已**硬检查**播放 DLL（`avcodec/avutil/swscale…`、`glew32`、`vcruntime140`、`msvcp140`）；缺了会打包失败，避免「本机能播、干净机不能播」。
 

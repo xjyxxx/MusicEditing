@@ -25,7 +25,11 @@ from maps.map_widget.native_osmand_widget import (
     NativeOsmAndWidget,
     probe_native_widget_runtime,
 )
-from maps.map_widget.qt_location_map_widget import QtLocationMapWidget
+
+try:
+    from maps.map_widget.qt_location_map_widget import QtLocationMapWidget
+except Exception:  # pragma: no cover - lean packs may prune QtPositioning
+    QtLocationMapWidget = None  # type: ignore[misc, assignment]
 
 
 logger = getLogger(__name__)
@@ -256,7 +260,7 @@ def _confirmed_gl_state(
         return "true"
     if isinstance(map_widget, MapWidget):
         return "false"
-    if isinstance(map_widget, QtLocationMapWidget):
+    if QtLocationMapWidget is not None and isinstance(map_widget, QtLocationMapWidget):
         return "unknown"
     return "unknown"
 

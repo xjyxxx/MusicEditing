@@ -1,6 +1,7 @@
 # 首页播放器：解码 / 接口调用链
 
-> 视频：`media_player.exe`（FFmpeg）解码 RGB → **命名共享内存双缓冲** → Python 上屏（失败回退写盘）  
+> 视频：`media_player.exe`（FFmpeg）解码 RGB → **命名共享内存双缓冲** → Python 上屏  
+> 显示：`GlVideoWidget`（兼容 Profile + GLSL 120）；失败则换 `SoftVideoWidget`（QPainter），避免便携包「有声无画」  
 > 音频：同文件走 Qt `QMediaPlayer`，不经 C++  
 > 协议：子进程 **stdin 命令 / stdout 一行响应**；日志走 stderr  
 > 预取：PlayerBackend 1 帧槽 + UI 侧 1 帧 lookahead；`FrameStats.from_prefetch`  
@@ -12,13 +13,15 @@
 
 ```
 client/scripts/ui/video_player.py          VideoPlayerWidget
-client/scripts/ui/gl_video_widget.py       GlVideoWidget
+client/scripts/ui/gl_video_widget.py       GlVideoWidget / SoftVideoWidget
 client/scripts/core/player_backend.py      PlayerBackend（IPC + SHM + 预取）
 client/scripts/core/qt_audio_output.py     QtAudioOutput
 client/src/player_main.cpp                 media_player 命令循环
 client/src/core/video_player_engine.cpp    VideoPlayerEngine
 shared/src/frame_shm.cpp                   FrameSharedMemory
 ```
+
+**有声无画（外发包）：** 部分环境 OpenGL Shader「成功」但纹理全黑。首页预览默认 `SoftVideoWidget`（QPainter）；`MUSIC_GL_VIDEO=1` 才用 `GlVideoWidget`（GLSL 120）。照片编辑器仍优先 GPU。
 
 ---
 

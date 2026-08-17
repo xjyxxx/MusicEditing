@@ -9,7 +9,11 @@ from .layer import LayerPlan
 from .map_gl_widget import MapGLWidget, MapGLWindowWidget
 from .map_widget import MapWidget
 from .native_osmand_widget import NativeOsmAndWidget
-from .qt_location_map_widget import QtLocationMapWidget
+
+try:
+    from .qt_location_map_widget import QtLocationMapWidget
+except Exception:  # pragma: no cover - lean host packs may prune QtPositioning
+    QtLocationMapWidget = None  # type: ignore[misc, assignment]
 
 __all__ = [
     "MapWidget",

@@ -440,14 +440,10 @@ def _prune_embed_runtime(
         "*WebView*",
         "*CanBus*",
     ]
+    # 图库协调器导入链会碰到 maps → QtPositioning；裁掉会导致「No module named PySide6.QtPositioning」
+    # VirtualKeyboard 仍可删；Location/Positioning 体积相对小，默认保留
     if not keep_maps_qt:
-        name_globs.extend(
-            [
-                "*Location*",
-                "*Positioning*",
-                "*VirtualKeyboard*",
-            ]
-        )
+        name_globs.append("*VirtualKeyboard*")
     for pat in name_globs:
         for p in pyside.glob(pat):
             freed += _rm_tree_or_file(p)
@@ -512,15 +508,12 @@ def _prune_embed_runtime(
             "sensors",
             "sceneparsers",
             "assetimporters",
-            "geoservices",
-            "position",
             "texttospeech",
             "scxmldatamodel",
             "sqldrivers",
         ):
-            if keep_maps_qt and sub in ("geoservices", "position"):
-                continue
             freed += _rm_tree_or_file(plug / sub)
+        # 保留 geoservices / position：图库导入链可能引用 QtPositioning/Location
 
     print(f"[裁剪] runtime 已删约 {freed / (1024 ** 2):.0f} MB（WebEngine/scipy/工具等）", flush=True)
     return freed

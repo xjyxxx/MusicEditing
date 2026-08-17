@@ -159,6 +159,13 @@ class HomePage(QWidget):
 
         # 画面尺寸变化时重铺弹幕层
         self._player.display_widget.installEventFilter(self)
+        self._player.displayWidgetChanged.connect(self._on_display_widget_changed)
+
+    def _on_display_widget_changed(self, widget):
+        if widget is None:
+            return
+        widget.installEventFilter(self)
+        self._layout_marquee()
 
     def eventFilter(self, obj, event):
         if obj is self._player.display_widget and event.type() in (

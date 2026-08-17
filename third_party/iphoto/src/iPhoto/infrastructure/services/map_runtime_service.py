@@ -6,13 +6,6 @@ import os
 from pathlib import Path
 
 from PySide6.QtGui import QGuiApplication
-from maps.main import check_opengl_support, choose_default_map_source
-from maps.map_sources import (
-    has_usable_osmand_native_widget,
-    has_usable_osmand_search_extension,
-    prefer_osmand_native_widget,
-)
-from maps.map_widget.native_osmand_widget import probe_native_widget_runtime
 
 from ...application.ports import MapRuntimeCapabilities, MapRuntimePort
 
@@ -26,6 +19,18 @@ def _opengl_explicitly_disabled() -> bool:
 
 def _has_qt_application() -> bool:
     return QGuiApplication.instance() is not None
+
+
+def _unavailable_capabilities(message: str = "Map runtime unavailable.") -> MapRuntimeCapabilities:
+    return MapRuntimeCapabilities(
+        display_available=False,
+        preferred_backend="unavailable",
+        python_gl_available=False,
+        native_widget_available=False,
+        osmand_extension_available=False,
+        location_search_available=False,
+        status_message=message,
+    )
 
 
 class SessionMapRuntimeService(MapRuntimePort):
@@ -51,6 +56,20 @@ class SessionMapRuntimeService(MapRuntimePort):
         return self._capabilities
 
     def _detect_capabilities(self) -> MapRuntimeCapabilities:
+        # 瘦包可能未装 mapbox-vector-tile / 未带 maps 资源；缺依赖时降级为不可用，不阻断协调器
+        try:
+            from maps.main import check_opengl_support, choose_default_map_source
+            from maps.map_sources import (
+                has_usable_osmand_native_widget,
+                has_usable_osmand_search_extension,
+                prefer_osmand_native_widget,
+            )
+            from maps.map_widget.native_osmand_widget import probe_native_widget_runtime
+        except Exception:
+            return _unavailable_capabilities(
+                "Map dependencies missing (e.g. mapbox-vector-tile); map disabled."
+            )
+
         opengl_disabled = _opengl_explicitly_disabled()
         has_qt_app = _has_qt_application()
         python_gl_available = (
@@ -62,8 +81,7 @@ class SessionMapRuntimeService(MapRuntimePort):
         native_widget_available = False
         if (
             has_qt_app
-            and
-            not opengl_disabled
+            and not opengl_disabled
             and prefer_osmand_native_widget()
             and has_usable_osmand_native_widget(self._package_root)
         ):

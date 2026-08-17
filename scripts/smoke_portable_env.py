@@ -65,6 +65,7 @@ def _overlay_sources(pack: Path) -> None:
         "ui/video_player.py",
         "ui/main_window.py",
         "ui/gl_video_widget.py",
+        "ui/iphoto_host_page.py",
         "core/iphoto_bootstrap.py",
         "core/player_backend.py",
         "core/win_subprocess.py",
@@ -178,6 +179,8 @@ if mods is None:
     print("IPHOTO_FAIL", err)
     raise SystemExit(2)
 print("IPHOTO_OK", sorted(mods.keys()))
+from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
+print("COORDINATOR_OK", MainCoordinator.__name__)
 
 # --- 播放：OPEN + 连续 NEXT，不应立刻 EOF ---
 from core.player_backend import PlayerBackend

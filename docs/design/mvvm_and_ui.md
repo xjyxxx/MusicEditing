@@ -98,7 +98,7 @@
 ```
 HomePage
   ├─ VideoPlayerWidget（Python GUI）
-  │    ├─ GlVideoWidget（QOpenGLWidget）显示 RGB 帧；点击画面 → 未加载时打开文件对话框（同「打开文件」），已加载则暂停/继续；暂停时中央显示三角播放图标
+  │    ├─ SoftVideoWidget（默认软件绘制）/ GlVideoWidget（MUSIC_GL_VIDEO=1）；点击画面 → 未加载时打开文件对话框（同「打开文件」），已加载则暂停/继续；暂停时中央显示三角播放图标
   │    ├─ 视频：FFmpeg 解码画面 + Qt QMediaPlayer 音频主时钟；长播漂移可软校正（seek 对齐，见 player_decode_flow §5）
   │    ├─ 音乐：仅 Qt QMediaPlayer（mp3/wav/flac/m4a…），封面占位图
   │    ├─ 「打开文件」同时支持视频与音乐过滤器；「信息」→ ffprobe 媒体信息对话框
@@ -225,9 +225,9 @@ third_party/opengl/
 | CMake 目标 | `music_glew` → 链 `glew32.lib` + `opengl32` |
 | 宏 | `MUSIC_HAS_GLEW=1` |
 | C++ | `media_player` 链接 GLEW（预留原生 GL；当前解码仍写 RGB） |
-| **UI 显示** | ✅ `ui/gl_video_widget.py`：`QOpenGLWidget` 纹理绘制视频帧（等比 letterbox） |
+| **UI 显示** | ✅ `ui/gl_video_widget.py`：首页默认 `SoftVideoWidget`；可选 `GlVideoWidget` |
 
-显示链路：`FFmpeg 解码 → RGB → GlVideoWidget.set_rgb_frame → glTex + 着色器`。  
+显示链路：`FFmpeg 解码 → RGB → GlVideoWidget.set_rgb_frame`（GLSL 120）；失败换 `SoftVideoWidget`（QPainter）。
 OpenGL **实现**来自显卡驱动；GLEW 在 C++ 侧，UI 用 Qt OpenGL。详见 `third_party/opengl/README.md`。
 
 

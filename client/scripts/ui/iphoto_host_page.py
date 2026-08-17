@@ -402,6 +402,10 @@ class IPhotoHostPage(QWidget):
         if window is None or context is None or self._fallback is not None:
             return
         try:
+            from core.iphoto_bootstrap import ensure_iphoto_compat, ensure_iphoto_on_path
+
+            ensure_iphoto_on_path()
+            ensure_iphoto_compat()
             from iPhoto.gui.coordinators.main_coordinator import MainCoordinator
 
             for feature in ("preview", "people"):
@@ -440,6 +444,16 @@ class IPhotoHostPage(QWidget):
             QTimer.singleShot(0, lambda m=mode: self._apply_capability_hints(m))
             self._selection_timer.start()
             self._refresh_selection_chrome()
+        except ModuleNotFoundError as exc:
+            _log.exception("MainCoordinator start failed (missing module)")
+            missing = getattr(exc, "name", None) or str(exc)
+            QMessageBox.warning(
+                self,
+                "照片图库",
+                f"iPhotron 协调器启动失败：缺少模块「{missing}」\n\n"
+                "外发包请用最新 scripts\\只打包.bat 重打（含 requirements-iphoto-min）。\n"
+                "可点「经典图库」回退。",
+            )
         except Exception as exc:  # noqa: BLE001
             _log.exception("MainCoordinator start failed")
             QMessageBox.warning(

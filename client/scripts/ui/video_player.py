@@ -25,7 +25,7 @@ from core.player_backend import PlayerBackend
 from core.qt_audio_output import QtAudioOutput
 from core.app_logic import AppLogic, load_app_config
 from core.app_logger import setup_logging
-from ui.gl_video_widget import GlVideoWidget, _default_surface_format
+from ui.gl_video_widget import GlVideoWidget, SoftVideoWidget, _default_surface_format
 from ui.waveform_widget import WaveformWidget
 
 log = setup_logging("VideoPlayer", __import__("os").environ.get("MUSIC_LOG_LEVEL", "INFO"))
@@ -70,8 +70,7 @@ class VideoPlayerWidget(QWidget):
 
     统一播放器组件
 
-    - 视频：media_player.exe (FFmpeg) → OpenGL 纹理显示（GlVideoWidget）
-
+    - 视频：media_player.exe (FFmpeg) → SoftVideoWidget 软件显示（可选 GlVideoWidget）
     - 音频：Qt QMediaPlayer（仅音频轨，Windows 下更稳定）
 
     """
@@ -79,6 +78,7 @@ class VideoPlayerWidget(QWidget):
 
 
     fileOpened = Signal(str)
+    displayWidgetChanged = Signal(object)
 
 
 
@@ -140,7 +140,19 @@ class VideoPlayerWidget(QWidget):
         self._title = QLabel("未加载 · 支持视频 / 音乐")
         self._title.setObjectName("MutedText")
 
-        self._display = GlVideoWidget()
+        # 首页预览默认软件绘制：部分环境（远程桌面/Mesa/软件 GL）Shader「成功」但纹理全黑，
+        # 表现为「有声音无画面」。照片编辑器仍用 GlVideoWidget。要试 GPU 显示设 MUSIC_GL_VIDEO=1。
+        use_gl = (os.environ.get("MUSIC_GL_VIDEO") or "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        force_soft = (os.environ.get("MUSIC_SOFTWARE_GL") or "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        self._display: GlVideoWidget | SoftVideoWidget
+        if use_gl and not force_soft:
+            self._display = GlVideoWidget()
+        else:
+            self._display = SoftVideoWidget()
         self._display.set_placeholder(
             "请打开本地视频或音乐\n点击画面可选文件；播放中点击可暂停 / 继续"
         )
@@ -666,7 +678,7 @@ class VideoPlayerWidget(QWidget):
             os.path.basename(path),
             f"{info.width}x{info.height}",
             decode_hint,
-            "OpenGL",
+            "软件画面" if isinstance(self._display, SoftVideoWidget) else "OpenGL",
             audio_hint,
             "点击画面暂停/继续",
         ]
@@ -711,15 +723,42 @@ class VideoPlayerWidget(QWidget):
             self.play()
 
     def _on_gl_render_failed(self, reason: str):
-        """差显卡 / 远程桌面：GL 失败时控件内已软件回退；标题给一次提示。"""
+        """差显卡 / 远程桌面 / 便携包：换 SoftVideoWidget，避免坏 GL 上下文上有声黑屏。"""
         if self._gl_failed_once:
             return
         self._gl_failed_once = True
-        log.warning("OpenGL 显示失败，已软件回退: %s", reason)
+        log.warning("OpenGL 显示失败，切换软件绘制: %s", reason)
+
+        old = self._display
+        soft = SoftVideoWidget()
+        soft.set_placeholder(
+            "请打开本地视频或音乐\n点击画面可选文件；播放中点击可暂停 / 继续"
+        )
+        # 继承当前帧 / 暂停态，避免切换瞬间空白
+        try:
+            if getattr(old, "_current_image", None) is not None and not old._current_image.isNull():
+                soft.set_qimage(old._current_image)
+            soft.set_paused_overlay(bool(getattr(old, "_paused_overlay", False)))
+        except Exception:
+            pass
+
+        lay = self.layout()
+        if lay is not None:
+            lay.replaceWidget(old, soft)
+        soft.clicked.connect(self._on_display_clicked)
+        self._display = soft
+        try:
+            if isinstance(old, GlVideoWidget):
+                old.cleanup_gl()
+            old.deleteLater()
+        except Exception:
+            pass
+
         tip = "画面已改用软件绘制（OpenGL 不可用）"
         cur = self._title.text() or ""
         if tip not in cur:
             self._title.setText(f"{cur}  ·  {tip}" if cur else tip)
+        self.displayWidgetChanged.emit(soft)
 
     def _apply_opencv_filter(self):
         """应用当前滤镜模式与设备（未编译 OpenCV 时静默忽略）"""
@@ -1456,7 +1495,7 @@ class VideoPlayerWidget(QWidget):
             except Exception:
                 pass
             self._backend.shutdown()
-        if isinstance(self._display, GlVideoWidget):
+        if isinstance(self._display, (GlVideoWidget, SoftVideoWidget)):
             self._display.set_paused_overlay(False)
             self._display.clear_frame()
             self._display.cleanup_gl()
